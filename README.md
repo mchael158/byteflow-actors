@@ -6,11 +6,11 @@
 
 [English](README.md) · [Português (Brasil)](README.pt-BR.md)
 
-Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, and a supervisor — **one crate**.
+Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, named discovery (`register_name` / `whereis`), and a supervisor — **one crate**.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.2"
+byteflow-actors = "0.9.3"
 ```
 
 ```rust
@@ -21,13 +21,14 @@ Full documentation and examples: the crate README on [crates.io/crates/byteflow-
 
 ```text
 cargo run -p byteflow-actors --example ping_pong
+cargo run -p byteflow-actors --example atomic_actors
 cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
 **Not** a Tokio replacement / not distributed OTP. Host Rust owns I/O; Byteflow owns cheap flows.
 
-Atomic Hop (`Value::Message`): `cargo run -p byteflow-actors --example atomic_actors` — see `crates/byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
+Atomic Hop (`Value::Message`): see `crates/byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
 
 **Design guides** (every example is a doctest, so they cannot drift from the API):
 [atomic-hop](crates/byteflow/docs/atomic-hop.md) ·

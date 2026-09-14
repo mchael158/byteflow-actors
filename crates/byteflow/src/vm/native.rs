@@ -12,6 +12,8 @@ use crate::bytecode::{Cap, CapRights, NativeIdx, NativeMask, RevocationCell, Val
 
 use super::fault::Fault;
 
+pub use super::fault::NativeCallError;
+
 /// Result type for a native function.
 pub type NativeResult = Result<Value, Fault>;
 
@@ -230,12 +232,12 @@ pub fn expect_u64(args: &[Value], index: usize, fn_name: &str) -> Result<u64, Fa
 /// Per-flow native allowlist snapshot, checked before indexing the table.
 #[derive(Clone, Debug)]
 pub struct NativeGate {
-    pub has_native: bool,
-    pub mask: NativeMask,
-    pub authority_epoch: u64,
-    pub flow_cell: Arc<RevocationCell>,
-    pub native_epoch: u64,
-    pub native_cell: Arc<RevocationCell>,
+    has_native: bool,
+    mask: NativeMask,
+    authority_epoch: u64,
+    flow_cell: Arc<RevocationCell>,
+    native_epoch: u64,
+    native_cell: Arc<RevocationCell>,
 }
 
 impl NativeGate {
@@ -277,32 +279,10 @@ impl NativeGate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeCallError {
-    NoNativeRight,
-    IndexNotAllowlisted(NativeIdx),
-    IndexOutOfRange(NativeIdx),
-    Revoked,
-}
-
-impl std::fmt::Display for NativeCallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NativeCallError::NoNativeRight => f.write_str("CALL_NATIVE: flow lacks NATIVE right"),
-            NativeCallError::IndexNotAllowlisted(idx) => {
-                write!(f, "CALL_NATIVE: index {idx} not on allowlist")
-            }
-            NativeCallError::IndexOutOfRange(idx) => {
-                write!(f, "CALL_NATIVE: index {idx} out of range")
-            }
-            NativeCallError::Revoked => f.write_str("CALL_NATIVE: capability revoked"),
-        }
-    }
-}
-
-impl std::error::Error for NativeCallError {}
-
-/// Pure check — call from `CALL_NATIVE` **before** indexing `table.entries`.
+/// Host-side check against a [`Cap`] (not the interpreter path).
+///
+/// The VM uses [`check_native_gate`] on the per-flow snapshot. This helper
+/// is for embedders that hold a live `Cap` and want the same verdict.
 pub fn check_native_call(
     cap: &Cap,
     table: &NativeTable,

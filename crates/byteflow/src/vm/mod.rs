@@ -18,12 +18,11 @@ mod machine;
 mod native;
 mod result;
 
-pub use fault::Fault;
+pub use fault::{Fault, NativeCallError};
 pub use machine::{Vm, MAX_CALL_DEPTH};
 pub use native::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,
-    expect_u64, NativeCallError, NativeFn, NativeGate, NativeResult, NativeTable,
-    NativeTableBuilder, NativeTableError,
+    expect_u64, NativeFn, NativeGate, NativeResult, NativeTable, NativeTableBuilder,
+    NativeTableError,
 };
 pub use result::VmResult;
-pub use crate::bytecode::Value;

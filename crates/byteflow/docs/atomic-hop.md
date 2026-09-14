@@ -8,7 +8,7 @@ Hardware (`byteflow-hw`) was removed from the monorepo — do not restore it her
 Byteflow's concurrent unit is a **flow** (`Flow`, `FlowId`, `FlowHandle`, `FlowOutcome`) — not an “actor” API surface.
 
 Wire identity still uses `Value::Pid` (FlowId as `u64`) inside messages.
-**Addressing** for bytecode `Send` / `Ask` uses `Value::Cap` (FlowCap, ABI v5 / 0.9.2).
+**Addressing** for bytecode `Send` / `Ask` uses `Value::Cap` (FlowCap, ABI v5 / 0.9.3).
 Scalars include `Value::Str` / `Value::Bytes` in the constant pool; hops remain
 `Message`-only. Untrusted `.bf` loads reject `Cap` / `Pid` / `Message` in the
 pool unless [`TrustLevel::Trusted`](../src/bytecode/verify.rs) is set.
@@ -112,11 +112,50 @@ Runtime must use `Runtime::with_natives(chunk, std_native_table())`,
 
 ## Sample + refresh
 
+Runnable host sketch (same API the examples use):
+
+```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use byteflow::{FlowOutcome, Program, Runtime, Value, std_native_table};
+
+const TAG_PING: i32 = 10;
+const TAG_PONG: i32 = 11;
+
+let mut program = Program::new("ping-pong");
+let pong = program.function("pong", 0, |f| {
+    let msg = f.receive();
+    let payload = f.hop_payload(msg);
+    f.add_imm(payload, 1);
+    f.send_reply(msg, TAG_PONG, payload);
+    f.exit(payload);
+});
+program.function("main", 0, |f| {
+    let child = f.spawn(pong, 0);
+    let payload = f.load_i32(1);
+    let req = f.hop_fresh(TAG_PING, payload);
+    let rid = f.hop_request_id(req);
+    f.send(child, req);
+    let reply = f.receive_match_corr_imm(TAG_PONG as u16, rid);
+    let out = f.hop_payload(reply);
+    f.return_(out);
+});
+
+let rt = Runtime::with_natives(program.build(), std_native_table())?;
+let Some(main) = rt.function_index("main") else {
+    return Err("missing main".into());
+};
+let outcome = rt.spawn(main, &[])?.join();
+rt.shutdown();
+assert!(matches!(outcome, FlowOutcome::Completed(Value::Int(2))));
+# Ok(())
+# }
+```
+
 ```text
 # unit + sample tests
 cargo test -p byteflow-actors
 
-# demos
+# demos (assemble Program + run Runtime — see examples/)
 cargo run -p byteflow-actors --example ping_pong
 cargo run -p byteflow-actors --example atomic_actors
 

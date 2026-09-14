@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.2)
+## 7. FlowCap — Current Version (0.9.3)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -317,8 +317,10 @@ Native authorization is currently host-configured **and** gated per flow:
   full [`NativeMask`](crate::NativeMask) over the attached [`NativeTable`](crate::NativeTable);
 - bytecode `Spawn` attenuates that mask through [`Cap::attenuate`](crate::Cap::attenuate) (the only
   derivation path);
-- `CALL_NATIVE` runs [`check_native_call`](crate::check_native_call) **before**
-  indexing the function-pointer table.
+- `CALL_NATIVE` runs [`check_native_gate`](crate::check_native_gate) on the
+  flow's snapshot **before** indexing the function-pointer table.
+  [`check_native_call`](crate::check_native_call) is the same verdict for a
+  live host [`Cap`](crate::Cap).
 
 A numeric native index is still not a capability by itself (S7).
 
@@ -387,7 +389,9 @@ The following remain known limitations:
 - native functions that consume arbitrary host resources.
 
 Per-flow [`QuotaConfig`](crate::QuotaConfig) (CPU, heap, spawn/send rate)
-and [`NativeMask`](crate::NativeMask) allowlists are enforced as of 0.9.2.
+and [`NativeMask`](crate::NativeMask) allowlists are enforced as of 0.9.2
+(extended in 0.9.3 with sandbox presets, register heap charge, and host hop
+parity).
 [`QuotaConfig::permissive`](crate::QuotaConfig::permissive) is the default;
 [`QuotaConfig::sandbox`](crate::QuotaConfig::sandbox) is a starting point
 for untrusted modules (tune under load). `Str` / `Bytes` written into
@@ -427,7 +431,7 @@ because it originated outside bytecode.
 
 ---
 
-## 16. Capability Model (0.9.2 — implemented)
+## 16. Capability Model (0.9.3 — implemented)
 
 The security architecture is object-capability based:
 
@@ -511,6 +515,12 @@ Native allowlists, per-flow quotas (CPU / memory / spawn-send rate),
 `DELEGATE`, confined `SPAWN`, `LINK`/`MONITOR`/`ADMIN` rights, and
 `make_msg` without a forgeable sender. All derivation goes through
 [`Cap::attenuate`](crate::Cap::attenuate).
+
+### Phase 3 follow-ups (done — 0.9.3)
+
+Bytecode `register_name` / `whereis` (SEND Cap, never FlowId), interim
+heap charge for `Str`/`Bytes` in registers, `QuotaConfig::sandbox`,
+admin mem/send top-up, and host `Runtime::send` on the same hop auth path.
 
 ### Phase 4
 

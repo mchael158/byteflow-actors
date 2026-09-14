@@ -1,5 +1,33 @@
 use std::fmt;
 
+use crate::bytecode::NativeIdx;
+
+/// Why a `CallNative` was refused before the function pointer ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCallError {
+    NoNativeRight,
+    IndexNotAllowlisted(NativeIdx),
+    IndexOutOfRange(NativeIdx),
+    Revoked,
+}
+
+impl fmt::Display for NativeCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NativeCallError::NoNativeRight => f.write_str("CALL_NATIVE: flow lacks NATIVE right"),
+            NativeCallError::IndexNotAllowlisted(idx) => {
+                write!(f, "CALL_NATIVE: index {idx} not on allowlist")
+            }
+            NativeCallError::IndexOutOfRange(idx) => {
+                write!(f, "CALL_NATIVE: index {idx} out of range")
+            }
+            NativeCallError::Revoked => f.write_str("CALL_NATIVE: capability revoked"),
+        }
+    }
+}
+
+impl std::error::Error for NativeCallError {}
+
 /// Anything that can go wrong *inside* a running Flow's VM.
 ///
 /// A `Fault` is never a Rust panic — panics are reserved for genuine host
@@ -26,7 +54,6 @@ pub enum Fault {
     RegisterIndexOverflow { base: u8, offset: u8 },
     BadConstant { index: u32, pool_size: u32 },
     BadFunction { index: u32, table_size: u32 },
-    BadOpcodeByte(u8),
     /// Function call nesting exceeded `Vm::MAX_CALL_DEPTH`. Bytecode has no
     /// native stack overflow (frames are heap-allocated `Vec<Value>`s), so
     /// this is a deliberate, checked limit rather than a segfault.
@@ -42,11 +69,10 @@ pub enum Fault {
     /// A native function returned an error (host-side failure — I/O,
     /// invalid argument the Rust side rejected, capability denied, etc).
     /// The message is native-function-defined.
-    /// Host-side native refused the call (FFI error string).
     NativeError(String),
-    /// S7: CALL_NATIVE failed the allowlist / NATIVE-right / revocation check
-    /// before the function pointer was touched.
-    NativeDenied(String),
+    /// S7: `CallNative` failed the allowlist / NATIVE-right / revocation
+    /// check before the function pointer was touched.
+    NativeDenied(NativeCallError),
     /// Explicit `Trap` opcode, e.g. an assertion emitted by a compiler.
     Explicit(i32),
     /// Broken VM invariant (e.g. empty frame stack while running). Category D
@@ -54,6 +80,12 @@ pub enum Fault {
     Invariant(&'static str),
     /// Per-flow heap quota refused a `Str` / `Bytes` register write.
     QuotaExceeded(String),
+    /// Relative `Jump` / `Branch` target outside the code (paranoid mode only).
+    ///
+    /// Verified chunks never hit this — `verify` already proved every offset.
+    /// Without paranoid mode, a corrupt jump fail-opens as an implicit
+    /// `return Unit` (see `docs::vm_safety`).
+    BadJump { target: usize, code_len: usize },
 }
 
 impl fmt::Display for Fault {
@@ -73,7 +105,6 @@ impl fmt::Display for Fault {
                 f,
                 "register index r{base}+{offset} overflows the register index space (max r255)"
             ),
-            Fault::BadOpcodeByte(b) => write!(f, "unknown opcode byte 0x{b:02X}"),
             Fault::CallStackOverflow { depth } => write!(f, "call stack overflow at depth {depth}"),
             Fault::TypeMismatch { expected, got } => {
                 write!(f, "type mismatch: expected {expected}, got {got}")
@@ -82,10 +113,13 @@ impl fmt::Display for Fault {
                 write!(f, "native function index {index} out of range (table size {table_size})")
             }
             Fault::NativeError(msg) => write!(f, "native function error: {msg}"),
-            Fault::NativeDenied(msg) => write!(f, "{msg}"),
+            Fault::NativeDenied(err) => write!(f, "{err}"),
             Fault::Explicit(code) => write!(f, "explicit trap (code {code})"),
             Fault::Invariant(msg) => write!(f, "vm invariant broken: {msg}"),
             Fault::QuotaExceeded(msg) => write!(f, "{msg}"),
+            Fault::BadJump { target, code_len } => {
+                write!(f, "jump target {target} out of range (code length {code_len})")
+            }
         }
     }
 }

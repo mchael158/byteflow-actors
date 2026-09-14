@@ -1,14 +1,18 @@
 //! Compare interpreter vs JIT on a tight counting loop (`feature = "jit"`).
 //!
+//! Built only with the public [`byteflow`] facade.
+//!
 //! ```text
-//! cargo run --example jit_loop --features jit --release
+//! cargo run -p byteflow-actors --example jit_loop --features jit --release
 //! ```
 
 use std::time::Instant;
 
-use byteflow::{JitConfig, Program, Runtime, RuntimeConfig, Value};
+use byteflow::{
+    Chunk, FlowOutcome, JitConfig, Program, Runtime, RuntimeConfig, Value,
+};
 
-fn loop_chunk(iterations: i32) -> byteflow::Chunk {
+fn loop_chunk(iterations: i32) -> Chunk {
     let mut program = Program::new("jit-loop");
     program.function("main", 0, |f| {
         let limit = f.load_int(i64::from(iterations));
@@ -39,7 +43,7 @@ fn run_once(jit: bool) -> Result<(), Box<dyn std::error::Error>> {
     rt.shutdown();
     let elapsed = start.elapsed();
     match outcome {
-        byteflow::FlowOutcome::Completed(Value::Int(n)) => {
+        FlowOutcome::Completed(Value::Int(n)) => {
             println!("jit={jit} result={n} elapsed={elapsed:?} metrics={snapshot}");
             Ok(())
         }

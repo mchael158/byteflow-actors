@@ -112,7 +112,9 @@ make room, so reporting a delivery that never happened would be a lie.
 Configure via `RuntimeConfig.mailbox`:
 
 ```rust
-use byteflow::{MailboxBytes, MailboxCapacity, MailboxConfig, OverflowPolicy, RuntimeConfig};
+use byteflow::{
+    MailboxBytes, MailboxCapacity, MailboxConfig, OverflowPolicy, RuntimeConfig, DEFAULT_QUANTUM,
+};
 
 let mailbox = MailboxConfig::new(
     MailboxCapacity::DEFAULT,
@@ -126,10 +128,11 @@ let mailbox = match MailboxBytes::new(64 * 1024) {
 };
 let cfg = RuntimeConfig {
     workers: 2,
-    quantum: byteflow::DEFAULT_QUANTUM,
+    quantum: DEFAULT_QUANTUM,
     mailbox,
     ..Default::default()
 };
+let _ = cfg;
 ```
 
 `MailboxConfig::DEFAULT` is compile-time valid (256 hops, 4 MiB, Reject)
@@ -184,10 +187,12 @@ match refused {
 # }
 ```
 
-Note what the refusal does **not** do: it does not fail the sender. A
-bytecode `Send` to a full inbox logs the hop with its reason and drops it,
-because failing (or parking) the sending flow would stall the worker
-thread running it.
+Host `Runtime::send` to a full inbox under `Reject` returns
+`SendError::MailboxFull` and does **not** fail the sending flow (the
+host is not a bytecode actor). Bytecode `Send` / `Ask` to a full inbox
+park the **sender flow** (`WAITING_SEND`) and wake it when a slot
+frees. A hop larger than the whole byte budget is never parked — that
+wait could never complete.
 
 The default budget is deliberately larger than the decoder's 1 MiB blob
 ceiling: a bound must refuse abuse, not refuse a legal constant. Equal

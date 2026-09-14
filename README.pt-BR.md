@@ -5,11 +5,11 @@
 
 [English](README.md) · [Português (Brasil)](README.pt-BR.md)
 
-Concorrência embutível em Rust: bytecode com **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` só no `Send`), FlowCap (ABI v5) com atenuação e quotas por flow, e supervisor — **uma única crate**.
+Concorrência embutível em Rust: bytecode com **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` só no `Send`), FlowCap (ABI v5) com atenuação e quotas por flow, descoberta por nome (`register_name` / `whereis`), e supervisor — **uma única crate**.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.2"
+byteflow-actors = "0.9.3"
 ```
 
 ```rust
@@ -20,12 +20,14 @@ Documentação completa: [crates.io/crates/byteflow-actors](https://crates.io/cr
 
 ```text
 cargo run -p byteflow-actors --example ping_pong
+cargo run -p byteflow-actors --example atomic_actors
+cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
 **Não** substitui Tokio / **não** é OTP distribuído. O Rust hospedeiro fica com o I/O.
 
-Atomic Hop (`Value::Message`): `cargo run -p byteflow-actors --example atomic_actors` — ver `crates/byteflow/docs/atomic-hop.md`. Use `BYTEFLOW_LOG=info` para logs do scheduler no stderr.
+Atomic Hop (`Value::Message`): ver `crates/byteflow/docs/atomic-hop.md`. Use `BYTEFLOW_LOG=info` para logs do scheduler no stderr.
 
 **Guias de design** (todo exemplo é um doctest, então não podem divergir da API):
 [atomic-hop](crates/byteflow/docs/atomic-hop.md) ·

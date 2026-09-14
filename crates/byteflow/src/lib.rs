@@ -90,23 +90,46 @@
 //!
 //! # Quick start — Atomic Hop (ping-pong)
 //!
-//! Hop demos need the std native table (`make_msg` / `msg_*`):
+//! Assemble with [`Program`] / [`Fn`], then run on [`Runtime`]:
 //!
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use byteflow::{samples, std_native_table, FlowOutcome, Runtime, Value};
+//! use byteflow::{FlowOutcome, Program, Runtime, Value, std_native_table};
 //!
-//! let rt = Runtime::with_natives(samples::ping_pong(), std_native_table())?;
-//! let Some(main) = rt.function_index("main") else { return Ok(()); };
-//! let handle = rt.spawn(main, &[])?;
-//! let outcome = handle.join();
+//! const TAG_PING: i32 = 10;
+//! const TAG_PONG: i32 = 11;
+//!
+//! let mut program = Program::new("ping-pong");
+//! let pong = program.function("pong", 0, |f| {
+//!     let msg = f.receive();
+//!     let payload = f.hop_payload(msg);
+//!     f.add_imm(payload, 1);
+//!     f.send_reply(msg, TAG_PONG, payload);
+//!     f.exit(payload);
+//! });
+//! program.function("main", 0, |f| {
+//!     let child = f.spawn(pong, 0);
+//!     let payload = f.load_i32(1);
+//!     let req = f.hop_fresh(TAG_PING, payload);
+//!     let rid = f.hop_request_id(req);
+//!     f.send(child, req);
+//!     let reply = f.receive_match_corr_imm(TAG_PONG as u16, rid);
+//!     let out = f.hop_payload(reply);
+//!     f.return_(out);
+//! });
+//!
+//! let rt = Runtime::with_natives(program.build(), std_native_table())?;
+//! let Some(main) = rt.function_index("main") else {
+//!     return Err("missing main".into());
+//! };
+//! let outcome = rt.spawn(main, &[])?.join();
 //! rt.shutdown();
 //! assert!(matches!(outcome, FlowOutcome::Completed(Value::Int(2))));
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! More samples: [`samples::atomic_request_reply`], [`samples::ask_reply`],
+//! Built-in helpers for tests: [`samples::ping_pong`], [`samples::ask_reply`],
 //! [`samples::selective_receive`], forged-sender security regressions.
 //!
 //! # Collecting a result
@@ -157,7 +180,7 @@
 //! - [`docs::beam_mapping`] — BEAM / OTP mental model → Byteflow equivalents
 //! - [`docs::lifecycle`] — monitors, links, registry, `WAITING_SEND`
 //! - [`docs::mailbox`] — bounded inbox, overflow, lost-wakeup
-//! - [`docs::security`] — threat model, invariants S1–S7, Phase 3 (0.9.2)
+//! - [`docs::security`] — threat model, invariants S1–S7, Phase 3 (0.9.2+)
 //! - [`docs::error_model`] — fail-closed errors (no `unwrap`), bounded joins
 //! - [`docs::vm_safety`] — trust boundary: `verify` vs per-step `Fault`
 //!
@@ -241,6 +264,7 @@ pub use scheduler::{
 pub use scheduler::JitConfig;
 pub use vm::{
     expect_arg, expect_bool, expect_int, expect_message, expect_u64, check_native_call,
+    check_native_gate,
     Fault, NativeCallError, NativeFn, NativeGate, NativeResult, NativeTable, NativeTableBuilder,
     NativeTableError, Vm, VmResult, MAX_CALL_DEPTH,
 };

@@ -2,6 +2,45 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.3] — 2026-09-06
+
+Sandbox parity: named discovery in bytecode, host hops on the same auth
+path, and tighter quota presets / top-ups.
+
+### Added
+
+- [`Opcode::RegisterName`] / [`Opcode::Whereis`] (`0x62` / `0x63`) —
+  bytecode name registry. `whereis` mints a **SEND** Cap for the caller
+  (`mint_or_reuse`); it never returns a raw FlowId. Registering requires
+  `SEND` on self-authority (confined spawn cannot squat names). Host
+  `whereis` still returns the stored Cap. Sample [`named_service`].
+- [`QuotaConfig::permissive`] / [`QuotaConfig::sandbox`] — default remains
+  permissive. [`Runtime::admin_top_up_mem`] / [`Runtime::admin_top_up_send`]
+  are symmetric to CPU top-up.
+
+### Changed
+
+- Interim heap quota on `Str` / `Bytes` register stores (charge on write,
+  no release until the flow exits; same `Arc` in the same slot is not
+  charged twice). Hop payloads stay charged at `Send` / `Ask`.
+- Host [`Runtime::send`] goes through the same hop authentication
+  choke-point: `sender = FlowId::HOST` (`0`), `request_id` minted when
+  unset, payload Caps reissued via `reissue_for`. Host has no mailbox, so
+  `reply_cap` is `CapId::NONE`. `finalize_flow` refuses the reserved host
+  id.
+- Scheduler fail-closed: flow-id wrap, undeliverable mailbox hops, poison
+  paths that still hold a `Flow`, spawn mint failure kills the orphan
+  child, host send poison is `SendError::Unavailable`.
+
+[`Opcode::RegisterName`]: https://docs.rs/byteflow-actors/latest/byteflow/enum.Opcode.html
+[`Opcode::Whereis`]: https://docs.rs/byteflow-actors/latest/byteflow/enum.Opcode.html
+[`QuotaConfig::permissive`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html
+[`QuotaConfig::sandbox`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html
+[`Runtime::admin_top_up_mem`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
+[`Runtime::admin_top_up_send`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
+[`Runtime::send`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
+[`named_service`]: https://docs.rs/byteflow-actors/latest/byteflow/samples/fn.named_service.html
+
 ## [0.9.2] — 2026-09-04
 
 Security Phase 3: attenuation is the only grant path, natives and lifecycle
@@ -39,22 +78,6 @@ rights are gated, and each flow carries fail-closed quotas.
   `(tag, request_id)` without consuming unrelated hops.
 - Caps in a hop payload are reissued to the recipient (holder check, no
   escalation). Sample [`atomic_actors`]: server loop + two Ask clients.
-- [`Opcode::RegisterName`] / [`Opcode::Whereis`] (`0x62` / `0x63`) —
-  bytecode name registry. `whereis` mints a **SEND** Cap for the caller
-  (`mint_or_reuse`); it never returns a raw FlowId. Registering requires
-  `SEND` on self-authority (confined spawn cannot squat names). Host
-  `whereis` still returns the stored Cap.
-- Interim heap quota on `Str` / `Bytes` register stores (charge on write,
-  no release until the flow exits; same `Arc` in the same slot is not
-  charged twice). Hop payloads stay charged at `Send` / `Ask`.
-- [`QuotaConfig::permissive`] / [`QuotaConfig::sandbox`] — default remains
-  permissive. [`Runtime::admin_top_up_mem`] / [`Runtime::admin_top_up_send`]
-  are symmetric to CPU top-up.
-- Host [`Runtime::send`] goes through the same hop authentication
-  choke-point: `sender = FlowId::HOST` (`0`), `request_id` minted when
-  unset, payload Caps reissued via `reissue_for`. Host has no mailbox, so
-  `reply_cap` is `CapId::NONE`. `finalize_flow` refuses the reserved host
-  id.
 
 [`Cap::attenuate`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Cap.html
 [`NativeMask`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.NativeMask.html
@@ -67,13 +90,7 @@ rights are gated, and each flow carries fail-closed quotas.
 [`Fn::spawn_confined`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Fn.html
 [`Runtime::admin_kill`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
 [`Runtime::admin_top_up_cpu`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
-[`Opcode::RegisterName`]: https://docs.rs/byteflow-actors/latest/byteflow/enum.Opcode.html
-[`Opcode::Whereis`]: https://docs.rs/byteflow-actors/latest/byteflow/enum.Opcode.html
-[`QuotaConfig::permissive`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html
-[`QuotaConfig::sandbox`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html
-[`Runtime::admin_top_up_mem`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
-[`Runtime::admin_top_up_send`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
-[`Runtime::send`]: https://docs.rs/byteflow-actors/latest/byteflow/struct.Runtime.html
+[`atomic_actors`]: https://docs.rs/byteflow-actors/latest/byteflow/samples/fn.atomic_actors.html
 
 ## [0.9.0] — 2026-09-02
 

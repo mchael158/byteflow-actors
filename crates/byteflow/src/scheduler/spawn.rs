@@ -28,6 +28,16 @@ impl std::fmt::Display for ConfinedSpawnError {
 
 impl std::error::Error for ConfinedSpawnError {}
 
+impl From<ConfinedSpawnError> for super::error::SpawnError {
+    fn from(err: ConfinedSpawnError) -> Self {
+        match err {
+            ConfinedSpawnError::RateLimited => super::error::SpawnError::SpawnRateExceeded,
+            ConfinedSpawnError::SourceCapRevoked => super::error::SpawnError::ParentCapRevoked,
+            ConfinedSpawnError::MissingSpawnRight => super::error::SpawnError::MissingSpawnRight,
+        }
+    }
+}
+
 /// `parent_cap` is the parent's self-authority. Child rights come only from
 /// [`Cap::attenuate`] — no second grant path. `child_cell` must already be
 /// bound in the Cap table for `new_child_id`.

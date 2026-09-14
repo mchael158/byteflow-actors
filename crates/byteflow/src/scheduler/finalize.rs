@@ -81,6 +81,12 @@ impl WaitingSendIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DuplicateAsk;
 
+impl std::fmt::Display for DuplicateAsk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("duplicate in-flight Ask request_id")
+    }
+}
+
 pub struct AskWaitIndex {
     inner: Mutex<AskWaitInner>,
 }
@@ -133,6 +139,16 @@ impl AskWaitIndex {
         Ok(Some(target))
     }
 
+    /// Target this asker is registered against, if any.
+    ///
+    /// Used by `park_ask` after `park_filter` to close the race where
+    /// [`take_waiters_of`] removes the asker while they are still between
+    /// `insert` and park (`take_parked` was still `None`).
+    pub fn target_of(&self, asker: FlowId) -> Result<Option<FlowId>, RuntimeError> {
+        let g = sync_lock::lock(&self.inner, "AskWaitIndex::target_of")?;
+        Ok(g.by_asker.get(&asker).copied())
+    }
+
     pub fn take_waiters_of(&self, target: FlowId) -> Result<Vec<FlowId>, RuntimeError> {
         let mut g = sync_lock::lock(&self.inner, "AskWaitIndex::take_waiters_of")?;
         let Some(set) = g.by_target.remove(&target) else {
@@ -166,6 +182,31 @@ pub(crate) fn finalize_flow(
     }];
     while let Some(pending) = work.pop() {
         finalize_one(shared, pending, &mut work);
+    }
+}
+
+/// Write `value` into `dest_reg` after a scheduler effect / handoff.
+///
+/// On [`crate::vm::Fault`] (register OOB, quota exceeded, …) the flow is
+/// finalized as failed — callers must not keep running or re-enqueue it.
+/// Returns the flow only when the write succeeded.
+pub(crate) fn resume_or_fail(
+    shared: &Shared,
+    mut flow: Box<Flow>,
+    dest_reg: u8,
+    value: Value,
+) -> Option<Box<Flow>> {
+    match flow.vm.resume_with(dest_reg, value) {
+        Ok(()) => Some(flow),
+        Err(fault) => {
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed(fault.to_string()),
+                FlowExitReason::Fault,
+            );
+            None
+        }
     }
 }
 
@@ -280,17 +321,29 @@ pub(crate) fn deliver_down(shared: &Shared, event: DownEvent) {
         }
     };
     match mailbox.push_system(hop.clone()) {
-        Ok(Delivery::Handoff(mut owner)) => {
+        Ok(Delivery::Handoff(owner)) => {
             let _ = shared.ask_waits.remove_asker(owner.id);
-            if let Some(dest) = owner.last_receive_dest {
-                let _ = owner.vm.resume_with(dest, hop);
-                owner
-                    .metrics
-                    .messages_received
-                    .fetch_add(1, Ordering::Relaxed);
+            match owner.last_receive_dest {
+                Some(dest) => {
+                    let Some(owner) = resume_or_fail(shared, owner, dest, hop) else {
+                        return;
+                    };
+                    owner
+                        .metrics
+                        .messages_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    shared.injector.push(owner);
+                    wake_workers(shared);
+                }
+                None => {
+                    finalize_flow(
+                        shared,
+                        *owner,
+                        FlowOutcome::Failed("handoff missing dest register".into()),
+                        FlowExitReason::Fault,
+                    );
+                }
             }
-            shared.injector.push(owner);
-            wake_workers(shared);
         }
         Ok(_) => {}
         Err(e) => report_fault(e),
@@ -319,16 +372,32 @@ fn wake_orphaned_asks(shared: &Shared, target: FlowId, reason: FlowExitReason) {
             }
         };
         match mailbox.take_parked() {
-            Ok(Some(mut flow)) => {
-                if let Some(dest) = flow.last_receive_dest {
-                    let _ = flow.vm.resume_with(dest, hop.clone());
-                    flow.metrics
-                        .messages_received
-                        .fetch_add(1, Ordering::Relaxed);
+            Ok(Some(flow)) => {
+                match flow.last_receive_dest {
+                    Some(dest) => {
+                        let Some(flow) = resume_or_fail(shared, flow, dest, hop.clone())
+                        else {
+                            continue;
+                        };
+                        flow.metrics
+                            .messages_received
+                            .fetch_add(1, Ordering::Relaxed);
+                        shared.injector.push(flow);
+                        wake_workers(shared);
+                    }
+                    None => {
+                        finalize_flow(
+                            shared,
+                            *flow,
+                            FlowOutcome::Failed("handoff missing dest register".into()),
+                            FlowExitReason::Fault,
+                        );
+                    }
                 }
-                shared.injector.push(flow);
-                wake_workers(shared);
             }
+            // Not parked yet: `park_ask` inserts into the index *before*
+            // `park_filter`. That asker revalidates via `target_of` after
+            // parking and self-wakes with `TAG_SYS_EXIT` if membership is gone.
             Ok(None) => {}
             Err(e) => report_fault(e),
         }
@@ -413,5 +482,41 @@ fn collect_link_exit(shared: &Shared, peer: FlowId, work: &mut Vec<PendingExit>)
             outcome: FlowOutcome::Failed("linked exit (link)".into()),
             reason: FlowExitReason::Link,
         });
+    }
+}
+
+#[cfg(test)]
+mod ask_wait_tests {
+    use super::*;
+
+    #[test]
+    fn take_waiters_clears_membership_before_park() -> Result<(), RuntimeError> {
+        // Simulates the insert→park race: finalize's take_waiters_of runs
+        // while the asker is indexed but not yet parked. park_ask must see
+        // target_of == None and self-wake.
+        let idx = AskWaitIndex::new();
+        let asker = FlowId(7);
+        let target = FlowId(9);
+        assert!(idx.insert(asker, target, 1)?.is_ok());
+        assert_eq!(idx.target_of(asker)?, Some(target));
+
+        let waiters = idx.take_waiters_of(target)?;
+        assert_eq!(waiters, vec![asker]);
+        assert_eq!(idx.target_of(asker)?, None);
+        assert!(idx.take_waiters_of(target)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn target_of_tracks_insert_and_remove() -> Result<(), RuntimeError> {
+        let idx = AskWaitIndex::new();
+        let asker = FlowId(3);
+        let target = FlowId(5);
+        assert_eq!(idx.target_of(asker)?, None);
+        assert!(idx.insert(asker, target, 42)?.is_ok());
+        assert_eq!(idx.target_of(asker)?, Some(target));
+        assert_eq!(idx.remove_asker(asker)?, Some(target));
+        assert_eq!(idx.target_of(asker)?, None);
+        Ok(())
     }
 }

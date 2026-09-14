@@ -7,13 +7,13 @@ use crate::bytecode::Value;
 /// away (e.g. via a shared, growable register stack) in design notes §28-29.
 #[derive(Debug)]
 pub struct Frame {
-    pub function: u32,
-    pub pc: usize,
-    pub registers: Vec<Value>,
+    function: u32,
+    pc: usize,
+    registers: Vec<Value>,
     /// Register index in the *caller's* frame that will receive this
     /// frame's return value. `None` for the outermost frame, whose return
     /// value completes the Flow instead.
-    pub dest_reg: Option<u8>,
+    dest_reg: Option<u8>,
 }
 
 impl Frame {
@@ -24,5 +24,35 @@ impl Frame {
             registers: vec![Value::Unit; num_registers as usize],
             dest_reg,
         }
+    }
+
+    #[inline]
+    pub(crate) fn function(&self) -> u32 {
+        self.function
+    }
+
+    #[inline]
+    pub(crate) fn pc(&self) -> usize {
+        self.pc
+    }
+
+    #[inline]
+    pub(crate) fn set_pc(&mut self, pc: usize) {
+        self.pc = pc;
+    }
+
+    #[inline]
+    pub(crate) fn registers(&self) -> &[Value] {
+        &self.registers
+    }
+
+    #[inline]
+    pub(crate) fn registers_mut(&mut self) -> &mut [Value] {
+        &mut self.registers
+    }
+
+    #[inline]
+    pub(crate) fn dest_reg(&self) -> Option<u8> {
+        self.dest_reg
     }
 }

@@ -48,6 +48,10 @@ pub enum RuntimeError {
     CapIdCollision,
     /// `finalize_flow` was asked to tear down the reserved host FlowId.
     CannotFinalizeHostFlow,
+    /// `next_flow_id` wrapped onto [`crate::FlowId::HOST`] (`0`).
+    FlowIdExhausted,
+    /// Directory register saw a live id twice (wrap or double-spawn).
+    DuplicateFlowId,
 }
 
 impl fmt::Display for RuntimeError {
@@ -73,6 +77,12 @@ impl fmt::Display for RuntimeError {
             }
             RuntimeError::CannotFinalizeHostFlow => {
                 write!(f, "cannot finalize reserved host flow")
+            }
+            RuntimeError::FlowIdExhausted => {
+                write!(f, "flow id space exhausted (counter wrapped)")
+            }
+            RuntimeError::DuplicateFlowId => {
+                write!(f, "directory already has this flow id")
             }
         }
     }
@@ -146,10 +156,15 @@ pub enum SpawnError {
     InvalidCapability,
     /// Scheduler table poisoned (fail closed).
     Unavailable,
+    /// Flow-id counter wrapped onto the reserved host id.
+    FlowIdExhausted,
     /// Live flow count would exceed [`crate::RuntimeConfig::max_flows`].
     FlowLimit { current: usize, max: u32 },
     /// Bytecode spawn failed the quota / SPAWN-right / attenuation check.
     SpawnDenied(String),
+    SpawnRateExceeded,
+    ParentCapRevoked,
+    MissingSpawnRight,
     /// [`crate::ChildSpec::name`] is already in the runtime registry.
     NameTaken { name: String },
     /// OS refused to create a worker / timer / supervisor thread.
@@ -173,10 +188,16 @@ impl fmt::Display for SpawnError {
                 write!(f, "spawn: argument capability is unknown or not held")
             }
             SpawnError::Unavailable => write!(f, "spawn: runtime table unavailable"),
+            SpawnError::FlowIdExhausted => {
+                write!(f, "spawn: flow id space exhausted (counter wrapped)")
+            }
             SpawnError::FlowLimit { current, max } => {
                 write!(f, "spawn: live flow limit reached ({current}/{max})")
             }
             SpawnError::SpawnDenied(msg) => write!(f, "spawn: {msg}"),
+            SpawnError::SpawnRateExceeded => write!(f, "spawn: spawn rate exceeded"),
+            SpawnError::ParentCapRevoked => write!(f, "spawn: parent capability revoked"),
+            SpawnError::MissingSpawnRight => write!(f, "spawn: parent lacks SPAWN right"),
             SpawnError::NameTaken { name } => {
                 write!(f, "spawn: registry name {name:?} already taken")
             }

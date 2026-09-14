@@ -21,9 +21,9 @@ use crossbeam_deque::{Steal, Worker as LocalDeque};
 
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
-use super::finalize::finalize_flow;
+use super::finalize::{finalize_flow, request_kill, resume_or_fail, DuplicateAsk};
 use super::link::LinkId;
-use super::mailbox::{Delivery, ParkSender, WaitFilter};
+use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitFilter};
 use super::metrics::RuntimeMetrics;
 use super::monitor::{FlowExitReason, MonitorRef};
 use super::process::{Flow, FlowId, FlowOutcome, PendingSend};
@@ -244,12 +244,20 @@ fn drive_process(
     mut flow: Box<Flow>,
 ) {
     if let Some(msg) = flow.pending_message.take() {
-        if let Some(dest) = flow.last_receive_dest {
-            let _ = flow.vm.resume_with(dest, msg);
-            flow
-                .metrics
-                .messages_received
-                .fetch_add(1, Ordering::Relaxed);
+        match flow.last_receive_dest {
+            Some(dest) => {
+                let Some(f) = resume_or_fail(shared, flow, dest, msg) else {
+                    return;
+                };
+                flow = f;
+                flow.metrics
+                    .messages_received
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            None => {
+                finish_failed(shared, *flow, "pending hop missing dest register".into());
+                return;
+            }
         }
     }
 
@@ -258,7 +266,7 @@ fn drive_process(
             finalize_flow(
                 shared,
                 *flow,
-                FlowOutcome::Failed(format!("linked exit ({reason})")),
+                FlowOutcome::Failed(kill_outcome_message(reason)),
                 reason,
             );
             return;
@@ -266,6 +274,7 @@ fn drive_process(
         Ok(None) => {}
         Err(e) => {
             report_fault(e);
+            finish_failed(shared, *flow, "kill-signal table unavailable".into());
             return;
         }
     }
@@ -336,7 +345,11 @@ fn drive_process(
             VmResult::SelfPid { dest_reg } => {
                 match shared.caps.mint(flow.id, flow.id, CapRights::ADDRESSING) {
                     Ok(cap) => {
-                        let _ = flow.vm.resume_with(dest_reg, Value::Cap(cap));
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
+                        else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -377,9 +390,15 @@ fn drive_process(
                         ));
                         match shared.caps.mint(flow.id, child_id, CapRights::ADDRESSING) {
                             Ok(cap) => {
-                                let _ = flow.vm.resume_with(dest_reg, Value::Cap(cap));
+                                let Some(f) =
+                                    resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
+                                else {
+                                    return;
+                                };
+                                flow = f;
                             }
                             Err(e) => {
+                                request_kill(shared, child_id, FlowExitReason::Killed);
                                 finish_failed(shared, *flow, e.to_string());
                                 return;
                             }
@@ -414,11 +433,6 @@ fn drive_process(
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
-                let hop_cost = message.memory_size();
-                if let Err(e) = flow.quota.alloc(hop_cost) {
-                    finish_failed(shared, *flow, e.to_string());
-                    return;
-                }
                 let stamped = match authenticate_outgoing_message(
                     shared,
                     flow.id,
@@ -428,11 +442,15 @@ fn drive_process(
                 ) {
                     Ok(m) => Value::Message(m),
                     Err(e) => {
-                        flow.quota.free(hop_cost);
                         finish_failed(shared, *flow, e.to_string());
                         return;
                     }
                 };
+                let hop_cost = stamped.memory_size();
+                if let Err(e) = flow.quota.alloc(hop_cost) {
+                    finish_failed(shared, *flow, e.to_string());
+                    return;
+                }
                 RuntimeMetrics::inc(&shared.metrics.messages_sent);
                 flow.metrics
                     .messages_sent
@@ -456,6 +474,16 @@ fn drive_process(
                             stamped,
                             PendingSend::FireAndForget,
                         );
+                        return;
+                    }
+                    DeliverStatus::Gone => {
+                        flow.quota.free(hop_cost);
+                        finish_failed(shared, *flow, "send target gone".into());
+                        return;
+                    }
+                    DeliverStatus::Unavailable => {
+                        flow.quota.free(hop_cost);
+                        finish_failed(shared, *flow, "mailbox unavailable".into());
                         return;
                     }
                 }
@@ -482,7 +510,10 @@ fn drive_process(
                             flow.id.as_u64(),
                             msg
                         ));
-                        let _ = flow.vm.resume_with(dest_reg, msg);
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, msg) else {
+                            return;
+                        };
+                        flow = f;
                         admit_waiting_on(&flow.mailbox, shared, local);
                     }
                     Ok(None) => {
@@ -495,6 +526,7 @@ fn drive_process(
                     }
                     Err(e) => {
                         report_fault(e);
+                        finish_failed(shared, *flow, "mailbox unavailable".into());
                         return;
                     }
                 }
@@ -524,11 +556,6 @@ fn drive_process(
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
-                let hop_cost = request.memory_size();
-                if let Err(e) = flow.quota.alloc(hop_cost) {
-                    finish_failed(shared, *flow, e.to_string());
-                    return;
-                }
                 let stamped_msg = match authenticate_outgoing_message(
                     shared,
                     flow.id,
@@ -538,13 +565,17 @@ fn drive_process(
                 ) {
                     Ok(m) => m,
                     Err(e) => {
-                        flow.quota.free(hop_cost);
                         finish_failed(shared, *flow, e.to_string());
                         return;
                     }
                 };
                 let request_id = stamped_msg.request_id;
                 let stamped = Value::Message(stamped_msg);
+                let hop_cost = stamped.memory_size();
+                if let Err(e) = flow.quota.alloc(hop_cost) {
+                    finish_failed(shared, *flow, e.to_string());
+                    return;
+                }
                 // S2: expect FlowId of the Cap target (not CapId).
                 let filter = WaitFilter::Correlation {
                     expect_request_id: request_id,
@@ -584,6 +615,16 @@ fn drive_process(
                         );
                         return;
                     }
+                    DeliverStatus::Gone => {
+                        flow.quota.free(hop_cost);
+                        finish_failed(shared, *flow, "send target gone".into());
+                        return;
+                    }
+                    DeliverStatus::Unavailable => {
+                        flow.quota.free(hop_cost);
+                        finish_failed(shared, *flow, "mailbox unavailable".into());
+                        return;
+                    }
                 }
                 match flow.mailbox.try_pop_filter(filter) {
                     Ok(Some(reply)) => {
@@ -595,7 +636,10 @@ fn drive_process(
                             flow.id.as_u64(),
                             reply
                         ));
-                        let _ = flow.vm.resume_with(dest_reg, reply);
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, reply) else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Ok(None) => {
                         log::debug(format!(
@@ -607,6 +651,7 @@ fn drive_process(
                     }
                     Err(e) => {
                         report_fault(e);
+                        finish_failed(shared, *flow, "mailbox unavailable".into());
                         return;
                     }
                 }
@@ -632,7 +677,12 @@ fn drive_process(
                             Ok(n) => n,
                             Err(_) => i64::MAX,
                         };
-                        let _ = flow.vm.resume_with(dest_reg, Value::Int(ref_i));
+                        let Some(f) =
+                            resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
+                        else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -681,7 +731,12 @@ fn drive_process(
                             Ok(n) => n,
                             Err(_) => i64::MAX,
                         };
-                        let _ = flow.vm.resume_with(dest_reg, Value::Int(ref_i));
+                        let Some(f) =
+                            resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
+                        else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Ok(Err(e)) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -755,7 +810,10 @@ fn drive_process(
                 let target = match shared.registry.target(name.as_ref()) {
                     Ok(Some(id)) => id,
                     Ok(None) => {
-                        let _ = flow.vm.resume_with(dest_reg, Value::Unit);
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Unit) else {
+                            return;
+                        };
+                        flow = f;
                         continue;
                     }
                     Err(e) => {
@@ -766,7 +824,10 @@ fn drive_process(
                 match shared.directory.lookup(target) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        let _ = flow.vm.resume_with(dest_reg, Value::Unit);
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Unit) else {
+                            return;
+                        };
+                        flow = f;
                         continue;
                     }
                     Err(e) => {
@@ -779,7 +840,11 @@ fn drive_process(
                     .mint_or_reuse(flow.id, target, CapRights::SEND)
                 {
                     Ok(cap) => {
-                        let _ = flow.vm.resume_with(dest_reg, Value::Cap(cap));
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
+                        else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -811,7 +876,12 @@ fn drive_process(
                     want_native.as_ref(),
                 ) {
                     Ok(new_id) => {
-                        let _ = flow.vm.resume_with(dest_reg, Value::Cap(new_id));
+                        let Some(f) =
+                            resume_or_fail(shared, flow, dest_reg, Value::Cap(new_id))
+                        else {
+                            return;
+                        };
+                        flow = f;
                     }
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -826,6 +896,16 @@ fn drive_process(
 enum DeliverStatus {
     Ok,
     Full,
+    Gone,
+    Unavailable,
+}
+
+fn kill_outcome_message(reason: FlowExitReason) -> String {
+    match reason {
+        FlowExitReason::Link => format!("linked exit ({reason})"),
+        FlowExitReason::Killed => format!("killed ({reason})"),
+        other => format!("exit ({other})"),
+    }
 }
 
 fn admit_waiting_on(
@@ -834,7 +914,7 @@ fn admit_waiting_on(
     local: &LocalDeque<Box<Flow>>,
 ) {
     match mailbox.admit_waiting_sender() {
-        Ok(Some(mut sender)) => {
+        Ok(AdmitSender::Woken(mut sender)) => {
             if let Err(e) = shared.waiting_send_at.remove(sender.id) {
                 report_fault(e);
             }
@@ -864,7 +944,17 @@ fn admit_waiting_on(
                 }
             }
         }
-        Ok(None) => {}
+        Ok(AdmitSender::Idle) => {}
+        Ok(AdmitSender::Undeliverable(sender)) => {
+            if let Err(e) = shared.waiting_send_at.remove(sender.id) {
+                report_fault(e);
+            }
+            finish_failed(
+                shared,
+                *sender,
+                "hop larger than target mailbox budget".into(),
+            );
+        }
         Err(e) => report_fault(e),
     }
 }
@@ -877,10 +967,10 @@ fn deliver(
 ) -> DeliverStatus {
     let mailbox = match shared.directory.lookup(target) {
         Ok(Some(m)) => m,
-        Ok(None) => return DeliverStatus::Ok,
+        Ok(None) => return DeliverStatus::Gone,
         Err(e) => {
             report_fault(e);
-            return DeliverStatus::Ok;
+            return DeliverStatus::Unavailable;
         }
     };
     match mailbox.push(message.clone()) {
@@ -894,7 +984,7 @@ fn deliver(
             ));
             DeliverStatus::Ok
         }
-        Ok(Ok(Delivery::Handoff(mut flow))) => {
+        Ok(Ok(Delivery::Handoff(flow))) => {
             log::debug(format!(
                 "deliver handoff → flow#{} msg={}",
                 flow.id.as_u64(),
@@ -903,16 +993,23 @@ fn deliver(
             if let Err(e) = shared.ask_waits.remove_asker(flow.id) {
                 report_fault(e);
             }
-            if let Some(dest) = flow.last_receive_dest {
-                let _ = flow.vm.resume_with(dest, message);
-                flow
-                    .metrics
-                    .messages_received
-                    .fetch_add(1, Ordering::Relaxed);
+            match flow.last_receive_dest {
+                Some(dest) => {
+                    let Some(flow) = resume_or_fail(shared, flow, dest, message) else {
+                        return DeliverStatus::Ok;
+                    };
+                    flow.metrics
+                        .messages_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    local.push(flow);
+                    wake_workers(shared);
+                    DeliverStatus::Ok
+                }
+                None => {
+                    finish_failed(shared, *flow, "handoff missing dest register".into());
+                    DeliverStatus::Ok
+                }
             }
-            local.push(flow);
-            wake_workers(shared);
-            DeliverStatus::Ok
         }
         Ok(Err(full)) => {
             let reason = full.reason();
@@ -923,7 +1020,7 @@ fn deliver(
         }
         Err(e) => {
             report_fault(e);
-            DeliverStatus::Ok
+            DeliverStatus::Unavailable
         }
     }
 }
@@ -949,7 +1046,7 @@ fn park_ask(
     match shared.ask_waits.insert(asker, target, rid) {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
-            finish_failed(shared, *flow, CapError::DuplicateRequestId.to_string());
+            finish_failed(shared, *flow, DuplicateAsk.to_string());
             return;
         }
         Err(e) => {
@@ -961,21 +1058,19 @@ fn park_ask(
     let mailbox = flow.mailbox.clone();
     match mailbox.park_filter(flow, filter) {
         Ok(Ok(epoch)) => {
-            if !matches!(shared.directory.lookup(target), Ok(Some(_))) {
-                if let Ok(Some(mut parked)) = mailbox.take_parked() {
-                    let _ = shared.ask_waits.remove_asker(asker);
-                    let hop = Value::Message(Message::linked_exit(
-                        target.as_u64(),
-                        FlowExitReason::Fault.as_u64(),
-                    ));
-                    let _ = parked.vm.resume_with(dest_reg, hop);
-                    parked
-                        .metrics
-                        .messages_received
-                        .fetch_add(1, Ordering::Relaxed);
-                    shared.injector.push(parked);
-                    wake_workers(shared);
-                }
+            // Close insert→park race with `wake_orphaned_asks`: finalize may
+            // have already `take_waiters_of`'d us while `take_parked` was
+            // still `None`. Membership gone ⇒ self-wake with TAG_SYS_EXIT.
+            // Still indexed but target unregistered ⇒ same (insert after
+            // finalize's take_waiters missed us). Stale timeouts are safe
+            // via WaitEpoch if finalize wins the race after this check.
+            let still_waiting = matches!(
+                shared.ask_waits.target_of(asker),
+                Ok(Some(t)) if t == target
+            );
+            let target_alive = matches!(shared.directory.lookup(target), Ok(Some(_)));
+            if !still_waiting || !target_alive {
+                resume_ask_target_gone(shared, &mailbox, asker, dest_reg, target);
                 return;
             }
             if let Some(delay) = timeout {
@@ -987,7 +1082,10 @@ fn park_ask(
         Ok(Err(mut flow)) => {
             let _ = shared.ask_waits.remove_asker(asker);
             if let Some(msg) = flow.pending_message.take() {
-                let _ = flow.vm.resume_with(dest_reg, msg);
+                let Some(f) = resume_or_fail(shared, flow, dest_reg, msg) else {
+                    return;
+                };
+                flow = f;
                 flow.metrics
                     .messages_received
                     .fetch_add(1, Ordering::Relaxed);
@@ -995,10 +1093,38 @@ fn park_ask(
             shared.injector.push(flow);
             wake_workers(shared);
         }
-        Err(e) => {
+        Err((e, flow)) => {
             let _ = shared.ask_waits.remove_asker(asker);
             report_fault(e);
+            finish_failed(shared, *flow, "mailbox unavailable".into());
         }
+    }
+}
+
+/// Unpark an Ask whose target exited (or whose ask-wait membership was
+/// cleared) before / while parking, and resume with `TAG_SYS_EXIT`.
+fn resume_ask_target_gone(
+    shared: &Arc<Shared>,
+    mailbox: &Mailbox,
+    asker: FlowId,
+    dest_reg: u8,
+    target: FlowId,
+) {
+    if let Ok(Some(parked)) = mailbox.take_parked() {
+        let _ = shared.ask_waits.remove_asker(asker);
+        let hop = Value::Message(Message::linked_exit(
+            target.as_u64(),
+            FlowExitReason::Fault.as_u64(),
+        ));
+        let Some(parked) = resume_or_fail(shared, parked, dest_reg, hop) else {
+            return;
+        };
+        parked
+            .metrics
+            .messages_received
+            .fetch_add(1, Ordering::Relaxed);
+        shared.injector.push(parked);
+        wake_workers(shared);
     }
 }
 
@@ -1022,7 +1148,10 @@ fn park_on_mailbox(
         }
         Ok(Err(mut flow)) => {
             if let Some(msg) = flow.pending_message.take() {
-                let _ = flow.vm.resume_with(dest_reg, msg);
+                let Some(f) = resume_or_fail(shared, flow, dest_reg, msg) else {
+                    return;
+                };
+                flow = f;
                 flow.metrics
                     .messages_received
                     .fetch_add(1, Ordering::Relaxed);
@@ -1030,7 +1159,10 @@ fn park_on_mailbox(
             shared.injector.push(flow);
             wake_workers(shared);
         }
-        Err(e) => report_fault(e),
+        Err((e, flow)) => {
+            report_fault(e);
+            finish_failed(shared, *flow, "mailbox unavailable".into());
+        }
     }
 }
 
@@ -1096,6 +1228,15 @@ fn park_waiting_send(
                 shared,
                 *flow,
                 FlowOutcome::Failed("send target gone".into()),
+                FlowExitReason::Fault,
+            );
+        }
+        ParkSender::Undeliverable(flow) => {
+            let _ = shared.waiting_send_at.remove(flow.id);
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed("hop larger than target mailbox budget".into()),
                 FlowExitReason::Fault,
             );
         }

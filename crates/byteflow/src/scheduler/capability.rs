@@ -55,8 +55,6 @@ pub enum CapError {
     WrongTarget,
     /// Mutex poison — fail closed (never `into_inner`).
     Unavailable,
-    /// A second in-flight `Ask` reused a `request_id` still pending.
-    DuplicateRequestId,
 }
 
 impl std::fmt::Display for CapError {
@@ -67,9 +65,6 @@ impl std::fmt::Display for CapError {
             CapError::InsufficientRights => f.write_str("capability lacks required rights"),
             CapError::WrongTarget => f.write_str("capability target is not a flow"),
             CapError::Unavailable => f.write_str("capability table unavailable (poisoned lock)"),
-            CapError::DuplicateRequestId => {
-                f.write_str("duplicate in-flight request_id")
-            }
         }
     }
 }
@@ -337,6 +332,19 @@ impl CapTable {
     /// Still goes through [`Cap::attenuate`] (identity attenuation).
     pub fn reissue_for(&self, id: CapId, new_holder: FlowId) -> Result<CapId, CapError> {
         let cap = self.lookup(id)?.ok_or(CapError::Unknown)?;
+        let table = self.lock("CapTable::reissue_for")?;
+        let valid = match cap.cap.target {
+            CapTarget::Flow(fid) => match table.flow_cells.get(&fid) {
+                Some(cell) => cap.cap.is_valid(cell.as_ref()),
+                None => false,
+            },
+            CapTarget::NativeTable => cap.cap.is_valid(self.native_cell.as_ref()),
+            CapTarget::Scheduler => cap.cap.is_valid(self.scheduler_cell.as_ref()),
+        };
+        drop(table);
+        if !valid {
+            return Err(CapError::Unknown);
+        }
         let narrowed = cap.cap.attenuate(cap.cap.rights, cap.cap.native_mask.as_ref());
         self.insert(new_holder, narrowed).map_err(CapError::from)
     }

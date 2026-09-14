@@ -29,7 +29,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.2"
+byteflow-actors = "0.9.3"
 ```
 
 ```rust
@@ -150,10 +150,9 @@ cargo run --example atomic_actors
 # BYTEFLOW_LOG=info cargo run --example atomic_actors
 ```
 
-See [`docs/atomic-hop.md`](docs/atomic-hop.md). Built-in samples:
-`byteflow::samples::{ping_pong, atomic_actors, atomic_request_reply, add_forty_two, boom}`.
+Hop-heavy code uses helpers such as `hop_fresh`, `send`, `receive`, and `ask` on [`Fn`](https://docs.rs/byteflow-actors/latest/byteflow/struct.Fn.html) — see [`examples/ping_pong.rs`](examples/ping_pong.rs) (assembles `Program` + runs `Runtime` via `use byteflow::{...}`).
 
-Hop-heavy code uses helpers such as `make_msg`, `native1_from`, `send`, `receive`, and `ask` on [`Fn`](https://docs.rs/byteflow-actors/latest/byteflow/struct.Fn.html) — see [`samples/ping_pong.rs`](examples/ping_pong.rs) or `byteflow::samples::ping_pong()`.
+Built-in test helpers: `byteflow::samples::{ping_pong, atomic_actors, named_service, …}`.
 
 ---
 
@@ -221,11 +220,11 @@ byteflow run    <file.bf> [function]
 
 ---
 
-## Status (v0.9.2)
+## Status (v0.9.3)
 
-**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (`MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas, `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`).
+**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (`MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`).
 
-**Not yet:** Criterion benches, distribution, `trap_exit`.
+**Not yet:** Criterion benches, distribution, `trap_exit`, full `HeapStr` drop-based heap accounting (interim charge-on-store only).
 
 Design guides: [`docs/atomic-hop.md`](docs/atomic-hop.md) ·
 [`docs/beam-mapping.md`](docs/beam-mapping.md) ·

@@ -54,21 +54,41 @@ Message { sender, reply_cap, request_id, tag, payload }
 ### Typical server loop (BEAM-style)
 
 ```rust
-use byteflow::{Program, samples::TAG_REQ, samples::TAG_REP};
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use byteflow::{FlowOutcome, Program, Runtime, Value, std_native_table};
 
-let mut p = Program::new("server");
-let server = p.function("server", 0, |f| {
-    let loop_lbl = f.label();
-    f.bind(loop_lbl);
+const TAG_REQ: i32 = 1;
+const TAG_REP: i32 = 2;
+
+let mut program = Program::new("server");
+let server = program.function("server", 0, |f| {
     let req = f.receive_match_imm(TAG_REQ as u16);
     let payload = f.hop_payload(req);
     f.add_imm(payload, 1);
     f.send_reply(req, TAG_REP, payload);
-    f.jump(loop_lbl);
+    f.exit(payload);
 });
+program.function("main", 0, |f| {
+    let cap = f.spawn(server, 0);
+    let n = f.load_i32(41);
+    let req = f.hop_fresh(TAG_REQ, n);
+    let reply = f.ask(cap, req);
+    let out = f.hop_payload(reply);
+    f.return_(out);
+});
+
+let rt = Runtime::with_natives(program.build(), std_native_table())?;
+let Some(main) = rt.function_index("main") else {
+    return Err("missing main".into());
+};
+let outcome = rt.spawn(main, &[])?.join();
+rt.shutdown();
+assert!(matches!(outcome, FlowOutcome::Completed(Value::Int(42))));
+# Ok(())
+# }
 ```
 
-Sample: [`samples::server_loop`](../src/samples.rs).
+Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 
 ## Lifecycle (mapped)
 

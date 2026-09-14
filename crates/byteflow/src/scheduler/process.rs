@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,9 +44,30 @@ impl std::fmt::Display for FlowId {
 }
 
 static NEXT_FLOW_ID: AtomicU64 = AtomicU64::new(1);
+static FLOW_IDS_EXHAUSTED: AtomicBool = AtomicBool::new(false);
 
+/// Allocate the next id. Tests and host helpers; spawn uses
+/// [`try_next_flow_id`] so wrap-around cannot mint [`FlowId::HOST`].
 pub fn next_flow_id() -> FlowId {
-    FlowId(NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed))
+    match try_next_flow_id() {
+        Ok(id) => id,
+        Err(_) => FlowId(u64::MAX),
+    }
+}
+
+/// Fail closed if the counter wrapped onto [`FlowId::HOST`] (`0`).
+/// After the first wrap the allocator stays exhausted so later ids cannot
+/// collide with live flows (ABA).
+pub(crate) fn try_next_flow_id() -> Result<FlowId, super::error::RuntimeError> {
+    if FLOW_IDS_EXHAUSTED.load(Ordering::Relaxed) {
+        return Err(super::error::RuntimeError::FlowIdExhausted);
+    }
+    let id = NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        FLOW_IDS_EXHAUSTED.store(true, Ordering::Relaxed);
+        return Err(super::error::RuntimeError::FlowIdExhausted);
+    }
+    Ok(FlowId(id))
 }
 
 /// Restart policy consulted by a [`super::supervisor::Supervisor`] when a

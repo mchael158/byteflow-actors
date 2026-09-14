@@ -8,10 +8,12 @@ use crossbeam_deque::{Injector, Stealer, Worker as LocalDeque};
 
 use super::directory::Directory;
 use super::error::SpawnError;
+use super::finalize::finalize_flow;
 use super::handle::FlowHandle;
 use super::mailbox::{Delivery, Mailbox, MailboxConfig, MailboxFullReason};
 use super::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
-use super::process::{Flow, FlowId, RestartPolicy};
+use super::monitor::FlowExitReason;
+use super::process::{Flow, FlowId, FlowOutcome, RestartPolicy};
 use super::supervisor::SupervisorLink;
 use super::timer::TimerWheel;
 use super::worker;
@@ -255,14 +257,7 @@ impl Runtime {
         let timer_thread = std::thread::Builder::new()
             .name("byteflow-timer".into())
             .spawn(move || {
-                shared_timer
-                    .timer
-                    .clone()
-                    .drive(
-                        &shared_timer.injector,
-                        &shared_timer.notify,
-                        &shared_timer.ask_waits,
-                    )
+                shared_timer.timer.clone().drive(&shared_timer)
             })
             .map_err(|e| SpawnError::ThreadSpawnFailed(e.to_string()))?;
 
@@ -352,7 +347,7 @@ impl Runtime {
             Ok(None) => return Err(SendError::NoSuchFlow(target)),
             Err(e) => {
                 super::error::report_fault(e);
-                return Err(SendError::NoSuchFlow(target));
+                return Err(SendError::Unavailable);
             }
         };
         let stamped = match worker::authenticate_host_outgoing_message(&self.shared, target, msg) {
@@ -363,14 +358,32 @@ impl Runtime {
             Ok(Ok(Delivery::Queued | Delivery::QueuedDropOldest | Delivery::DroppedNewest)) => {
                 Ok(())
             }
-            Ok(Ok(Delivery::Handoff(mut flow))) => {
+            Ok(Ok(Delivery::Handoff(flow))) => {
                 let _ = self.shared.ask_waits.remove_asker(flow.id);
-                if let Some(dest) = flow.last_receive_dest {
-                    let _ = flow.vm.resume_with(dest, stamped);
+                match flow.last_receive_dest {
+                    Some(dest) => {
+                        let Some(flow) =
+                            super::finalize::resume_or_fail(&self.shared, flow, dest, stamped)
+                        else {
+                            return Err(SendError::Unavailable);
+                        };
+                        self.shared.injector.push(flow);
+                        wake_workers(&self.shared);
+                        Ok(())
+                    }
+                    None => {
+                        super::error::report_fault(super::error::RuntimeError::PoisonedLock(
+                            "Runtime::send handoff missing dest register",
+                        ));
+                        finalize_flow(
+                            &self.shared,
+                            *flow,
+                            FlowOutcome::Failed("handoff missing dest register".into()),
+                            FlowExitReason::Fault,
+                        );
+                        Err(SendError::Unavailable)
+                    }
                 }
-                self.shared.injector.push(flow);
-                wake_workers(&self.shared);
-                Ok(())
             }
             Ok(Err(full)) => Err(SendError::MailboxFull {
                 flow: target,
@@ -378,7 +391,7 @@ impl Runtime {
             }),
             Err(e) => {
                 super::error::report_fault(e);
-                Err(SendError::NoSuchFlow(target))
+                Err(SendError::Unavailable)
             }
         }
     }
@@ -722,6 +735,8 @@ pub enum SendError {
     },
     /// Host hop authentication failed (payload Cap reissue).
     Capability,
+    /// Directory / mailbox mutex poisoned — not "no such flow".
+    Unavailable,
 }
 
 impl std::fmt::Display for SendError {
@@ -737,6 +752,7 @@ impl std::fmt::Display for SendError {
             SendError::Capability => {
                 write!(f, "host send could not reissue a capability in the hop")
             }
+            SendError::Unavailable => write!(f, "runtime table unavailable (poisoned lock)"),
         }
     }
 }
@@ -780,7 +796,13 @@ pub(crate) fn spawn_on(
             });
         }
     }
-    let id = super::process::next_flow_id();
+    let id = match super::process::try_next_flow_id() {
+        Ok(id) => id,
+        Err(super::error::RuntimeError::FlowIdExhausted) => {
+            return Err(SpawnError::FlowIdExhausted)
+        }
+        Err(_) => return Err(SpawnError::Unavailable),
+    };
     let cell = shared
         .caps
         .bind_flow(id)
@@ -801,7 +823,7 @@ pub(crate) fn spawn_on(
             None,
             cell.as_ref(),
         )
-        .map_err(|e| SpawnError::SpawnDenied(e.to_string()))?,
+        .map_err(SpawnError::from)?,
     };
     let args = grant_caps_in_args(shared, parent, id, args)?;
     let gate = NativeGate::from_authority(

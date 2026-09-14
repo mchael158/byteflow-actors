@@ -45,7 +45,11 @@ impl Directory {
     }
 
     pub fn register(&self, id: FlowId, mailbox: Arc<Mailbox>) -> Result<(), RuntimeError> {
-        sync_lock::lock(self.shard_for(id), "Directory::register")?.insert(id, mailbox);
+        let mut shard = sync_lock::lock(self.shard_for(id), "Directory::register")?;
+        if shard.contains_key(&id) {
+            return Err(RuntimeError::DuplicateFlowId);
+        }
+        shard.insert(id, mailbox);
         Ok(())
     }
 

@@ -394,6 +394,7 @@ impl Mailbox {
     /// wait happens to be current instead.
     pub fn park(&self, flow: Box<Flow>) -> Result<Result<WaitEpoch, Box<Flow>>, RuntimeError> {
         self.park_filter(flow, WaitFilter::Any)
+            .map_err(|(e, _flow)| e)
     }
 
     /// Like [`park`](Self::park), but only a hop with `Message.tag == tag`
@@ -405,6 +406,7 @@ impl Mailbox {
         tag: u16,
     ) -> Result<Result<WaitEpoch, Box<Flow>>, RuntimeError> {
         self.park_filter(flow, WaitFilter::Tag(tag))
+            .map_err(|(e, _flow)| e)
     }
 
     /// Park under an arbitrary filter. Re-checks the queue under the same
@@ -413,13 +415,20 @@ impl Mailbox {
         &self,
         flow: Box<Flow>,
         filter: WaitFilter,
-    ) -> Result<Result<WaitEpoch, Box<Flow>>, RuntimeError> {
-        let mut inner = sync_lock::lock(&self.inner, "Mailbox::park_filter")?;
+    ) -> Result<Result<WaitEpoch, Box<Flow>>, (RuntimeError, Box<Flow>)> {
+        let mut inner = match sync_lock::lock(&self.inner, "Mailbox::park_filter") {
+            Ok(g) => g,
+            Err(e) => return Err((e, flow)),
+        };
         if let Some(value) = inner.queue.take(filter) {
             inner.stats.dequeued = inner.stats.dequeued.saturating_add(1);
             drop(inner);
             return Ok(Err(with_pending(flow, value)));
         }
+        debug_assert!(
+            inner.parked.is_none(),
+            "park_filter would overwrite a parked Flow"
+        );
         // Wrapping, not saturating: a saturated counter would make every
         // later epoch compare equal, silently restoring the stale-deadline
         // bug this exists to prevent. Reuse needs 2^64 parks on one inbox.
@@ -428,6 +437,13 @@ impl Mailbox {
         inner.parked_filter = filter;
         inner.parked = Some(flow);
         Ok(Ok(epoch))
+    }
+
+    /// Whether `value` can occupy this inbox when the queue is empty.
+    /// A hop larger than the byte budget must never enter `WAITING_SEND`.
+    #[inline]
+    pub(crate) fn hop_can_ever_fit(&self, value: &Value) -> bool {
+        value.memory_size() <= self.config.bytes().get()
     }
 
     /// Take the parked flow back out **only if** `epoch` is still the
@@ -495,9 +511,15 @@ impl Mailbox {
     /// Never drops `flow`: a closed or poisoned mailbox returns it in
     /// [`ParkSender::Closed`] so the worker can finalize.
     pub(crate) fn park_sender(&self, flow: Box<Flow>, message: Value) -> ParkSender {
+        if !self.hop_can_ever_fit(&message) {
+            return ParkSender::Undeliverable(flow);
+        }
         match sync_lock::lock(&self.inner, "Mailbox::park_sender") {
             Ok(inner) if inner.closed => ParkSender::Closed(flow),
             Ok(mut inner) => {
+                if inner.waiting_senders.len() >= self.config.capacity().get() {
+                    return ParkSender::Closed(flow);
+                }
                 inner.waiting_senders.push_back(WaitingSender { flow, message });
                 ParkSender::Parked
             }
@@ -509,19 +531,22 @@ impl Mailbox {
     }
 
     /// After a pop frees a slot, admit **one** waiting sender (no wake storm).
-    pub(crate) fn admit_waiting_sender(&self) -> Result<Option<Box<Flow>>, RuntimeError> {
+    pub(crate) fn admit_waiting_sender(&self) -> Result<AdmitSender, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::admit_waiting_sender")?;
         if inner.closed {
-            return Ok(None);
+            return Ok(AdmitSender::Idle);
         }
         let Some(waiter) = inner.waiting_senders.pop_front() else {
-            return Ok(None);
+            return Ok(AdmitSender::Idle);
         };
+        if !inner.queue.can_ever_fit(waiter.message.memory_size()) {
+            return Ok(AdmitSender::Undeliverable(waiter.flow));
+        }
         match enqueue_locked(&mut inner, waiter.message.clone(), OverflowPolicy::Reject) {
-            Ok(_) => Ok(Some(waiter.flow)),
+            Ok(_) => Ok(AdmitSender::Woken(waiter.flow)),
             Err(_) => {
                 inner.waiting_senders.push_front(waiter);
-                Ok(None)
+                Ok(AdmitSender::Idle)
             }
         }
     }
@@ -543,8 +568,18 @@ impl Mailbox {
 /// Outcome of [`Mailbox::park_sender`].
 pub(crate) enum ParkSender {
     Parked,
-    /// Inbox already closed (target finalizing) or lock poisoned.
+    /// Inbox already closed (target finalizing), waiter cap reached, or lock poisoned.
     Closed(Box<Flow>),
+    /// Hop is larger than the inbox byte budget — parking would never unblock.
+    Undeliverable(Box<Flow>),
+}
+
+/// Outcome of [`Mailbox::admit_waiting_sender`].
+pub(crate) enum AdmitSender {
+    Woken(Box<Flow>),
+    Idle,
+    /// Head waiter can never fit an empty inbox (oversized hop).
+    Undeliverable(Box<Flow>),
 }
 
 impl Default for Mailbox {
@@ -719,7 +754,10 @@ mod tests {
             expect_request_id: 1,
             expect_sender: Some(10),
         };
-        assert!(mb.park_filter(flow, filter)?.is_ok());
+        assert!(mb
+            .park_filter(flow, filter)
+            .map_err(|(e, _)| e)?
+            .is_ok());
         assert!(matches!(mb.push(hop(99, 1, 2, 0))??, Delivery::Queued));
         assert!(matches!(mb.push(hop(10, 1, 2, 42))??, Delivery::Handoff(_)));
         assert_eq!(
@@ -881,10 +919,15 @@ mod tests {
             ParkSender::Parked
         ));
         assert!(mb.try_pop()?.is_some());
-        let woken = mb.admit_waiting_sender()?.ok_or("admitted")?;
-        drop(woken);
+        match mb.admit_waiting_sender()? {
+            AdmitSender::Woken(woken) => drop(woken),
+            AdmitSender::Idle => return Err("expected admitted sender, got Idle".into()),
+            AdmitSender::Undeliverable(_) => {
+                return Err("expected admitted sender, got Undeliverable".into())
+            }
+        }
         assert_eq!(hop_payload_int(hop_msg(&mb.try_pop()?.ok_or("second hop")?)?), 2);
-        assert!(mb.admit_waiting_sender()?.is_none());
+        assert!(matches!(mb.admit_waiting_sender()?, AdmitSender::Idle));
         Ok(())
     }
 
@@ -896,7 +939,39 @@ mod tests {
         match mb.park_sender(dummy_flow()?, msg(1, 1)) {
             ParkSender::Closed(_) => {}
             ParkSender::Parked => return Err("closed mailbox must not park a sender".into()),
+            ParkSender::Undeliverable(_) => {
+                return Err("closed mailbox should report Closed, not Undeliverable".into())
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_hop_is_undeliverable_not_parked() -> TestResult {
+        let cap = MailboxCapacity::new(8).ok_or("cap")?;
+        let budget = MailboxBytes::new(MailboxBytes::MIN).ok_or("bytes")?;
+        let mb = Mailbox::with_config(
+            MailboxConfig::new(cap, OverflowPolicy::Reject).with_bytes(budget),
+        );
+        let huge = Value::bytes(vec![0u8; MailboxBytes::MIN + 64]);
+        match mb.park_sender(dummy_flow()?, huge.clone()) {
+            ParkSender::Undeliverable(_) => {}
+            ParkSender::Parked => return Err("oversized hop must not park".into()),
+            ParkSender::Closed(_) => return Err("oversized hop must be Undeliverable".into()),
+        }
+        mb.push(msg(1, 1))??;
+        mb.try_pop()?.ok_or("drain")?;
+        // A hop that can never fit must not sit at the head of waiting_senders.
+        match mb.admit_waiting_sender()? {
+            AdmitSender::Idle => {}
+            AdmitSender::Woken(_) => {
+                return Err("expected Idle after refusing oversized hop, got Woken".into())
+            }
+            AdmitSender::Undeliverable(_) => {
+                return Err("expected Idle after refusing oversized hop, got Undeliverable".into())
+            }
+        }
+        let _ = huge;
         Ok(())
     }
 

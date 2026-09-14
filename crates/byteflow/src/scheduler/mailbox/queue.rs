@@ -63,6 +63,12 @@ impl MailboxQueue {
         self.bytes
     }
 
+    /// True iff `cost` can occupy an empty inbox (count and byte budget).
+    #[inline]
+    pub(crate) fn can_ever_fit(&self, cost: usize) -> bool {
+        cost <= self.byte_limit && self.limit >= 1
+    }
+
     #[inline]
     fn is_full(&self) -> bool {
         self.inner.len() >= self.limit
@@ -144,10 +150,17 @@ impl MailboxQueue {
         }
     }
 
-    /// System hops (`DOWN`) must not be lost to overflow. Charges still
-    /// apply so later user hops see an honest budget.
+    /// System hops (`DOWN`) must not be lost to overflow. Evict oldest
+    /// user hops first so a DOWN does not permanently wedge the budget.
+    /// A single hop larger than the whole budget still over-charges —
+    /// losing DOWN is worse.
     pub(crate) fn force_push(&mut self, value: Value) {
         let cost = value.memory_size();
+        while (self.is_full() || self.would_exceed_bytes(cost)) && !self.inner.is_empty() {
+            if let Some(old) = self.inner.pop_front() {
+                self.bytes = self.bytes.saturating_sub(old.memory_size());
+            }
+        }
         let cap = self.limit.max(self.inner.len().saturating_add(1));
         let _ = reserve_for_push(&mut self.inner, cap);
         self.bytes = self.bytes.saturating_add(cost);
@@ -305,6 +318,21 @@ mod tests {
             q.enqueue(blob(4000), OverflowPolicy::DropOldest),
             Err(MailboxFullReason::ByteLimit)
         );
+    }
+
+    #[test]
+    fn force_push_evicts_oldest_to_protect_the_budget() {
+        let mut q = MailboxQueue::new(8, 4096);
+        for n in 0..3 {
+            assert_eq!(
+                q.enqueue(blob(1000), OverflowPolicy::Reject),
+                Ok(EnqueueEffect::Enqueued),
+                "blob {n} should fit"
+            );
+        }
+        q.force_push(blob(3000));
+        assert!(q.bytes() <= 4096 + 3000);
+        assert!(q.len() <= 2);
     }
 
     #[test]

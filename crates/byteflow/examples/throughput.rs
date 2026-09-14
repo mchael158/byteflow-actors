@@ -1,4 +1,6 @@
-//! Measured demo for posts: spawn N trivial processes and join them all.
+//! Measured demo: spawn N trivial flows and join them all.
+//!
+//! Built only with the public [`byteflow`] facade (`Program` / `Runtime`).
 //!
 //! ```text
 //! cargo run -p byteflow-actors --example throughput --release
@@ -6,9 +8,11 @@
 
 use std::time::Instant;
 
-use byteflow::{FlowOutcome, Program, Runtime, RuntimeConfig, Value};
+use byteflow::{
+    Chunk, FlowOutcome, MailboxConfig, Program, Runtime, RuntimeConfig, Value, DEFAULT_QUANTUM,
+};
 
-fn trivial_chunk() -> byteflow::Chunk {
+fn trivial_chunk() -> Chunk {
     let mut program = Program::new("throughput");
     program.function("worker", 0, |f| {
         let one = f.load_i32(1);
@@ -35,8 +39,8 @@ fn main() {
         trivial_chunk(),
         RuntimeConfig {
             workers,
-            quantum: 10_000,
-            mailbox: byteflow::MailboxConfig::DEFAULT,
+            quantum: DEFAULT_QUANTUM,
+            mailbox: MailboxConfig::DEFAULT,
             ..Default::default()
         },
     ) {

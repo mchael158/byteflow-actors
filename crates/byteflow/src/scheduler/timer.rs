@@ -3,8 +3,6 @@ use std::collections::BinaryHeap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_deque::Injector;
-
 use super::error::report_fault;
 use super::mailbox::{Mailbox, WaitEpoch};
 use super::process::{Flow, FlowId};
@@ -77,6 +75,14 @@ pub struct TimerWheel {
     shutdown: Mutex<bool>,
 }
 
+/// `Instant + Duration` can overflow (far-future delays). Never panic.
+fn deadline_from_now(delay: Duration) -> Instant {
+    Instant::now()
+        .checked_add(delay)
+        .or_else(|| Instant::now().checked_add(Duration::from_secs(60 * 60 * 24 * 365 * 30)))
+        .unwrap_or_else(Instant::now)
+}
+
 impl TimerWheel {
     pub fn new() -> Arc<Self> {
         Arc::new(TimerWheel {
@@ -88,7 +94,7 @@ impl TimerWheel {
 
     pub fn schedule_sleep(&self, delay: Duration, flow: Box<Flow>) {
         let entry = TimerEntry {
-            deadline: Instant::now() + delay,
+            deadline: deadline_from_now(delay),
             payload: TimerPayload::WakeSleeper(flow),
         };
         self.push(entry);
@@ -106,7 +112,7 @@ impl TimerWheel {
         epoch: WaitEpoch,
     ) {
         let entry = TimerEntry {
-            deadline: Instant::now() + delay,
+            deadline: deadline_from_now(delay),
             payload: TimerPayload::WakeReceiver {
                 pid,
                 mailbox,
@@ -143,12 +149,7 @@ impl TimerWheel {
     /// itself never runs flow code.
     ///
     /// Mutex poison → [`report_fault`] and exit the drive loop (fail-closed).
-    pub fn drive(
-        self: &Arc<Self>,
-        injector: &Injector<Box<Flow>>,
-        notify: &(Mutex<()>, Condvar),
-        ask_waits: &super::finalize::AskWaitIndex,
-    ) {
+    pub fn drive(self: &Arc<Self>, shared: &super::runtime::Shared) {
         loop {
             let mut heap = match sync_lock::lock(&self.heap, "TimerWheel::drive") {
                 Ok(h) => h,
@@ -192,7 +193,7 @@ impl TimerWheel {
                             None => continue,
                         };
                         drop(heap);
-                        self.fire(entry, injector, notify, ask_waits);
+                        self.fire(entry, shared);
                     } else {
                         let wait_for = top.deadline - now;
                         match sync_lock::wait_timeout(
@@ -213,16 +214,10 @@ impl TimerWheel {
         }
     }
 
-    fn fire(
-        &self,
-        entry: TimerEntry,
-        injector: &Injector<Box<Flow>>,
-        notify: &(Mutex<()>, Condvar),
-        ask_waits: &super::finalize::AskWaitIndex,
-    ) {
+    fn fire(&self, entry: TimerEntry, shared: &super::runtime::Shared) {
         match entry.payload {
             TimerPayload::WakeSleeper(flow) => {
-                injector.push(flow);
+                shared.injector.push(flow);
             }
             TimerPayload::WakeReceiver {
                 pid,
@@ -231,21 +226,25 @@ impl TimerWheel {
                 epoch,
             } => {
                 match mailbox.take_parked_at(epoch) {
-                    Ok(Some(mut flow)) => {
+                    Ok(Some(flow)) => {
                         debug_assert_eq!(
                             flow.id, pid,
                             "timer fired for a mailbox owned by a different flow"
                         );
-                        if let Err(e) = ask_waits.remove_asker(flow.id) {
+                        if let Err(e) = shared.ask_waits.remove_asker(flow.id) {
                             report_fault(e);
                         }
                         // This deadline still owns the current wait (see
                         // `Mailbox::take_parked_at`): deliver `Unit` as the
                         // "no message arrived in time" result.
-                        let _ = flow
-                            .vm
-                            .resume_with(dest_reg, crate::bytecode::Value::Unit);
-                        injector.push(flow);
+                        if let Some(flow) = super::finalize::resume_or_fail(
+                            shared,
+                            flow,
+                            dest_reg,
+                            crate::bytecode::Value::Unit,
+                        ) {
+                            shared.injector.push(flow);
+                        }
                     }
                     Ok(None) => {
                         // A hop already ended that wait, or the flow has
@@ -256,8 +255,8 @@ impl TimerWheel {
                 }
             }
         }
-        match sync_lock::lock(&notify.0, "TimerWheel::fire/notify") {
-            Ok(_guard) => notify.1.notify_all(),
+        match sync_lock::lock(&shared.notify.0, "TimerWheel::fire/notify") {
+            Ok(_guard) => shared.notify.1.notify_all(),
             Err(e) => report_fault(e),
         }
     }
