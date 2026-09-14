@@ -2,6 +2,26 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.4] — 2026-09-14
+
+Scheduler correctness for Ask handoff writeback, plus examples/docs that
+assemble and run only through the public `byteflow` facade.
+
+### Fixed
+
+- Ask insert→park race: after `park_filter`, revalidate `ask_waits`
+  membership (`target_of`) and target liveness; self-wake with
+  `TAG_SYS_EXIT` if finalize already cleared the waiter.
+- `resume_with` faults are no longer swallowed — `resume_or_fail`
+  finalizes the flow on quota / register writeback errors (worker,
+  handoff, timer, host `send`, DOWN / orphaned Ask paths).
+
+### Changed
+
+- Examples and design-guide doctests build with `Program` / `Fn` and
+  `use byteflow::{...}` (plus `std_native_table` when hops need
+  `make_msg`); they no longer wrap `samples::*` as the only demo path.
+
 ## [0.9.3] — 2026-09-06
 
 Sandbox parity: named discovery in bytecode, host hops on the same auth

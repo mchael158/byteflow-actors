@@ -9,7 +9,7 @@ Concorrência embutível em Rust: bytecode com **`Program`** / **`Fn`**, **flows
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.3"
+byteflow-actors = "0.9.4"
 ```
 
 ```rust

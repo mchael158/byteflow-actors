@@ -10,7 +10,7 @@ Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**,
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.3"
+byteflow-actors = "0.9.4"
 ```
 
 ```rust
