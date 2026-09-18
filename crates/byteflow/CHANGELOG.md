@@ -2,6 +2,41 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.5] — 2026-09-18
+
+### Fixed
+
+- **FIX 23.2 — memory + push:** register heap charge/release on overwrite
+  (`MemoryBudget` / delta accounting); mailbox `push` after `close` returns
+  `MailboxFullReason::Closed` (stale `Arc` cannot revive a dead inbox).
+
+### Changed
+
+- **Default build is `std`-only:** dropped runtime deps `crossbeam-deque`,
+  `getrandom`, and `num_cpus`. Work queue is Byteflow-owned
+  (`scheduler/runqueue`), CapId entropy via `entropy` (`RandomState`),
+  worker count via `std::thread::available_parallelism`. Optional `jit`
+  feature still pulls Cranelift.
+- Removed `proptest` and `thiserror`: property/stress suites use an in-house
+  PRNG; JIT `CompileError` is hand-written `Display` + `Error`.
+- **`max_flows` is a CAS reservation** (`FlowLimit`), released in finalize /
+  spawn rollback — not a racy `directory.len()` check.
+- **Spawn is transactional:** quota insert failure unregisters the directory
+  entry, revokes the flow cell, and releases the flow-limit slot.
+
+### Added
+
+- Tier 1 property / stress suite: in-house tests for mailbox capacity /
+  `DropNewest` / `Reject`, CapTable mint·resolve·revoke, and decode/verify
+  panic-freedom; design note [`docs/properties.md`](docs/properties.md).
+- Tests: `ask_drop_newest_fails_closed`, `FlowLimit` unit tests, spawn after
+  `max_flows` release.
+- DELEGATE docs: formal ⊆ invariants; `SourceLacksNative` clarified;
+  `NativeMask::is_subset_of`; security tests for native ∩ / non-NATIVE /
+  shared revocation epoch.
+- `RuntimeConfig::max_runtime_bytes`, `join` worker guard, Ask/`DropNewest`
+  fail-closed, directory close→push contract.
+
 ## [0.9.4] — 2026-09-14
 
 Scheduler correctness for Ask handoff writeback, plus examples/docs that

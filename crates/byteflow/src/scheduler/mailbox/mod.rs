@@ -212,6 +212,9 @@ pub enum MailboxFullReason {
     /// reported when a single hop is larger than the entire budget, which
     /// no eviction policy can make room for.
     ByteLimit,
+    /// Inbox was closed by finalize — the flow is exiting. Delivery must
+    /// treat this like “target gone”, not like a capacity refusal.
+    Closed,
 }
 
 impl std::fmt::Display for MailboxFullReason {
@@ -219,6 +222,7 @@ impl std::fmt::Display for MailboxFullReason {
         match self {
             MailboxFullReason::MessageLimit => write!(f, "hop count limit"),
             MailboxFullReason::ByteLimit => write!(f, "byte budget"),
+            MailboxFullReason::Closed => write!(f, "mailbox closed"),
         }
     }
 }
@@ -336,6 +340,11 @@ impl Mailbox {
     /// Mutex poison → [`RuntimeError`] (fail-closed).
     pub fn push(&self, value: Value) -> Result<Result<Delivery, MailboxFull>, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::push")?;
+        if inner.closed {
+            return Ok(Err(MailboxFull {
+                reason: MailboxFullReason::Closed,
+            }));
+        }
         if let Some(flow) = inner.parked.take() {
             if inner.parked_filter.matches(&value) {
                 inner.parked_filter = WaitFilter::Any;
@@ -482,6 +491,11 @@ impl Mailbox {
     /// Enqueue a hop even when the inbox is at a bound (system `DOWN`).
     pub(crate) fn push_system(&self, value: Value) -> Result<Delivery, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::push_system")?;
+        // System DOWN may still target a live owner; if that owner is already
+        // closed, drop the hop (owner is exiting / gone).
+        if inner.closed {
+            return Ok(Delivery::Queued);
+        }
         if let Some(flow) = inner.parked.take() {
             if inner.parked_filter.matches(&value) {
                 inner.parked_filter = WaitFilter::Any;
@@ -944,6 +958,17 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn close_rejects_late_push() -> TestResult {
+        let mb = tiny_reject(4)?;
+        let _ = mb.close()?;
+        match mb.push(msg(1, 1))? {
+            Err(full) if full.reason() == MailboxFullReason::Closed => Ok(()),
+            Err(full) => Err(format!("expected Closed, got {}", full.reason()).into()),
+            Ok(_) => Err("closed mailbox must refuse push".into()),
+        }
     }
 
     #[test]

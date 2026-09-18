@@ -34,8 +34,10 @@ pub struct Vm {
     /// Next `Message.request_id` for [`Opcode::FreshRequestId`] and for
     /// hops that still carry `0` (“unset”) at the Send/Ask boundary.
     next_request_id: u64,
-    /// Interim heap charge for `Str`/`Bytes` written into registers.
+    /// Per-flow heap charge for `Str`/`Bytes` written into registers.
     quota: Option<Arc<FlowQuota>>,
+    /// Process-wide memory ceiling (optional; set by the runtime).
+    memory: Option<Arc<crate::MemoryBudget>>,
     /// When true, `Jump`/`Branch` bounds-check targets at runtime (see
     /// [`Self::set_paranoid_jumps`]). Default off: verified chunks trust
     /// `verify`; unverified corrupt jumps fail-open as implicit `return Unit`.
@@ -76,6 +78,7 @@ impl Vm {
             instructions_executed: 0,
             next_request_id: 1,
             quota: None,
+            memory: None,
             paranoid_jumps: false,
         })
     }
@@ -90,16 +93,22 @@ impl Vm {
 
     /// Attach the flow's quota so register stores of `Str`/`Bytes` charge heap.
     ///
-    /// Interim: charge on write, never release until the flow exits. Same
-    /// `Arc` rewritten into the same slot is not charged twice.
+    /// Overwrites use reserve(new) → release(old) → install (see
+    /// [`crate::memory`]). Same `Arc` rewritten into the same slot is not
+    /// charged twice.
     pub fn set_quota(&mut self, quota: Arc<FlowQuota>) -> Result<(), Fault> {
         for frame in &self.frames {
             for slot in frame.registers() {
-                charge_heap_value(&quota, slot)?;
+                charge_heap_value(&quota, self.memory.as_deref(), slot)?;
             }
         }
         self.quota = Some(quota);
         Ok(())
+    }
+
+    /// Attach the process-wide memory ceiling (call before or with [`Self::set_quota`]).
+    pub fn set_memory_budget(&mut self, memory: Arc<crate::MemoryBudget>) {
+        self.memory = Some(memory);
     }
 
     /// Mint a per-flow correlation id. Never returns `0` (`next_request_id`
@@ -236,19 +245,32 @@ impl Vm {
         self.frames.last()?.registers().get(reg as usize)
     }
 
-    /// Interim heap charge: `Str` / `Bytes` only. Hop payloads are charged
-    /// at `Send` / `Ask`. Overwrites of the same `Arc` in the same slot
-    /// are skipped; other copies super-count until the flow exits.
+    /// Heap charge for `Str` / `Bytes` register stores.
+    ///
+    /// Order: reserve(new) → release(old). Failed reservation leaves the
+    /// slot and accounting untouched. Same `Arc` in the same slot is a no-op.
     fn charge_register_store(&self, reg: u8, value: &Value) -> Result<(), Fault> {
         let Some(quota) = self.quota.as_ref() else {
             return Ok(());
         };
         match (value, self.peek_reg(reg)) {
-            (Value::Str(s), Some(Value::Str(old))) if Arc::ptr_eq(s, old) => Ok(()),
-            (Value::Bytes(b), Some(Value::Bytes(old))) if Arc::ptr_eq(b, old) => Ok(()),
-            (Value::Str(_) | Value::Bytes(_), _) => charge_heap_value(quota, value),
-            _ => Ok(()),
+            (Value::Str(s), Some(Value::Str(old))) if Arc::ptr_eq(s, old) => return Ok(()),
+            (Value::Bytes(b), Some(Value::Bytes(old))) if Arc::ptr_eq(b, old) => return Ok(()),
+            _ => {}
         }
+
+        let new_bytes = heap_charge_of(value);
+        let old_bytes = self.peek_reg(reg).map(heap_charge_of).unwrap_or(0);
+
+        // Net accounting: reserve only the growth (or release the shrink).
+        // Semantically equal to reserve(new)→release(old) without needing
+        // temporary headroom of old+new against a tight mem_limit.
+        if new_bytes > old_bytes {
+            charge_pair(quota, self.memory.as_deref(), new_bytes - old_bytes)?;
+        } else if old_bytes > new_bytes {
+            release_pair(quota, self.memory.as_deref(), old_bytes - new_bytes);
+        }
+        Ok(())
     }
 
     /// Fetch the next instruction and advance `pc`.
@@ -785,20 +807,55 @@ fn reg_at(base: u8, offset: u16) -> Result<u8, Fault> {
     }
 }
 
-/// Charge `Str` / `Bytes` length against the flow heap quota.
-/// Empty buffers are free. Fail-closed: the store does not happen on error.
-fn charge_heap_value(quota: &FlowQuota, value: &Value) -> Result<(), Fault> {
-    let bytes = match value {
+/// Bytes charged for a register-resident heap value (`Str` / `Bytes` len).
+#[inline]
+fn heap_charge_of(value: &Value) -> usize {
+    match value {
         Value::Str(s) => s.len(),
         Value::Bytes(b) => b.len(),
-        _ => return Ok(()),
-    };
+        _ => 0,
+    }
+}
+
+/// Reserve `bytes` on the flow quota and optional runtime budget.
+/// Rolls back the flow charge if the global budget refuses.
+fn charge_pair(
+    quota: &FlowQuota,
+    memory: Option<&crate::MemoryBudget>,
+    bytes: usize,
+) -> Result<(), Fault> {
     if bytes == 0 {
         return Ok(());
     }
     quota
         .alloc(bytes)
-        .map_err(|e| Fault::QuotaExceeded(e.to_string()))
+        .map_err(|e| Fault::QuotaExceeded(e.to_string()))?;
+    if let Some(mem) = memory {
+        if let Err(e) = mem.try_charge(bytes) {
+            quota.free(bytes);
+            return Err(Fault::QuotaExceeded(e.to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn release_pair(quota: &FlowQuota, memory: Option<&crate::MemoryBudget>, bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    quota.free(bytes);
+    if let Some(mem) = memory {
+        mem.release(bytes);
+    }
+}
+
+/// Charge `Str` / `Bytes` length (initial attach / frame scan).
+fn charge_heap_value(
+    quota: &FlowQuota,
+    memory: Option<&crate::MemoryBudget>,
+    value: &Value,
+) -> Result<(), Fault> {
+    charge_pair(quota, memory, heap_charge_of(value))
 }
 
 fn as_f64(v: &Value) -> Result<f64, Fault> {
@@ -1023,6 +1080,36 @@ mod tests {
                 code_len: len,
             }) if len == code_len => Ok(()),
             other => Err(format!("expected BadJump(101), got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn overwrite_releases_previous_heap_charge() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let k1 = b.const_(Value::Str("a".repeat(100).into()));
+        let k2 = b.const_(Value::Str("b".repeat(100).into()));
+        b.begin_function("main", 0, 1);
+        b.emit_load_const(0, k1);
+        b.emit_load_const(0, k2);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        // Limit 150: first 100 fits; without release the second 100 would fail.
+        let quota = Arc::new(crate::scheduler::FlowQuota::from_config(
+            crate::QuotaConfig {
+                mem_limit: 150,
+                ..crate::QuotaConfig::permissive()
+            },
+        ));
+        let memory = Arc::new(crate::MemoryBudget::new(10_000));
+        vm.set_memory_budget(Arc::clone(&memory));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(20) {
+            VmResult::Complete(Value::Str(s)) if s.len() == 100 => {
+                assert_eq!(quota.mem_used(), 100);
+                assert_eq!(memory.used(), 100);
+                Ok(())
+            }
+            other => Err(format!("expected Complete(100-byte Str), got {other:?}").into()),
         }
     }
 

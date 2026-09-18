@@ -195,9 +195,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod bytecode;
+pub mod entropy;
 pub mod log;
+pub mod memory;
 pub mod natives;
 pub mod output;
+pub(crate) mod prng;
 pub mod samples;
 pub mod scheduler;
 pub mod vm;
@@ -239,6 +242,10 @@ pub mod docs {
     /// Bounded mailbox: capacity contract, overflow, anti lost-wakeup.
     #[doc = include_str!("../docs/mailbox.md")]
     pub mod mailbox {}
+
+    /// Property / stress tests (in-house PRNG) for mailbox, decode/verify, Caps.
+    #[doc = include_str!("../docs/properties.md")]
+    pub mod properties {}
 }
 
 pub use bytecode::{
@@ -249,13 +256,16 @@ pub use bytecode::{
     TAG_SYS_DOWN, TAG_SYS_EXIT,
 };
 pub use output::{NullSink, OutputSink, StdoutSink};
+pub use memory::{
+    HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot,
+};
 pub use natives::{std_native, std_native_map, std_native_table, std_native_table_with, std_natives};
 pub use scheduler::{
     fault_count, next_flow_id, flow_id_from_u64, report_fault, CapError, Capability,
     ChildSpec, Delivery, DownEvent, FlowExitReason, FlowQuota, LifecycleError, LinkId, Mailbox, MailboxBytes,
     MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats,
     MonitorRef, OverflowPolicy, QuotaConfig, QuotaError, RegistryName, WaitEpoch, Flow, FlowHandle, FlowId,
-    FlowMetrics, FlowOutcome, RestartPolicy, RestartStrategy, Runtime, RuntimeConfig,
+    FlowMetrics, FlowOutcome, JoinError, RestartPolicy, RestartStrategy, Runtime, RuntimeConfig,
     RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError,
     SpawnError, Supervisor, SupervisorConfig, DEFAULT_QUANTUM, check_admin, check_link,
     check_monitor, exec_delegate, AdminError, DelegateError, LinkError,

@@ -2,6 +2,27 @@ use std::time::{Duration, Instant};
 
 use super::oneshot::{self, JoinState};
 use super::process::{FlowId, FlowOutcome};
+use super::worker::is_on_worker;
+
+/// Why a host-side join refused to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinError {
+    /// [`FlowHandle::join`] (or a bounded variant) was called on a worker
+    /// thread. That deadlocks the M:N pool if the target needs this worker.
+    CalledFromWorker,
+}
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CalledFromWorker => {
+                f.write_str("FlowHandle::join called from a Byteflow worker thread")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JoinError {}
 
 /// A reference to a spawned **flow**, returned by
 /// [`super::runtime::Runtime::spawn`].
@@ -21,7 +42,11 @@ impl FlowHandle {
     }
 
     /// Block the current (native) thread until the flow terminates.
-    /// **Never call from inside a worker / from bytecode.**
+    ///
+    /// **Never call from inside a worker / from a native invoked by bytecode.**
+    /// That case is machine-checked: this returns
+    /// [`FlowOutcome::Failed`] with [`JoinError::CalledFromWorker`] rather
+    /// than deadlocking the pool.
     ///
     /// Returns [`FlowOutcome::Failed`] rather than blocking forever if the
     /// flow was destroyed without producing an outcome — most commonly
@@ -30,10 +55,25 @@ impl FlowHandle {
     /// comes from [`super::error::RuntimeError::Abandoned`], so it is
     /// distinguishable from a flow that genuinely faulted.
     pub fn join(self) -> FlowOutcome {
+        if is_on_worker() {
+            return FlowOutcome::Failed(JoinError::CalledFromWorker.to_string());
+        }
         match self.receiver.join() {
             Ok(outcome) => outcome,
             Err(e) => FlowOutcome::Failed(e.to_string()),
         }
+    }
+
+    /// Same as [`Self::join`], but surfaces [`JoinError`] instead of folding
+    /// it into [`FlowOutcome::Failed`].
+    pub fn join_checked(self) -> Result<FlowOutcome, JoinError> {
+        if is_on_worker() {
+            return Err(JoinError::CalledFromWorker);
+        }
+        Ok(match self.receiver.join() {
+            Ok(outcome) => outcome,
+            Err(e) => FlowOutcome::Failed(e.to_string()),
+        })
     }
 
     /// The outcome if the flow has already terminated, `None` if it is still
@@ -46,6 +86,9 @@ impl FlowHandle {
     /// [`super::error::RuntimeError::AlreadyCollected`] as
     /// [`FlowOutcome::Failed`] rather than repeating it.
     pub fn try_join(&self) -> Option<FlowOutcome> {
+        if is_on_worker() {
+            return Some(FlowOutcome::Failed(JoinError::CalledFromWorker.to_string()));
+        }
         Self::settle(self.receiver.try_join())
     }
 
@@ -56,6 +99,9 @@ impl FlowHandle {
     /// control loop, a watchdog, a test harness — since it is the only join
     /// whose worst-case duration the caller chooses.
     pub fn join_timeout(&self, timeout: Duration) -> Option<FlowOutcome> {
+        if is_on_worker() {
+            return Some(FlowOutcome::Failed(JoinError::CalledFromWorker.to_string()));
+        }
         Self::settle(self.receiver.join_timeout(timeout))
     }
 
@@ -63,6 +109,9 @@ impl FlowHandle {
     /// that already track one and must not have it drift across repeated
     /// waits.
     pub fn join_deadline(&self, deadline: Instant) -> Option<FlowOutcome> {
+        if is_on_worker() {
+            return Some(FlowOutcome::Failed(JoinError::CalledFromWorker.to_string()));
+        }
         Self::settle(self.receiver.join_deadline(deadline))
     }
 
@@ -75,6 +124,27 @@ impl FlowHandle {
             Ok(JoinState::Ready(outcome)) => Some(outcome),
             Ok(JoinState::Pending) => None,
             Err(e) => Some(FlowOutcome::Failed(e.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::worker::WorkerGuard;
+
+    #[test]
+    fn join_from_worker_is_rejected() {
+        let _guard = WorkerGuard::enter();
+        // Synthetic handle: receiver will never complete; we must not block.
+        let (_tx, rx) = oneshot::channel::<FlowOutcome>();
+        let handle = FlowHandle {
+            id: FlowId(1),
+            receiver: rx,
+        };
+        match handle.join_checked() {
+            Err(JoinError::CalledFromWorker) => {}
+            other => panic!("expected CalledFromWorker, got {other:?}"),
         }
     }
 }

@@ -22,6 +22,7 @@ mod capability;
 mod directory;
 mod error;
 mod finalize;
+mod flow_limit;
 mod handle;
 mod link;
 mod link_admin;
@@ -34,6 +35,7 @@ mod metrics;
 pub(crate) mod oneshot;
 mod process;
 mod quota;
+mod runqueue;
 mod runtime;
 mod spawn;
 mod delegate;
@@ -50,7 +52,7 @@ pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnEr
 pub use link::LinkId;
 pub use monitor::{DownEvent, FlowExitReason, MonitorRef};
 pub use registry::RegistryName;
-pub use handle::FlowHandle;
+pub use handle::{FlowHandle, JoinError};
 pub use mailbox::{
     Delivery, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
     MailboxFullReason, MailboxStats, OverflowPolicy, WaitEpoch,

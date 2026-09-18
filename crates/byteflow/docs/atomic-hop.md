@@ -1,6 +1,6 @@
 # Atomic Hop (Byteflow core)
 
-Handoff context for humans / other AIs working on **this repo only** (`byteflow-actors`).
+Handoff context for humans / other AIs working on **this repo only** (`byteflow`).
 Hardware (`byteflow-hw`) was removed from the monorepo — do not restore it here.
 
 ## Units: **flows**

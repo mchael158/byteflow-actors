@@ -29,7 +29,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.4"
+byteflow-actors = "0.9.5"
 ```
 
 ```rust
@@ -203,6 +203,7 @@ byteflow run    <file.bf> [function]
 ## Safety & design notes
 
 - `#![forbid(unsafe_code)]`
+- **Default = zero runtime dependencies** (`std` only). Optional `feature = "jit"` adds Cranelift.
 - Flow panics are caught at the worker boundary so one bad flow cannot kill the OS thread.
 - Malformed bytecode is a `Fault` on one flow, never a panic on the thread that spawned it (see [`docs/vm-safety.md`](docs/vm-safety.md)).
 - Register indices are never computed with plain `u8` arithmetic — no “panics in debug, silently wraps in release” divergence.
@@ -213,23 +214,24 @@ byteflow run    <file.bf> [function]
 - **Atomic Hop:** only `Value::Message` may cross `Send`.
 - **FlowCap (ABI v5):** 128-bit CSPRNG `CapId`; holder + rights resolution; [`Cap::attenuate`](https://docs.rs/byteflow-actors/latest/byteflow/struct.Cap.html) is the only grant path (`Fn::delegate`, confined spawn).
 - **Natives (S7):** `CALL_NATIVE` is gated by `CapRights::NATIVE` + [`NativeMask`](https://docs.rs/byteflow-actors/latest/byteflow/struct.NativeMask.html) before the table is indexed.
-- **Quotas:** per-flow CPU / heap / spawn-send buckets via [`QuotaConfig`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html) (`RuntimeConfig::quota`). Default is [`permissive`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.permissive); [`sandbox`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.sandbox) is the isolation starting point. `Str`/`Bytes` in registers charge heap (interim, no release until exit). Distinct from the scheduler quantum.
+- **Quotas:** per-flow CPU / heap / spawn-send buckets via [`QuotaConfig`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html) (`RuntimeConfig::quota`). Default is [`permissive`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.permissive); [`sandbox`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.sandbox) is the isolation starting point. `Str`/`Bytes` register stores charge heap with release-on-overwrite (delta accounting). Process-wide ceiling: [`RuntimeConfig::max_runtime_bytes`](https://docs.rs/byteflow-actors/latest/byteflow/struct.RuntimeConfig.html) + [`MemoryBudget`](https://docs.rs/byteflow-actors/latest/byteflow/struct.MemoryBudget.html) / [`HeapStr`](https://docs.rs/byteflow-actors/latest/byteflow/struct.HeapStr.html). Distinct from the scheduler quantum.
 - **Registry:** bytecode `register_name` / `whereis` — lookup returns a SEND Cap, never a FlowId.
 - **`make_msg`:** 3-arg (`request_id`, `tag`, `payload`); `sender` is stamped only on `Send` / `Ask`.
 - **Security:** authenticated hop sender + FlowCap + Phase 3 gates — see [`docs/security.md`](docs/security.md).
 
 ---
 
-## Status (v0.9.4)
+## Status (v0.9.5)
 
-**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (`MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`).
+**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (`MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable).
 
-**Not yet:** Criterion benches, distribution, `trap_exit`, full `HeapStr` drop-based heap accounting (interim charge-on-store only).
+**Not yet:** Criterion benches, distribution, `trap_exit`, hermetic CI.
 
 Design guides: [`docs/atomic-hop.md`](docs/atomic-hop.md) ·
 [`docs/beam-mapping.md`](docs/beam-mapping.md) ·
 [`docs/lifecycle.md`](docs/lifecycle.md) ·
 [`docs/mailbox.md`](docs/mailbox.md) ·
+[`docs/properties.md`](docs/properties.md) ·
 [`docs/vm-safety.md`](docs/vm-safety.md) ·
 [`docs/error-model.md`](docs/error-model.md) ·
 [`docs/security.md`](docs/security.md)

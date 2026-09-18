@@ -28,7 +28,7 @@ pub struct CapId(u128);
 /// Why [`CapId::random`] could not produce a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapIdError {
-    /// Operating-system CSPRNG failed.
+    /// Platform entropy unavailable (see [`crate::entropy`]).
     Entropy,
 }
 
@@ -36,11 +36,11 @@ impl CapId {
     /// Placeholder used on unauthenticated / host-injected hops.
     pub const NONE: CapId = CapId(0);
 
-    /// Draw a non-zero id from the OS CSPRNG. Never panics.
+    /// Draw a non-zero id from platform entropy (`std` only). Never panics.
     pub fn random() -> Result<Self, CapIdError> {
         for _ in 0..8 {
             let mut bytes = [0u8; 16];
-            if getrandom::getrandom(&mut bytes).is_err() {
+            if crate::entropy::fill_bytes(&mut bytes).is_err() {
                 return Err(CapIdError::Entropy);
             }
             let raw = u128::from_le_bytes(bytes);
@@ -258,6 +258,25 @@ impl NativeMask {
         }
         NativeMask(Arc::from(words.into_boxed_slice()))
     }
+
+    /// `true` iff every bit set in `self` is also set in `other`.
+    pub fn is_subset_of(&self, other: &NativeMask) -> bool {
+        let n = self.0.len().max(other.0.len());
+        for i in 0..n {
+            let a = match self.0.get(i) {
+                Some(w) => *w,
+                None => 0,
+            };
+            let b = match other.0.get(i) {
+                Some(w) => *w,
+                None => 0,
+            };
+            if a & !b != 0 {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// What a capability addresses. Bytecode never sees this enum — only the
@@ -346,6 +365,16 @@ impl Cap {
     /// Produce a strictly narrower-or-equal Cap. Never panics, never grants
     /// a bit the parent did not have. This is the single choke point the
     /// rest of the model sits on — keep it boring and obvious.
+    ///
+    /// # Invariants
+    ///
+    /// - `rights(result) ⊆ rights(self)` (`intersect`)
+    /// - `native(result) ⊆ native(self)`:
+    ///   - `(Some(src), Some(want))` → `src ∩ want`
+    ///   - `(Some(src), None)` → keep `src` (no native change requested)
+    ///   - `(None, _)` → `None` (cannot invent a mask)
+    /// - `result.epoch == self.epoch` — same [`RevocationCell`]; revoke
+    ///   invalidates the whole derivation chain. No fresh cell is minted.
     pub fn attenuate(&self, want_rights: CapRights, want_native: Option<&NativeMask>) -> Cap {
         let rights = self.rights.intersect(want_rights);
         let native_mask = match (&self.native_mask, want_native) {

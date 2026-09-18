@@ -8,9 +8,10 @@
 
 use std::time::Instant;
 
-use byteflow::{
-    Chunk, FlowOutcome, JitConfig, Program, Runtime, RuntimeConfig, Value,
-};
+use byteflow::{Chunk, FlowOutcome, Program, Runtime, RuntimeConfig, Value};
+
+#[cfg(feature = "jit")]
+use byteflow::JitConfig;
 
 fn loop_chunk(iterations: i32) -> Chunk {
     let mut program = Program::new("jit-loop");
@@ -23,10 +24,9 @@ fn loop_chunk(iterations: i32) -> Chunk {
     program.build()
 }
 
-fn run_once(jit: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let chunk = loop_chunk(1_000_000);
-    let rt = Runtime::with_config(
-        chunk,
+fn runtime_config(jit: bool) -> RuntimeConfig {
+    #[cfg(feature = "jit")]
+    {
         RuntimeConfig {
             workers: 1,
             quantum: 50_000_000,
@@ -35,8 +35,22 @@ fn run_once(jit: bool) -> Result<(), Box<dyn std::error::Error>> {
                 hot_threshold: 1,
             },
             ..Default::default()
-        },
-    )?;
+        }
+    }
+    #[cfg(not(feature = "jit"))]
+    {
+        let _ = jit;
+        RuntimeConfig {
+            workers: 1,
+            quantum: 50_000_000,
+            ..Default::default()
+        }
+    }
+}
+
+fn run_once(jit: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let chunk = loop_chunk(1_000_000);
+    let rt = Runtime::with_config(chunk, runtime_config(jit))?;
     let start = Instant::now();
     let outcome = rt.spawn(0, &[])?.join();
     let snapshot = rt.metrics();

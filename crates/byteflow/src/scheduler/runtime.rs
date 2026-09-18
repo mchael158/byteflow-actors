@@ -4,7 +4,6 @@ use std::thread::JoinHandle;
 
 use crate::bytecode::{Cap, CapRights, CapTarget, Chunk, NativeMask, Value};
 use crate::vm::{NativeGate, NativeTable, Vm};
-use crossbeam_deque::{Injector, Stealer, Worker as LocalDeque};
 
 use super::directory::Directory;
 use super::error::SpawnError;
@@ -14,6 +13,7 @@ use super::mailbox::{Delivery, Mailbox, MailboxConfig, MailboxFullReason};
 use super::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use super::monitor::FlowExitReason;
 use super::process::{Flow, FlowId, FlowOutcome, RestartPolicy};
+use super::runqueue::{Injector, Stealer, Worker as LocalDeque};
 use super::supervisor::SupervisorLink;
 use super::timer::TimerWheel;
 use super::worker;
@@ -46,6 +46,11 @@ pub struct RuntimeConfig {
     /// Hard cap on concurrently live flows (`0` = unlimited).
     /// Checked on every host and bytecode `spawn`.
     pub max_flows: u32,
+    /// Process-wide memory ceiling for heap charges (`Str` / `Bytes`
+    /// register stores and shared [`crate::HeapStr`] / [`crate::HeapBytes`]).
+    /// Independent of per-flow [`crate::QuotaConfig::mem_limit`] and mailbox
+    /// byte budgets. Default: 256 MiB.
+    pub max_runtime_bytes: usize,
     /// Constant-pool trust for [`crate::verify_with`] at runtime construction.
     /// Default is [`crate::TrustLevel::Untrusted`] (fail closed).
     pub trust: crate::bytecode::TrustLevel,
@@ -79,13 +84,22 @@ impl Default for JitConfig {
     }
 }
 
+/// Logical CPU count for [`RuntimeConfig::default`], via `std` only.
+fn default_worker_count() -> usize {
+    match std::thread::available_parallelism() {
+        Ok(n) => n.get().max(1),
+        Err(_) => 1,
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         RuntimeConfig {
-            workers: num_cpus::get().max(1),
+            workers: default_worker_count(),
             quantum: DEFAULT_QUANTUM,
             mailbox: MailboxConfig::DEFAULT,
             max_flows: 0,
+            max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
             output: Arc::new(crate::output::NullSink),
             quota: super::quota::QuotaConfig::default(),
@@ -114,7 +128,9 @@ pub struct Shared {
     pub(crate) shutdown: AtomicBool,
     pub(crate) quantum: u32,
     pub(crate) mailbox: MailboxConfig,
-    pub(crate) max_flows: u32,
+    /// Atomic live-flow budget (`max_flows == 0` → unlimited).
+    pub(crate) flow_limit: super::flow_limit::FlowLimit,
+    pub(crate) memory: Arc<crate::MemoryBudget>,
     pub(crate) quota: super::quota::QuotaConfig,
     pub(crate) quotas: super::quota::QuotaTable,
     pub(crate) monitors: super::monitor::MonitorStore,
@@ -229,7 +245,8 @@ impl Runtime {
             shutdown: AtomicBool::new(false),
             quantum: config.quantum,
             mailbox: config.mailbox,
-            max_flows: config.max_flows,
+            flow_limit: super::flow_limit::FlowLimit::new(config.max_flows),
+            memory: Arc::new(crate::MemoryBudget::new(config.max_runtime_bytes)),
             quota: config.quota,
             quotas: super::quota::QuotaTable::new(),
             monitors: super::monitor::MonitorStore::new(),
@@ -313,11 +330,18 @@ impl Runtime {
         self.shared.metrics.snapshot()
     }
 
-    /// Number of flows currently registered in the directory — i.e.
-    /// alive (running, ready, sleeping, or waiting), not counting ones that
-    /// have already completed or failed.
+    /// Approximate number of flows currently registered in the directory.
+    ///
+    /// Sharded sum without a global snapshot — fine for dashboards
+    /// ([`Self::metrics`]), **not** for admission control (see
+    /// [`super::flow_limit::FlowLimit`] / `max_flows`).
     pub fn live_flows(&self) -> usize {
         self.shared.directory.len()
+    }
+
+    /// Process-wide heap accounting snapshot (`max_runtime_bytes` ceiling).
+    pub fn memory_snapshot(&self) -> crate::MemorySnapshot {
+        self.shared.memory.snapshot()
     }
 
     pub fn worker_count(&self) -> usize {
@@ -355,6 +379,10 @@ impl Runtime {
             Err(_) => return Err(SendError::Capability),
         };
         match mailbox.push(stamped.clone()) {
+            // Host `send` is fire-and-forget: DropNewest means the hop was
+            // intentionally discarded under policy, not an infrastructure
+            // error. Bytecode `Ask` treats DropNewest as hard failure in
+            // `worker::deliver` (must not park waiting for a reply).
             Ok(Ok(Delivery::Queued | Delivery::QueuedDropOldest | Delivery::DroppedNewest)) => {
                 Ok(())
             }
@@ -385,10 +413,15 @@ impl Runtime {
                     }
                 }
             }
-            Ok(Err(full)) => Err(SendError::MailboxFull {
-                flow: target,
-                reason: full.reason(),
-            }),
+            Ok(Err(full)) => {
+                if full.reason() == MailboxFullReason::Closed {
+                    return Err(SendError::NoSuchFlow(target));
+                }
+                Err(SendError::MailboxFull {
+                    flow: target,
+                    reason: full.reason(),
+                })
+            }
             Err(e) => {
                 super::error::report_fault(e);
                 Err(SendError::Unavailable)
@@ -787,26 +820,25 @@ pub(crate) fn spawn_on(
     parent: Option<FlowId>,
     bytecode: Option<BytecodeSpawn<'_>>,
 ) -> Result<FlowHandle, SpawnError> {
-    if shared.max_flows > 0 {
-        let current = shared.directory.len();
-        if current >= shared.max_flows as usize {
-            return Err(SpawnError::FlowLimit {
-                current,
-                max: shared.max_flows,
-            });
-        }
-    }
+    shared.flow_limit.try_reserve()?;
     let id = match super::process::try_next_flow_id() {
         Ok(id) => id,
         Err(super::error::RuntimeError::FlowIdExhausted) => {
-            return Err(SpawnError::FlowIdExhausted)
+            shared.flow_limit.release();
+            return Err(SpawnError::FlowIdExhausted);
         }
-        Err(_) => return Err(SpawnError::Unavailable),
+        Err(_) => {
+            shared.flow_limit.release();
+            return Err(SpawnError::Unavailable);
+        }
     };
-    let cell = shared
-        .caps
-        .bind_flow(id)
-        .map_err(|_| SpawnError::Unavailable)?;
+    let cell = match shared.caps.bind_flow(id) {
+        Ok(c) => c,
+        Err(_) => {
+            shared.flow_limit.release();
+            return Err(SpawnError::Unavailable);
+        }
+    };
     let authority = match bytecode {
         None => Cap::root(
             CapTarget::Flow(id.as_u64()),
@@ -814,7 +846,7 @@ pub(crate) fn spawn_on(
             Some(NativeMask::full(natives.len())),
             cell.as_ref(),
         ),
-        Some(ctx) => super::spawn::exec_spawn_authority(
+        Some(ctx) => match super::spawn::exec_spawn_authority(
             ctx.authority,
             ctx.cell,
             ctx.quota,
@@ -822,10 +854,23 @@ pub(crate) fn spawn_on(
             ctx.requested_rights,
             None,
             cell.as_ref(),
-        )
-        .map_err(SpawnError::from)?,
+        ) {
+            Ok(cap) => cap,
+            Err(e) => {
+                shared.flow_limit.release();
+                let _ = shared.caps.revoke_flow(id);
+                return Err(SpawnError::from(e));
+            }
+        },
     };
-    let args = grant_caps_in_args(shared, parent, id, args)?;
+    let args = match grant_caps_in_args(shared, parent, id, args) {
+        Ok(a) => a,
+        Err(e) => {
+            shared.flow_limit.release();
+            let _ = shared.caps.revoke_flow(id);
+            return Err(e);
+        }
+    };
     let gate = NativeGate::from_authority(
         &authority,
         Arc::clone(&cell),
@@ -833,15 +878,38 @@ pub(crate) fn spawn_on(
         natives.len(),
     );
     let quota = Arc::new(super::quota::FlowQuota::from_config(shared.quota));
-    let mut vm = Vm::with_native_gate(chunk.clone(), natives.clone(), gate, function, args.as_slice())?;
-    vm.set_quota(Arc::clone(&quota))?;
+    let mut vm = match Vm::with_native_gate(
+        chunk.clone(),
+        natives.clone(),
+        gate,
+        function,
+        args.as_slice(),
+    ) {
+        Ok(vm) => vm,
+        Err(e) => {
+            shared.flow_limit.release();
+            let _ = shared.caps.revoke_flow(id);
+            return Err(e.into());
+        }
+    };
+    vm.set_memory_budget(Arc::clone(&shared.memory));
+    if let Err(e) = vm.set_quota(Arc::clone(&quota)) {
+        shared.flow_limit.release();
+        let _ = shared.caps.revoke_flow(id);
+        return Err(e.into());
+    }
     let mailbox = Arc::new(Mailbox::with_config(shared.mailbox));
     if let Err(e) = shared.directory.register(id, mailbox.clone()) {
         super::error::report_fault(e);
+        shared.flow_limit.release();
+        let _ = shared.caps.revoke_flow(id);
         return Err(SpawnError::Unavailable);
     }
     if let Err(e) = shared.quotas.insert(id, Arc::clone(&quota)) {
         super::error::report_fault(e);
+        let _ = shared.directory.unregister(id);
+        shared.flow_limit.release();
+        let _ = shared.caps.revoke_flow(id);
         return Err(SpawnError::Unavailable);
     }
     let (tx, rx) = super::oneshot::channel();
@@ -1086,6 +1154,10 @@ mod tests {
         let second = rt.spawn(0, &[]);
         rt.kill(first.id())?;
         let _ = first.join();
+        // After finalize, the reserved slot must be free again.
+        let third = rt.spawn(0, &[])?;
+        rt.kill(third.id())?;
+        let _ = third.join();
         rt.shutdown();
         match second {
             Err(SpawnError::FlowLimit { current, max }) => {
@@ -1101,6 +1173,62 @@ mod tests {
                 }
             )
             .into()),
+        }
+    }
+
+    /// Ask must not park waiting for a reply when DropNewest discarded the request.
+    #[test]
+    fn ask_drop_newest_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::{Message, Program};
+        use crate::scheduler::mailbox::{MailboxCapacity, OverflowPolicy};
+
+        let mut program = Program::new("ask-drop-newest");
+        let busy = program.function("busy", 0, |f| {
+            // Stay alive without spinning the worker: sleep loop.
+            let loop_lbl = f.label();
+            f.bind(loop_lbl);
+            let ms = f.load_i32(50);
+            f.sleep(ms);
+            f.jump(loop_lbl);
+        });
+        let asker = program.function("asker", 1, |f| {
+            let server = f.reg(0);
+            let z = f.load_i32(0);
+            let req = f.hop_fresh(1, z);
+            let reply = f.ask(server, req);
+            f.return_(reply);
+        });
+        let chunk = program.build();
+
+        let cap = MailboxCapacity::new(1).ok_or("cap")?;
+        let rt = Runtime::with_natives_and_config(
+            chunk,
+            crate::std_native_table(),
+            RuntimeConfig {
+                // Busy target must not monopolize scheduling or Ask never runs.
+                workers: 2,
+                quantum: 1_000,
+                mailbox: MailboxConfig::new(cap, OverflowPolicy::DropNewest),
+                ..Default::default()
+            },
+        )?;
+
+        let server = rt.spawn(busy, &[])?;
+        // Fill the only slot so the subsequent Ask is DropNewest'd.
+        rt.send(
+            server.id(),
+            Value::Message(Message::request(1, 9, Value::Int(1))),
+        )?;
+        let server_cap = rt.mint_cap(server.id())?;
+        let ask = rt.spawn(asker, &[Value::Cap(server_cap)])?;
+        let outcome = ask.join_timeout(Duration::from_secs(3));
+        rt.kill(server.id())?;
+        let _ = server.join_timeout(Duration::from_millis(500));
+        rt.shutdown();
+
+        match outcome {
+            Some(FlowOutcome::Failed(msg)) if msg.contains("DropNewest") => Ok(()),
+            other => Err(format!("expected Ask DropNewest failure, got {other:?}").into()),
         }
     }
 

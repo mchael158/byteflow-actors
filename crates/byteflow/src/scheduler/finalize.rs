@@ -258,12 +258,21 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
     if let Err(e) = shared.caps.revoke_flow(id) {
         report_fault(e);
     }
-    if let Err(e) = shared.quotas.remove(id) {
-        report_fault(e);
+    match shared.quotas.remove(id) {
+        Ok(Some(q)) => {
+            let used = q.mem_used();
+            if used > 0 {
+                shared.memory.release(used);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => report_fault(e),
     }
     if let Err(e) = shared.directory.unregister(id) {
         report_fault(e);
     }
+    // Paired with `flow_limit.try_reserve` in `spawn_on`.
+    shared.flow_limit.release();
     if let Err(e) = shared.monitors.remove_owned_by(id) {
         report_fault(e);
     }

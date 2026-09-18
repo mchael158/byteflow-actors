@@ -9,6 +9,7 @@
 //! [`Value::Cap`] through [`CapTable`](super::capability::CapTable); raw
 //! [`Value::Pid`] is not an address.
 
+use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,8 +18,7 @@ use std::time::Duration;
 use crate::bytecode::{CapId, Message, Value};
 use crate::log;
 use crate::vm::VmResult;
-use crossbeam_deque::{Steal, Worker as LocalDeque};
-
+use super::runqueue::{Steal, Worker as LocalDeque};
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
 use super::finalize::{finalize_flow, request_kill, resume_or_fail, DuplicateAsk};
@@ -30,6 +30,38 @@ use super::process::{Flow, FlowId, FlowOutcome, PendingSend};
 use super::registry::RegistryName;
 use super::runtime::{flow_id_from_u64, spawn_on, wake_workers, BytecodeSpawn, Shared};
 use super::sync_lock;
+
+thread_local! {
+    /// True while this OS thread is executing inside a Byteflow worker loop.
+    static ON_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII flag: join / join_timeout must not run under this guard.
+pub struct WorkerGuard;
+
+impl WorkerGuard {
+    pub fn enter() -> Self {
+        ON_WORKER.with(|state| {
+            debug_assert!(!state.get(), "worker TLS entered twice");
+            state.set(true);
+        });
+        Self
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        ON_WORKER.with(|state| {
+            state.set(false);
+        });
+    }
+}
+
+/// Whether the current thread is inside a Byteflow worker quantum.
+#[inline]
+pub fn is_on_worker() -> bool {
+    ON_WORKER.with(Cell::get)
+}
 
 /// S1 + reply grant: single choke-point before mailbox `push` on bytecode hops.
 ///
@@ -182,6 +214,7 @@ fn resolve_relation_cap(
 /// Worker main loop. Panics inside a flow are caught here so one
 /// flow's bug cannot take the OS thread down (see `Fault` docs).
 pub fn run_worker(shared: Arc<Shared>, local: LocalDeque<Box<Flow>>) {
+    let _on_worker = WorkerGuard::enter();
     while !shared.shutdown.load(Ordering::Acquire) {
         match find_work(&shared, &local) {
             Some(flow) => drive_process(&shared, &local, flow),
@@ -463,7 +496,9 @@ fn drive_process(
                     stamped
                 ));
                 match deliver(shared, local, target, stamped.clone()) {
-                    DeliverStatus::Ok => {
+                    DeliverStatus::Ok | DeliverStatus::Dropped => {
+                        // Fire-and-forget: DropNewest is intentional loss,
+                        // not a hang. Free the hop charge either way.
                         flow.quota.free(hop_cost);
                     }
                     DeliverStatus::Full => {
@@ -599,6 +634,15 @@ fn drive_process(
                 match deliver(shared, local, target, stamped.clone()) {
                     DeliverStatus::Ok => {
                         flow.quota.free(hop_cost);
+                    }
+                    DeliverStatus::Dropped => {
+                        flow.quota.free(hop_cost);
+                        finish_failed(
+                            shared,
+                            *flow,
+                            "ask not delivered (mailbox DropNewest)".into(),
+                        );
+                        return;
                     }
                     DeliverStatus::Full => {
                         park_waiting_send(
@@ -894,8 +938,13 @@ fn drive_process(
 }
 
 enum DeliverStatus {
+    /// Hop is in the target inbox or was handed off to a waiter.
     Ok,
+    /// Inbox refused under `Reject` (caller may park as WAITING_SEND).
     Full,
+    /// `OverflowPolicy::DropNewest` discarded this hop — **not** delivered.
+    /// Fire-and-forget Send treats this as success; Ask must fail closed.
+    Dropped,
     Gone,
     Unavailable,
 }
@@ -982,7 +1031,7 @@ fn deliver(
             log::debug(format!(
                 "deliver drop-newest → flow#{target} msg={message}"
             ));
-            DeliverStatus::Ok
+            DeliverStatus::Dropped
         }
         Ok(Ok(Delivery::Handoff(flow))) => {
             log::debug(format!(
@@ -1013,6 +1062,9 @@ fn deliver(
         }
         Ok(Err(full)) => {
             let reason = full.reason();
+            if reason == super::mailbox::MailboxFullReason::Closed {
+                return DeliverStatus::Gone;
+            }
             log::info(format!(
                 "deliver rejected (mailbox full: {reason}) → flow#{target} msg={message}"
             ));

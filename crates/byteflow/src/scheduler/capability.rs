@@ -592,3 +592,106 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod properties {
+    //! CapTable invariants (Tier 1 stress suite — in-house PRNG).
+
+    use super::*;
+    use crate::prng::XorShift64;
+    use crate::scheduler::process::next_flow_id;
+
+    #[test]
+    fn mint_resolves_for_holder() -> Result<(), String> {
+        let mut rng = XorShift64::new(0xCA90_0001);
+        for _ in 0..64 {
+            let table = CapTable::new();
+            let holder = next_flow_id();
+            let target = next_flow_id();
+            let extra = (rng.next_u32() & 0b10) as u32;
+            let rights = CapRights::SEND.union(CapRights::from_bits(extra));
+            let id = table
+                .mint(holder, target, rights)
+                .map_err(|e| e.to_string())?;
+            let cap = table
+                .resolve(id, holder, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            if cap.holder != holder {
+                return Err("holder mismatch".into());
+            }
+            if !cap.cap.rights.contains(CapRights::SEND) {
+                return Err("missing SEND".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_rejects_non_holder() -> Result<(), String> {
+        for _ in 0..32 {
+            let table = CapTable::new();
+            let holder = next_flow_id();
+            let stranger = next_flow_id();
+            let target = next_flow_id();
+            let id = table
+                .mint(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            match table.resolve(id, stranger, CapRights::SEND) {
+                Err(CapError::NotHolder) => {}
+                Ok(_) => return Err("stranger must not resolve".into()),
+                Err(e) => return Err(format!("expected NotHolder, got {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mint_or_reuse_is_stable_for_pair() -> Result<(), String> {
+        for _ in 0..32 {
+            let table = CapTable::new();
+            let holder = next_flow_id();
+            let target = next_flow_id();
+            let a = table
+                .mint_or_reuse(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            let b = table
+                .mint_or_reuse(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            if a != b {
+                return Err("mint_or_reuse not stable".into());
+            }
+            table
+                .resolve(a, holder, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn revoke_invalidates_prior_token() -> Result<(), String> {
+        for _ in 0..32 {
+            let table = CapTable::new();
+            let holder = next_flow_id();
+            let target = next_flow_id();
+            let old = table
+                .mint(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            table.revoke_flow(target).map_err(|e| e.to_string())?;
+            match table.resolve(old, holder, CapRights::SEND) {
+                Err(CapError::Unknown) => {}
+                Ok(_) => return Err("revoked Cap must not resolve".into()),
+                Err(e) => return Err(format!("expected Unknown, got {e}")),
+            }
+            let fresh = table
+                .mint(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            if fresh == old {
+                return Err("fresh CapId collided with revoked".into());
+            }
+            table
+                .resolve(fresh, holder, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}

@@ -292,9 +292,11 @@ impl QuotaTable {
             .cloned())
     }
 
-    pub fn remove(&self, id: super::process::FlowId) -> Result<(), RuntimeError> {
-        sync_lock::lock(&self.inner, "QuotaTable::remove")?.remove(&id.as_u64());
-        Ok(())
+    pub fn remove(
+        &self,
+        id: super::process::FlowId,
+    ) -> Result<Option<Arc<FlowQuota>>, RuntimeError> {
+        Ok(sync_lock::lock(&self.inner, "QuotaTable::remove")?.remove(&id.as_u64()))
     }
 }
 

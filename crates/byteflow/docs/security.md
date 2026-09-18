@@ -383,7 +383,9 @@ The following remain known limitations:
 
 - mailbox growth is bounded per inbox (`MailboxConfig`: hop count + byte budget);
   there is no runtime-wide byte cap across all flows;
-- flow creation is capped only when [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) is set (`0` = unlimited);
+- flow creation is capped by an atomic [`FlowLimit`](../src/scheduler/flow_limit.rs)
+  reservation when [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) is
+  set (`0` = unlimited); the slot is released on finalize or spawn rollback;
 - outstanding `Ask` waits are released if the target exits (`TAG_SYS_EXIT`);
   they are not otherwise quota-limited;
 - native functions that consume arbitrary host resources.
@@ -521,6 +523,11 @@ Native allowlists, per-flow quotas (CPU / memory / spawn-send rate),
 Bytecode `register_name` / `whereis` (SEND Cap, never FlowId), interim
 heap charge for `Str`/`Bytes` in registers, `QuotaConfig::sandbox`,
 admin mem/send top-up, and host `Runtime::send` on the same hop auth path.
+
+### Tier 1 property / fuzz (done — unreleased)
+
+proptest-free stress suites for mailbox bounds, CapTable mint/resolve/revoke, and
+decode/verify panic-freedom (`docs/properties.md`).
 
 ### Phase 4
 
