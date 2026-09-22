@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
-use super::finalize::{finalize_flow, request_kill, resume_or_fail, DuplicateAsk};
+use super::finalize::{finalize_flow, request_kill, resume_or_fail};
 use super::link::LinkId;
 use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitFilter};
 use super::metrics::RuntimeMetrics;
@@ -1119,8 +1119,8 @@ fn park_ask(
     };
     match shared.ask_waits.insert(asker, target, rid) {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => {
-            finish_failed(shared, *flow, DuplicateAsk.to_string());
+        Ok(Err(e)) => {
+            finish_failed(shared, *flow, e.to_string());
             return;
         }
         Err(e) => {

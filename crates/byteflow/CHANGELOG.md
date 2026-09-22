@@ -15,6 +15,9 @@ All notable changes to **byteflow-actors** are documented here.
   consults the dying flow's policy via `ChildExit`.
 - **Phase 4 attestation (host integrity):** `fingerprint_bf` /
   `decode_attested` — deterministic `.bf` fingerprint (not crypto PKI).
+- **`RuntimeConfig::max_ask_waits`:** process-wide cap on outstanding Ask
+  waiters (`0` = unlimited); [`RuntimeConfig::sandbox`] sets 128 together
+  with tighter `max_flows` / quotas.
 - Criterion benches (`benches/runtime.rs`: spawn/join + Atomic Hop `Ask`).
 - Hermetic GitHub Actions CI: `cargo fetch --locked`, then
   `fmt` / clippy (`-D warnings`) / test / bench `--locked --offline`
@@ -23,6 +26,8 @@ All notable changes to **byteflow-actors** are documented here.
 
 ### Changed
 
+- `samples::atomic_actors` asserts reply `request_id` matches the request;
+  example `atomic_actors` reuses the sample chunk (no protocol drift).
 - Docs synced for memory release-on-overwrite, `max_runtime_bytes`, join
   worker guard, `trap_exit`, Phase 4, BEAM mapping gaps, `WAITING_SEND`
   under `Reject`, and `#![deny(unsafe_code)]` (not forbid).

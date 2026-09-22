@@ -44,7 +44,9 @@ impl QuotaConfig {
     }
 
     /// Starting point for untrusted modules. Tune under real load before
-    /// using as a production default.
+    /// using as a production default. Pair with
+    /// [`crate::RuntimeConfig::sandbox`] for process-wide `max_flows` /
+    /// `max_ask_waits` ceilings.
     pub fn sandbox() -> Self {
         Self {
             cpu_budget: 50_000,

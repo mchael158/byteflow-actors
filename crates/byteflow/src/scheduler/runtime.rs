@@ -47,6 +47,11 @@ pub struct RuntimeConfig {
     /// Hard cap on concurrently live flows (`0` = unlimited).
     /// Checked on every host and bytecode `spawn`.
     pub max_flows: u32,
+    /// Hard cap on outstanding `Ask` / `AskTimeout` waiters process-wide
+    /// (`0` = unlimited). Each asker holds at most one wait; this bounds the
+    /// total index size when many flows park against a silent target.
+    /// See [`crate::docs::security`] (DoS) and [`Self::sandbox`].
+    pub max_ask_waits: u32,
     /// Process-wide memory ceiling for heap charges (`Str` / `Bytes`
     /// register stores and shared [`crate::HeapStr`] / [`crate::HeapBytes`]).
     /// Independent of per-flow [`crate::QuotaConfig::mem_limit`] and mailbox
@@ -100,12 +105,28 @@ impl Default for RuntimeConfig {
             quantum: DEFAULT_QUANTUM,
             mailbox: MailboxConfig::DEFAULT,
             max_flows: 0,
+            max_ask_waits: 0,
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
             output: Arc::new(crate::output::NullSink),
             quota: super::quota::QuotaConfig::default(),
             #[cfg(feature = "jit")]
             jit: JitConfig::default(),
+        }
+    }
+}
+
+impl RuntimeConfig {
+    /// Starting point for untrusted modules: tight per-flow quotas plus
+    /// process-wide caps on live flows and outstanding Ask waits.
+    /// Tune under real load before using as a production default.
+    pub fn sandbox() -> Self {
+        RuntimeConfig {
+            quota: super::quota::QuotaConfig::sandbox(),
+            max_flows: 256,
+            max_ask_waits: 128,
+            max_runtime_bytes: 64 * 1024 * 1024,
+            ..Default::default()
         }
     }
 }
@@ -260,7 +281,7 @@ impl Runtime {
             kill_signals: super::finalize::KillSignals::new(),
             trap_exits: super::finalize::TrapExitFlags::new(),
             waiting_send_at: super::finalize::WaitingSendIndex::new(),
-            ask_waits: super::finalize::AskWaitIndex::new(),
+            ask_waits: super::finalize::AskWaitIndex::new(config.max_ask_waits),
             host_next_request_id: AtomicU64::new(1),
             #[cfg(feature = "jit")]
             jit,
@@ -1265,6 +1286,59 @@ mod tests {
         match outcome {
             Some(FlowOutcome::Failed(msg)) if msg.contains("DropNewest") => Ok(()),
             other => Err(format!("expected Ask DropNewest failure, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn max_ask_waits_rejects_extra_park() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::Program;
+
+        let mut program = Program::new("ask-limit");
+        let silent = program.function("silent", 0, |f| {
+            // Accept the request hop but never reply.
+            let _req = f.receive();
+            let loop_lbl = f.label();
+            f.bind(loop_lbl);
+            let ms = f.load_i32(50);
+            f.sleep(ms);
+            f.jump(loop_lbl);
+        });
+        let asker = program.function("asker", 1, |f| {
+            let server = f.reg(0);
+            let z = f.load_i32(0);
+            let req = f.hop_fresh(1, z);
+            let reply = f.ask(server, req);
+            f.return_(reply);
+        });
+        let chunk = program.build();
+
+        let rt = Runtime::with_natives_and_config(
+            chunk,
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 2,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                max_ask_waits: 1,
+                ..Default::default()
+            },
+        )?;
+
+        let server = rt.spawn(silent, &[])?;
+        let server_cap = rt.mint_cap(server.id())?;
+        let first = rt.spawn(asker, &[Value::Cap(server_cap)])?;
+        // Give the first Ask time to park before the second tries.
+        std::thread::sleep(Duration::from_millis(30));
+        let second = rt.spawn(asker, &[Value::Cap(server_cap)])?;
+        let second_out = second.join_timeout(Duration::from_secs(2));
+        rt.kill(server.id())?;
+        let _ = first.join_timeout(Duration::from_millis(500));
+        let _ = server.join_timeout(Duration::from_millis(500));
+        rt.shutdown();
+
+        match second_out {
+            Some(FlowOutcome::Failed(msg)) if msg.contains("Ask wait limit") => Ok(()),
+            other => Err(format!("expected Ask wait limit failure, got {other:?}").into()),
         }
     }
 

@@ -390,7 +390,9 @@ The following remain known limitations:
   reservation when [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) is
   set (`0` = unlimited); the slot is released on finalize or spawn rollback;
 - outstanding `Ask` waits are released if the target exits (`TAG_SYS_EXIT`);
-  they are not otherwise quota-limited;
+  process-wide count is capped by
+  [`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs) (`0` =
+  unlimited; [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs) sets 128);
 - native functions that consume arbitrary host resources.
 
 Per-flow [`QuotaConfig`](crate::QuotaConfig) (CPU, heap, spawn/send rate)

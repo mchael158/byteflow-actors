@@ -300,8 +300,9 @@ pub fn named_service() -> Chunk {
 }
 
 /// Canonical Atomic Hop actor demo: one server loop, two clients, each
-/// doing `N` `Ask`s with minted `request_id`s. Main waits for both DONE
-/// hops and returns the sum of the client accumulators (`2 * 36 = 72`).
+/// doing `N` `Ask`s with minted `request_id`s. Each client asserts that the
+/// reply echoes the request's `request_id` before accumulating. Main waits
+/// for both DONE hops and returns the sum (`2 * 36 = 72`).
 pub fn atomic_actors() -> Chunk {
     const N: i32 = 8;
     let mut p = Program::new("atomic-actors");
@@ -322,11 +323,21 @@ pub fn atomic_actors() -> Chunk {
         let n = f.load_i32(N);
         f.while_lt(i, n, |f| {
             let req = f.hop_fresh(TAG_REQ, i);
+            let expect = f.hop_request_id(req);
             let reply = f.ask(server_cap, req);
+            let got_id = f.hop_request_id(reply);
+            let same = f.eq(expect, got_id);
+            let bad = f.label();
+            f.branch_if_falsy(same, bad);
             let got = f.hop_payload(reply);
             let sum = f.add(acc, got);
             f.mov(acc, sum);
             f.add_imm(i, 1);
+            let cont = f.label();
+            f.jump(cont);
+            f.bind(bad);
+            f.trap(1);
+            f.bind(cont);
         });
         let done = f.hop_fresh(TAG_DONE, acc);
         f.send(parent_cap, done);

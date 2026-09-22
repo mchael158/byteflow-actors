@@ -65,6 +65,10 @@ with [`TAG_SYS_EXIT`](../src/bytecode/value.rs) (`Message::linked_exit`:
 `sender` = dead FlowId, `payload` = `FlowExitReason`). This is not a hang
 and is distinct from `AskTimeout` writing `Unit`.
 
+Process-wide, outstanding Ask waiters are capped by
+[`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs) (`0` =
+unlimited). A park that would exceed the cap fails the asker closed.
+
 ## `WAITING_SEND`
 
 Bytecode `Send` / `Ask` against a full `Reject` inbox **park the sender**
@@ -92,7 +96,8 @@ restart, not the sibling kills.
 
 [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) (`0` = unlimited)
 is checked on every host and bytecode `spawn`. Over the cap →
-`SpawnError::FlowLimit`.
+`SpawnError::FlowLimit`. Outstanding Ask waiters are similarly capped by
+[`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs).
 
 Each flow also carries a [`FlowQuota`](../src/scheduler/quota.rs) from
 [`RuntimeConfig::quota`](../src/scheduler/runtime.rs): remaining CPU

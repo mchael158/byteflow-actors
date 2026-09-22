@@ -118,18 +118,33 @@ impl WaitingSendIndex {
 ///
 /// When the target exits, [`take_waiters_of`] lets finalize resume those
 /// waiters with [`crate::TAG_SYS_EXIT`] instead of leaving them parked forever.
-/// The asker already has an in-flight `Ask` (`request_id` still pending).
+///
+/// At most one in-flight `Ask` per asker (`request_id` still pending). The
+/// process-wide table size is capped by [`AskWaitIndex::new`]'s `max`
+/// (`0` = unlimited), mirroring [`crate::RuntimeConfig::max_ask_waits`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DuplicateAsk;
+pub(crate) enum AskInsertError {
+    /// The asker already has an in-flight `Ask`.
+    Duplicate,
+    /// Process-wide outstanding-Ask budget exhausted.
+    LimitReached { current: usize, max: usize },
+}
 
-impl std::fmt::Display for DuplicateAsk {
+impl std::fmt::Display for AskInsertError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("duplicate in-flight Ask request_id")
+        match self {
+            AskInsertError::Duplicate => f.write_str("duplicate in-flight Ask request_id"),
+            AskInsertError::LimitReached { current, max } => {
+                write!(f, "Ask wait limit reached ({current}/{max})")
+            }
+        }
     }
 }
 
 pub struct AskWaitIndex {
     inner: Mutex<AskWaitInner>,
+    /// `0` = unlimited.
+    max: usize,
 }
 
 struct AskWaitInner {
@@ -139,13 +154,15 @@ struct AskWaitInner {
 }
 
 impl AskWaitIndex {
-    pub fn new() -> Self {
+    /// `max_ask_waits == 0` → unlimited outstanding waits.
+    pub fn new(max_ask_waits: u32) -> Self {
         Self {
             inner: Mutex::new(AskWaitInner {
                 by_asker: HashMap::new(),
                 by_target: HashMap::new(),
                 request_ids: HashMap::new(),
             }),
+            max: max_ask_waits as usize,
         }
     }
 
@@ -154,10 +171,16 @@ impl AskWaitIndex {
         asker: FlowId,
         target: FlowId,
         request_id: u64,
-    ) -> Result<Result<(), DuplicateAsk>, RuntimeError> {
+    ) -> Result<Result<(), AskInsertError>, RuntimeError> {
         let mut g = sync_lock::lock(&self.inner, "AskWaitIndex::insert")?;
         if g.request_ids.contains_key(&asker) {
-            return Ok(Err(DuplicateAsk));
+            return Ok(Err(AskInsertError::Duplicate));
+        }
+        if self.max != 0 && g.by_asker.len() >= self.max {
+            return Ok(Err(AskInsertError::LimitReached {
+                current: g.by_asker.len(),
+                max: self.max,
+            }));
         }
         g.request_ids.insert(asker, request_id);
         g.by_asker.insert(asker, target);
@@ -564,7 +587,7 @@ mod ask_wait_tests {
         // Simulates the insert→park race: finalize's take_waiters_of runs
         // while the asker is indexed but not yet parked. park_ask must see
         // target_of == None and self-wake.
-        let idx = AskWaitIndex::new();
+        let idx = AskWaitIndex::new(0);
         let asker = FlowId(7);
         let target = FlowId(9);
         assert!(idx.insert(asker, target, 1)?.is_ok());
@@ -579,7 +602,7 @@ mod ask_wait_tests {
 
     #[test]
     fn target_of_tracks_insert_and_remove() -> Result<(), RuntimeError> {
-        let idx = AskWaitIndex::new();
+        let idx = AskWaitIndex::new(0);
         let asker = FlowId(3);
         let target = FlowId(5);
         assert_eq!(idx.target_of(asker)?, None);
@@ -587,6 +610,22 @@ mod ask_wait_tests {
         assert_eq!(idx.target_of(asker)?, Some(target));
         assert_eq!(idx.remove_asker(asker)?, Some(target));
         assert_eq!(idx.target_of(asker)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn insert_rejects_when_at_process_limit() -> Result<(), RuntimeError> {
+        let idx = AskWaitIndex::new(1);
+        let a = FlowId(1);
+        let b = FlowId(2);
+        let target = FlowId(9);
+        assert!(idx.insert(a, target, 1)?.is_ok());
+        assert!(matches!(
+            idx.insert(b, target, 2)?,
+            Err(AskInsertError::LimitReached { current: 1, max: 1 })
+        ));
+        assert_eq!(idx.remove_asker(a)?, Some(target));
+        assert!(idx.insert(b, target, 2)?.is_ok());
         Ok(())
     }
 }
