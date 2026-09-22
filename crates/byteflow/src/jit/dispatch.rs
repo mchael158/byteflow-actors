@@ -264,7 +264,14 @@ pub fn try_run_hot_runtime(
         if let Some(m) = metrics {
             crate::scheduler::RuntimeMetrics::inc(&m.jit_executions);
         }
-        let ret = run_compiled_trace(copy.entry, slots, key.entry_pc, budget, key.function, u32::from(register_count));
+        let ret = run_compiled_trace(
+            copy.entry,
+            slots,
+            key.entry_pc,
+            budget,
+            key.function,
+            u32::from(register_count),
+        );
         return Some(ret.into_reason());
     }
 
@@ -280,16 +287,16 @@ pub fn try_run_hot_runtime(
         return try_run_hot_runtime(runtime, chunk, key, slots, budget, register_count, metrics);
     }
 
-    let compiled = match with_jit_module(|module| TraceCompiler::new(module).compile_trace(chunk, key))
-    {
-        Ok(trace) => trace,
-        Err(_) => {
-            if let Some(m) = metrics {
-                crate::scheduler::RuntimeMetrics::inc(&m.jit_compile_failures);
+    let compiled =
+        match with_jit_module(|module| TraceCompiler::new(module).compile_trace(chunk, key)) {
+            Ok(trace) => trace,
+            Err(_) => {
+                if let Some(m) = metrics {
+                    crate::scheduler::RuntimeMetrics::inc(&m.jit_compile_failures);
+                }
+                return None;
             }
-            return None;
-        }
-    };
+        };
 
     runtime.insert_trace(key, compiled);
     if let Some(m) = metrics {
@@ -327,7 +334,10 @@ pub fn apply_exit_to_vm(
         }
         ExitReason::Continue { pc } | ExitReason::Effect { pc } | ExitReason::Deopt { pc } => {
             vm.set_pc(pc as usize);
-            if matches!(exit, ExitReason::Continue { .. } | ExitReason::Effect { .. }) {
+            if matches!(
+                exit,
+                ExitReason::Continue { .. } | ExitReason::Effect { .. }
+            ) {
                 sync_slots_to_vm(vm, slots)?;
             }
             Ok(None)
@@ -385,7 +395,10 @@ pub fn force_compile(
 mod tests {
     use std::sync::Arc;
 
-    use crate::{bytecode::builder::ChunkBuilder, FlowOutcome, NativeTable, Opcode, Runtime, Value, Vm, VmResult};
+    use crate::{
+        bytecode::builder::ChunkBuilder, FlowOutcome, NativeTable, Opcode, Runtime, Value, Vm,
+        VmResult,
+    };
 
     use super::*;
     use crate::jit::trace::{JitContext, TraceKey};

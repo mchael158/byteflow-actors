@@ -19,51 +19,50 @@
 //! See [`crate::docs::security`] and [`crate::docs::atomic_hop`].
 
 mod capability;
+mod delegate;
 mod directory;
 mod error;
 mod finalize;
 mod flow_limit;
 mod handle;
-mod link;
-mod link_admin;
-mod monitor;
-mod registry;
 #[cfg(feature = "jit")]
 mod jit;
+mod link;
+mod link_admin;
 mod mailbox;
 mod metrics;
+mod monitor;
 pub(crate) mod oneshot;
 mod process;
 mod quota;
+mod registry;
 mod runqueue;
 mod runtime;
 mod spawn;
-mod delegate;
 mod supervisor;
 mod sync_lock;
 mod timer;
 mod worker;
 
+pub use crate::bytecode::RestartPolicy;
 pub use capability::{CapError, CapRights, Capability};
-pub use quota::{FlowQuota, QuotaConfig, QuotaError};
 pub use delegate::{exec_delegate, DelegateError};
-pub use link_admin::{check_admin, check_link, check_monitor, AdminError, LinkError};
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
-pub use link::LinkId;
-pub use monitor::{DownEvent, FlowExitReason, MonitorRef};
-pub use registry::RegistryName;
 pub use handle::{FlowHandle, JoinError};
+pub use link::LinkId;
+pub use link_admin::{check_admin, check_link, check_monitor, AdminError, LinkError};
 pub use mailbox::{
     Delivery, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
     MailboxFullReason, MailboxStats, OverflowPolicy, WaitEpoch,
 };
 pub use metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
-pub use process::{
-    next_flow_id, Flow, FlowId, FlowMetrics, FlowOutcome, RestartPolicy,
-};
+pub use monitor::{DownEvent, FlowExitReason, MonitorRef};
+pub use process::{next_flow_id, Flow, FlowId, FlowMetrics, FlowOutcome};
+pub use quota::{FlowQuota, QuotaConfig, QuotaError};
+pub use registry::RegistryName;
+#[cfg(feature = "jit")]
+pub use runtime::JitConfig;
 pub use runtime::{
     flow_id_from_u64, Runtime, RuntimeConfig, RuntimeSpawner, SendError, DEFAULT_QUANTUM,
 };
-#[cfg(feature = "jit")]
-pub use runtime::JitConfig;
 pub use supervisor::{ChildSpec, RestartStrategy, Supervisor, SupervisorConfig};

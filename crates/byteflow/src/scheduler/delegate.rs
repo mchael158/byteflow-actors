@@ -53,9 +53,9 @@ impl std::fmt::Display for DelegateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DelegateError::SourceRevoked => f.write_str("delegate: source capability revoked"),
-            DelegateError::SourceLacksNative => f.write_str(
-                "delegate: cannot specify native-mask attenuation without NATIVE right",
-            ),
+            DelegateError::SourceLacksNative => {
+                f.write_str("delegate: cannot specify native-mask attenuation without NATIVE right")
+            }
         }
     }
 }
@@ -92,7 +92,9 @@ mod tests {
         let out = match exec_delegate(
             &src,
             &cell,
-            CapRights::SEND.union(CapRights::ADMIN).union(CapRights::NATIVE),
+            CapRights::SEND
+                .union(CapRights::ADMIN)
+                .union(CapRights::NATIVE),
             None,
         ) {
             Ok(c) => c,
@@ -115,12 +117,7 @@ mod tests {
                     None,
                     &cell,
                 );
-                let out = match exec_delegate(
-                    &src,
-                    &cell,
-                    CapRights::from_bits(want_bits),
-                    None,
-                ) {
+                let out = match exec_delegate(&src, &cell, CapRights::from_bits(want_bits), None) {
                     Ok(c) => c,
                     Err(err) => panic!("live cap must delegate: {err}"),
                 };
@@ -145,7 +142,10 @@ mod tests {
             Ok(cap) => cap,
             Err(err) => panic!("live NATIVE capability should delegate: {err}"),
         };
-        let got = out.native_mask.as_ref().expect("native mask present");
+        let got = match out.native_mask.as_ref() {
+            Some(m) => m,
+            None => panic!("native mask present"),
+        };
         assert!(got.is_subset_of(&src_mask));
         assert!(got.allows(3));
         assert!(got.allows(5));
@@ -182,7 +182,10 @@ mod tests {
         // SEND-only result still inherits the (unchanged) mask payload;
         // NATIVE bit was intersected away.
         assert!(!out.rights.contains(CapRights::NATIVE));
-        let got = out.native_mask.as_ref().expect("mask preserved");
+        let got = match out.native_mask.as_ref() {
+            Some(m) => m,
+            None => panic!("mask preserved"),
+        };
         assert!(got.is_subset_of(&src_mask));
         assert_eq!(got.allows(2), src_mask.allows(2));
         assert_eq!(got.allows(4), src_mask.allows(4));

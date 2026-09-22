@@ -4,12 +4,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::bytecode::Value;
+use crate::bytecode::{RestartPolicy, Value};
 
 use super::error::{report_fault, SpawnError};
 use super::handle::FlowHandle;
 use super::monitor::FlowExitReason;
-use super::process::{FlowId, FlowOutcome, RestartPolicy};
+use super::process::{FlowId, FlowOutcome};
 use super::runtime::RuntimeSpawner;
 use super::sync_lock;
 
@@ -26,8 +26,9 @@ const DEFAULT_MAX_PERIOD: Duration = Duration::from_secs(5);
 /// [`super::runtime::Runtime::spawn`] takes. Args are cloned on every
 /// restart so a child always comes back with the original call.
 ///
-/// Non-empty [`Self::name`] is registered as `register_name` → a SEND|ASK
-/// Cap for that incarnation (swept on exit, re-bound on restart).
+/// Non-empty [`Self::name`] is registered as `register_name` → an addressing
+/// Cap ([`CapRights::ADDRESSING`]) for that incarnation (swept on exit,
+/// re-bound on restart).
 #[derive(Clone, Debug)]
 pub struct ChildSpec {
     pub name: String,
@@ -98,6 +99,8 @@ impl Default for SupervisorConfig {
 struct ChildExit {
     id: FlowId,
     outcome: FlowOutcome,
+    /// Policy from the dying flow (`SetRestartPolicy` / spawn default).
+    restart: RestartPolicy,
 }
 
 struct LiveChild {
@@ -162,10 +165,14 @@ pub(crate) struct SupervisorLink {
 }
 
 impl SupervisorLink {
-    pub(crate) fn notify(&self, id: FlowId, outcome: FlowOutcome) {
+    pub(crate) fn notify(&self, id: FlowId, outcome: FlowOutcome, restart: RestartPolicy) {
         match sync_lock::lock(&self.inner.events, "SupervisorLink::notify") {
             Ok(mut events) => {
-                events.push_back(ChildExit { id, outcome });
+                events.push_back(ChildExit {
+                    id,
+                    outcome,
+                    restart,
+                });
                 self.inner.cvar.notify_one();
             }
             Err(e) => report_fault(e),
@@ -200,7 +207,10 @@ impl Supervisor {
     /// Start the dedicated supervisor OS thread. Thread-spawn failure is
     /// [`SpawnError::ThreadSpawnFailed`] — same category-A surface as
     /// [`super::runtime::Runtime::new`], not a panic.
-    pub fn with_config(spawner: RuntimeSpawner, config: SupervisorConfig) -> Result<Self, SpawnError> {
+    pub fn with_config(
+        spawner: RuntimeSpawner,
+        config: SupervisorConfig,
+    ) -> Result<Self, SpawnError> {
         let inner = Arc::new(Inner {
             spawner,
             config,
@@ -270,17 +280,12 @@ fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnE
         Ok(c) => c,
         Err(e) => {
             report_fault(e);
-            return Err(SpawnError::VmInit(
-                "supervisor child table poisoned".into(),
-            ));
+            return Err(SpawnError::VmInit("supervisor child table poisoned".into()));
         }
     };
-    let handle = inner.spawner.spawn_linked(
-        spec.function,
-        &spec.args,
-        spec.restart,
-        link,
-    )?;
+    let handle = inner
+        .spawner
+        .spawn_linked(spec.function, &spec.args, spec.restart, link)?;
     if !spec.name.is_empty() {
         if let Err(e) = register_child_name(inner, handle.id(), &spec.name) {
             inner
@@ -309,17 +314,16 @@ fn register_child_name(inner: &Inner, id: FlowId, name: &str) -> Result<(), Spaw
             report_fault(e);
             SpawnError::VmInit("cap mint failed (poisoned lock)".into())
         })?;
-    match inner.spawner.shared.registry.register(
-        super::registry::RegistryName::from(name),
-        cap,
-        id,
-    ) {
+    match inner
+        .spawner
+        .shared
+        .registry
+        .register(super::registry::RegistryName::from(name), cap, id)
+    {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(super::error::LifecycleError::AlreadyRegistered)) => {
-            Err(SpawnError::NameTaken {
-                name: name.to_string(),
-            })
-        }
+        Ok(Err(super::error::LifecycleError::AlreadyRegistered)) => Err(SpawnError::NameTaken {
+            name: name.to_string(),
+        }),
         Ok(Err(e)) => Err(SpawnError::VmInit(e.to_string())),
         Err(e) => {
             report_fault(e);
@@ -433,7 +437,7 @@ fn handle_exit(inner: &Arc<Inner>, exit: ChildExit) {
         return;
     }
 
-    if !should_restart(spec.restart, &exit.outcome) {
+    if !should_restart(exit.restart, &exit.outcome) {
         return;
     }
     if inner.intensity_exceeded.load(Ordering::Acquire) || intensity_hit(inner) {
@@ -490,10 +494,12 @@ fn start_cascade(
 
     let waiting: HashSet<FlowId> = later.iter().copied().collect();
     match sync_lock::lock(&inner.cascade, "start_cascade.cascade") {
-        Ok(mut slot) => *slot = Some(Cascade {
-            waiting: waiting.clone(),
-            specs,
-        }),
+        Ok(mut slot) => {
+            *slot = Some(Cascade {
+                waiting: waiting.clone(),
+                specs,
+            })
+        }
         Err(e) => {
             report_fault(e);
             return;
@@ -575,6 +581,15 @@ mod tests {
         b.finish()
     }
 
+    /// Sets `RestartPolicy::Never` then traps — must not be restarted.
+    fn never_then_trap_chunk() -> Chunk {
+        let mut b = ChunkBuilder::new("never-trap");
+        b.begin_function("boom", 0, 1);
+        b.emit_set_restart_policy(RestartPolicy::Never.as_u8());
+        b.emit_trap(1);
+        b.finish()
+    }
+
     fn ok_chunk() -> Chunk {
         let mut b = ChunkBuilder::new("ok");
         b.begin_function("main", 0, 1);
@@ -633,8 +648,8 @@ mod tests {
                 strategy: RestartStrategy::OneForOne,
             },
         )?;
-        let _first = sup
-            .start_child(ChildSpec::new("boom", 0).restart(RestartPolicy::OnFailure))?;
+        let _first =
+            sup.start_child(ChildSpec::new("boom", 0).restart(RestartPolicy::OnFailure))?;
         wait_until(|| sup.intensity_exceeded() && rt.metrics().processes_failed >= 3);
         let spawned = rt.metrics().processes_spawned;
         let failed = rt.metrics().processes_failed;
@@ -643,6 +658,33 @@ mod tests {
         // initial start + 2 restarts, then intensity refuses the 3rd restart
         assert_eq!(spawned, 3);
         assert_eq!(failed, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn set_restart_policy_never_skips_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tiny_runtime(never_then_trap_chunk())?;
+        let sup = Supervisor::with_config(
+            rt.spawner(),
+            SupervisorConfig {
+                max_restarts: 5,
+                max_period: Duration::from_secs(5),
+                strategy: RestartStrategy::OneForOne,
+            },
+        )?;
+        // ChildSpec says OnFailure, but bytecode SetRestartPolicy(Never)
+        // must win at exit.
+        let _ = sup.start_child(ChildSpec::new("boom", 0).restart(RestartPolicy::OnFailure))?;
+        wait_until(|| rt.metrics().processes_failed >= 1 && sup.live_children() == 0);
+        let spawned = rt.metrics().processes_spawned;
+        let failed = rt.metrics().processes_failed;
+        std::thread::sleep(Duration::from_millis(50));
+        let spawned_after = rt.metrics().processes_spawned;
+        sup.shutdown();
+        rt.shutdown();
+        assert_eq!(failed, 1);
+        assert_eq!(spawned, 1);
+        assert_eq!(spawned_after, 1, "Never must not restart");
         Ok(())
     }
 
@@ -657,8 +699,7 @@ mod tests {
                 strategy: RestartStrategy::OneForOne,
             },
         )?;
-        let _ = sup
-            .start_child(ChildSpec::new("main", 0).restart(RestartPolicy::Always))?;
+        let _ = sup.start_child(ChildSpec::new("main", 0).restart(RestartPolicy::Always))?;
         wait_until(|| sup.intensity_exceeded() && rt.metrics().processes_completed >= 3);
         let spawned = rt.metrics().processes_spawned;
         sup.shutdown();
@@ -688,7 +729,10 @@ mod tests {
         let parked = sup.start_child(ChildSpec::new("wait", 0))?;
         let _boom = sup.start_child(ChildSpec::new("boom", 1).restart(RestartPolicy::OnFailure))?;
         wait_until(|| rt.metrics().processes_failed >= 1);
-        assert!(parked.try_join().is_none(), "one-for-one must leave the parked sibling");
+        assert!(
+            parked.try_join().is_none(),
+            "one-for-one must leave the parked sibling"
+        );
         sup.shutdown();
         rt.shutdown();
         Ok(())
@@ -730,8 +774,8 @@ mod tests {
             },
         )?;
         let earlier = sup.start_child(ChildSpec::new("keep", 0))?;
-        let _boom = sup
-            .start_child(ChildSpec::new("delayed", 2).restart(RestartPolicy::OnFailure))?;
+        let _boom =
+            sup.start_child(ChildSpec::new("delayed", 2).restart(RestartPolicy::OnFailure))?;
         let later = sup.start_child(ChildSpec::new("tail", 0))?;
         wait_until(|| later.try_join().is_some());
         assert!(

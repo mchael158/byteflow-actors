@@ -90,7 +90,10 @@ impl std::fmt::Display for NativeTableError {
                 write!(f, "duplicate native function registered: '{name}'")
             }
             NativeTableError::SlotOccupied { index, name } => {
-                write!(f, "native slot {index} already occupied (registering '{name}')")
+                write!(
+                    f,
+                    "native slot {index} already occupied (registering '{name}')"
+                )
             }
         }
     }
@@ -164,11 +167,7 @@ impl Default for NativeTableBuilder {
 }
 
 /// Require `args[index]` to exist.
-pub fn expect_arg<'a>(
-    args: &'a [Value],
-    index: usize,
-    fn_name: &str,
-) -> Result<&'a Value, Fault> {
+pub fn expect_arg<'a>(args: &'a [Value], index: usize, fn_name: &str) -> Result<&'a Value, Fault> {
     args.get(index).ok_or(Fault::NativeError(format!(
         "{fn_name}: missing argument {index}"
     )))
@@ -185,9 +184,9 @@ pub fn expect_int(args: &[Value], index: usize, fn_name: &str) -> Result<i64, Fa
 
 /// Require `args[index]` to be a bool (ints: nonzero = true).
 pub fn expect_bool(args: &[Value], index: usize, fn_name: &str) -> Result<bool, Fault> {
-    match expect_arg(args, index, fn_name)? {
-        Value::Bool(b) => Ok(*b),
-        Value::Int(i) => Ok(*i != 0),
+    let v = expect_arg(args, index, fn_name)?;
+    match v {
+        Value::Bool(_) | Value::Int(_) => Ok(v.is_truthy()),
         other => Err(Fault::NativeError(format!(
             "{fn_name}: argument {index} is not a bool/int (got {})",
             other.type_name()
@@ -212,21 +211,23 @@ pub fn expect_message(
         )))
 }
 
-/// Coerce `args[index]` to `u64` from `Int` (≥ 0), `Pid`, `Cap`, or `Bool`.
+/// Coerce `args[index]` to `u64` from `Int` (≥ 0) or `Pid`.
 ///
-/// `make_msg` accepts these so bytecode can pass a `SelfPid` / Spawn Cap
-/// result, a `Pid` identity, or a `LoadImm` without an extra conversion.
-/// Negative ints are rejected — envelope fields are unsigned on the wire.
+/// Used by `make_msg` for unsigned envelope fields (`request_id`, `tag`);
+/// accepts a non-negative `Int` or a `Pid` without an extra conversion.
+/// Negative ints are rejected — those fields are unsigned on the wire.
 pub fn expect_u64(args: &[Value], index: usize, fn_name: &str) -> Result<u64, Fault> {
-    match expect_arg(args, index, fn_name)? {
-        Value::Pid(p) => Ok(*p),
-        Value::Int(i) if *i >= 0 => Ok(*i as u64),
-        Value::Bool(b) => Ok(u64::from(*b)),
-        other => Err(Fault::NativeError(format!(
-            "{fn_name}: argument {index} is not a non-negative int/pid (got {})",
-            other.type_name()
-        ))),
+    let v = expect_arg(args, index, fn_name)?;
+    if let Some(p) = v.as_pid() {
+        return Ok(p);
     }
+    if let Some(i) = v.as_int().filter(|&n| n >= 0) {
+        return Ok(i as u64);
+    }
+    Err(Fault::NativeError(format!(
+        "{fn_name}: argument {index} is not a non-negative int/pid (got {})",
+        v.type_name()
+    )))
 }
 
 /// Per-flow native allowlist snapshot, checked before indexing the table.

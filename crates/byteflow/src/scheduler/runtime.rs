@@ -12,11 +12,12 @@ use super::handle::FlowHandle;
 use super::mailbox::{Delivery, Mailbox, MailboxConfig, MailboxFullReason};
 use super::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use super::monitor::FlowExitReason;
-use super::process::{Flow, FlowId, FlowOutcome, RestartPolicy};
+use super::process::{Flow, FlowId, FlowOutcome};
 use super::runqueue::{Injector, Stealer, Worker as LocalDeque};
 use super::supervisor::SupervisorLink;
 use super::timer::TimerWheel;
 use super::worker;
+use crate::bytecode::RestartPolicy;
 
 /// Default instruction budget per scheduling turn (design notes §10).
 /// Chosen as a middle ground: large enough that the per-yield bookkeeping
@@ -120,7 +121,7 @@ pub struct Shared {
     pub(crate) stealers: Vec<Stealer<Box<Flow>>>,
     /// FlowId → mailbox (delivery after Cap resolution).
     pub(crate) directory: Directory,
-    /// CapId → { FlowId, rights } (bytecode Send/Ask addressing — FlowCap).
+    /// CapId → { holder, target, rights, native_mask, epoch } (FlowCap).
     pub(crate) caps: super::capability::CapTable,
     pub(crate) timer: Arc<TimerWheel>,
     pub(crate) notify: (Mutex<()>, Condvar),
@@ -137,6 +138,7 @@ pub struct Shared {
     pub(crate) links: super::link::LinkStore,
     pub(crate) registry: super::registry::RegistryStore,
     pub(crate) kill_signals: super::finalize::KillSignals,
+    pub(crate) trap_exits: super::finalize::TrapExitFlags,
     pub(crate) waiting_send_at: super::finalize::WaitingSendIndex,
     pub(crate) ask_waits: super::finalize::AskWaitIndex,
     /// Correlation ids for host `Runtime::send` when `request_id == 0`.
@@ -229,7 +231,10 @@ impl Runtime {
 
         #[cfg(feature = "jit")]
         let jit = if config.jit.enabled {
-            Some(super::jit::new_runtime(chunk.clone(), config.jit.hot_threshold))
+            Some(super::jit::new_runtime(
+                chunk.clone(),
+                config.jit.hot_threshold,
+            ))
         } else {
             None
         };
@@ -253,6 +258,7 @@ impl Runtime {
             links: super::link::LinkStore::new(),
             registry: super::registry::RegistryStore::new(),
             kill_signals: super::finalize::KillSignals::new(),
+            trap_exits: super::finalize::TrapExitFlags::new(),
             waiting_send_at: super::finalize::WaitingSendIndex::new(),
             ask_waits: super::finalize::AskWaitIndex::new(),
             host_next_request_id: AtomicU64::new(1),
@@ -273,9 +279,7 @@ impl Runtime {
         let shared_timer = shared.clone();
         let timer_thread = std::thread::Builder::new()
             .name("byteflow-timer".into())
-            .spawn(move || {
-                shared_timer.timer.clone().drive(&shared_timer)
-            })
+            .spawn(move || shared_timer.timer.clone().drive(&shared_timer))
             .map_err(|e| SpawnError::ThreadSpawnFailed(e.to_string()))?;
 
         Ok(Runtime {
@@ -306,11 +310,15 @@ impl Runtime {
         )
     }
 
-    /// A cheap, `Send + Sync` handle that can spawn processes into this
+    /// A cheap, `Send + Sync` handle that can spawn flows into this
     /// runtime from any thread, independent of `Runtime`'s own lifetime
     /// bookkeeping (worker `JoinHandle`s). Used by [`super::supervisor::Supervisor`].
     pub fn spawner(&self) -> RuntimeSpawner {
-        RuntimeSpawner { shared: self.shared.clone(), chunk: self.chunk.clone(), natives: self.natives.clone() }
+        RuntimeSpawner {
+            shared: self.shared.clone(),
+            chunk: self.chunk.clone(),
+            natives: self.natives.clone(),
+        }
     }
 
     /// A [`super::supervisor::Supervisor`] bound to this runtime, ready to
@@ -323,7 +331,11 @@ impl Runtime {
     /// callers that built their chunk with [`crate::Program`]
     /// and don't want to thread raw indices through their own code.
     pub fn function_index(&self, name: &str) -> Option<u32> {
-        self.chunk.functions.iter().position(|f| f.name == name).map(|i| i as u32)
+        self.chunk
+            .functions
+            .iter()
+            .position(|f| f.name == name)
+            .map(|i| i as u32)
     }
 
     pub fn metrics(&self) -> RuntimeMetricsSnapshot {
@@ -442,8 +454,12 @@ impl Runtime {
         super::error::LifecycleError::Unavailable
     }
 
-    /// Mint a SEND|ASK Cap for a live flow (host equivalent of `SelfPid`).
-    pub fn mint_cap(&self, flow: FlowId) -> Result<crate::bytecode::CapId, super::error::LifecycleError> {
+    /// Mint an addressing Cap ([`CapRights::ADDRESSING`]) for a live flow
+    /// (host equivalent of `SelfPid`).
+    pub fn mint_cap(
+        &self,
+        flow: FlowId,
+    ) -> Result<crate::bytecode::CapId, super::error::LifecycleError> {
         self.require_live(flow)?;
         self.shared
             .caps
@@ -513,7 +529,10 @@ impl Runtime {
         }
     }
 
-    /// Bidirectional link. Abnormal exit of either side kills the peer.
+    /// Bidirectional link. Without `trap_exit`, abnormal exit of either side
+    /// kills the peer (`Normal` only drops the link). With
+    /// [`Self::set_trap_exit`] on a peer, that peer receives a
+    /// [`crate::TAG_SYS_EXIT`] hop for every linked exit (including `Normal`).
     pub fn link(
         &self,
         a: FlowId,
@@ -528,6 +547,22 @@ impl Runtime {
             Ok(inner) => inner,
             Err(e) => Err(self.unavailable(e)),
         }
+    }
+
+    /// BEAM-style `process_flag(trap_exit, …)`.
+    ///
+    /// When `enabled`, linked exits deliver a [`crate::TAG_SYS_EXIT`] hop
+    /// (including `Normal`) instead of killing this flow.
+    pub fn set_trap_exit(
+        &self,
+        id: FlowId,
+        enabled: bool,
+    ) -> Result<(), super::error::LifecycleError> {
+        self.require_live(id)?;
+        self.shared
+            .trap_exits
+            .set(id, enabled)
+            .map_err(|e| self.unavailable(e))
     }
 
     /// Drop `link` if `owner` is one of the endpoints.
@@ -559,18 +594,21 @@ impl Runtime {
             None => return Err(super::error::LifecycleError::InvalidCapability),
         };
         self.require_live(target)?;
-        match self.shared.registry.register(
-            super::registry::RegistryName::from(name),
-            cap,
-            target,
-        ) {
+        match self
+            .shared
+            .registry
+            .register(super::registry::RegistryName::from(name), cap, target)
+        {
             Ok(inner) => inner,
             Err(e) => Err(self.unavailable(e)),
         }
     }
 
     /// Look up a registered Cap, or `None` if the name is free / was swept.
-    pub fn whereis(&self, name: &str) -> Result<Option<crate::bytecode::CapId>, super::error::LifecycleError> {
+    pub fn whereis(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::bytecode::CapId>, super::error::LifecycleError> {
         self.shared
             .registry
             .whereis(name)
@@ -693,13 +731,8 @@ impl Runtime {
     /// drop JIT traces. Live flows and bytecode `Spawn` keep the parent's
     /// existing `Vm` chunk.
     pub fn reload_chunk(&mut self, chunk: Chunk) -> Result<(), SpawnError> {
-        crate::bytecode::verify_with(
-            &chunk,
-            crate::bytecode::VerifyConfig {
-                trust: self.trust,
-            },
-        )
-        .map_err(SpawnError::VerifyFailed)?;
+        crate::bytecode::verify_with(&chunk, crate::bytecode::VerifyConfig { trust: self.trust })
+            .map_err(SpawnError::VerifyFailed)?;
         let chunk = Arc::new(chunk);
         self.chunk = chunk.clone();
         #[cfg(feature = "jit")]
@@ -758,7 +791,9 @@ pub fn flow_id_from_u64(raw: u64) -> FlowId {
 pub enum SendError {
     NoSuchFlow(FlowId),
     /// Atomic Hop rule: only [`crate::Value::Message`] may cross `Send`.
-    NotAHop { got: &'static str },
+    NotAHop {
+        got: &'static str,
+    },
     /// Target inbox is at one of its logical bounds
     /// ([`OverflowPolicy::Reject`](crate::OverflowPolicy::Reject)). `reason` says which — see
     /// [`MailboxFullReason`].
@@ -809,6 +844,7 @@ pub(crate) struct BytecodeSpawn<'a> {
 /// Returns [`SpawnError`] on bad function index / VM init / directory
 /// poison — never panics. Bytecode `Opcode::Spawn` that fails here turns
 /// into `FlowOutcome::Failed` for the *parent* (see `worker`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_on(
     shared: &Arc<Shared>,
     chunk: &Arc<Chunk>,
@@ -957,9 +993,9 @@ pub(crate) fn wake_workers(shared: &Shared) {
     }
 }
 
-/// A `Send + Sync`, freely cloneable capability to spawn processes into a
+/// A `Send + Sync`, freely cloneable capability to spawn flows into a
 /// [`Runtime`], detached from the `Runtime` value itself. Exists because
-/// [`super::supervisor::Supervisor`] needs to respawn processes from a
+/// [`super::supervisor::Supervisor`] needs to respawn flows from a
 /// background monitor thread whose lifetime isn't tied to the `Runtime`
 /// object's own (which owns non-`Sync` `JoinHandle`s for its workers).
 #[derive(Clone)]
@@ -1051,8 +1087,8 @@ mod tests {
     /// bound *it* chooses, instead of surrendering itself to `join` for
     /// however long the bytecode decides to take.
     #[test]
-    fn polling_and_bounded_waits_never_commit_the_host_thread() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn polling_and_bounded_waits_never_commit_the_host_thread(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         const FLOW_SLEEP: i32 = 150;
         let rt = Runtime::with_config(
             sleep_then_return_chunk(FLOW_SLEEP),

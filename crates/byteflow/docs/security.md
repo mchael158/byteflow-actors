@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.3)
+## 7. FlowCap — Current Version (0.9.6)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -259,8 +259,9 @@ stable per `(recipient, sender)` pair (`mint_or_reuse`); a long ping-pong
 must not grow the capability table. [`FlowId`](crate::FlowId) is never
 reused, so the reverse index cannot alias a later incarnation.
 
-`SelfPid` and bytecode `Spawn` write a Cap (`SEND|ASK`) into the destination
-register — not a raw Pid.
+`SelfPid` and bytecode `Spawn` write a Cap
+([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING) =
+`SEND|ASK|LINK|MONITOR`) into the destination register — not a raw Pid.
 
 A `Value::Cap` in a hop payload is reissued to the recipient only if the
 sender is the current holder (`CapTable::delegate`). Knowing a token is
@@ -382,7 +383,9 @@ Byteflow does not provide complete resource isolation.
 The following remain known limitations:
 
 - mailbox growth is bounded per inbox (`MailboxConfig`: hop count + byte budget);
-  there is no runtime-wide byte cap across all flows;
+  process-wide heap is a separate ceiling
+  ([`RuntimeConfig::max_runtime_bytes`](../src/scheduler/runtime.rs) +
+  [`MemoryBudget`](../src/memory.rs)), not a per-mailbox aggregate;
 - flow creation is capped by an atomic [`FlowLimit`](../src/scheduler/flow_limit.rs)
   reservation when [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) is
   set (`0` = unlimited); the slot is released on finalize or spawn rollback;
@@ -393,13 +396,15 @@ The following remain known limitations:
 Per-flow [`QuotaConfig`](crate::QuotaConfig) (CPU, heap, spawn/send rate)
 and [`NativeMask`](crate::NativeMask) allowlists are enforced as of 0.9.2
 (extended in 0.9.3 with sandbox presets, register heap charge, and host hop
-parity).
+parity; tightened in 0.9.5 with release-on-overwrite and a process-wide
+byte ceiling).
 [`QuotaConfig::permissive`](crate::QuotaConfig::permissive) is the default;
 [`QuotaConfig::sandbox`](crate::QuotaConfig::sandbox) is a starting point
 for untrusted modules (tune under load). `Str` / `Bytes` written into
-registers charge heap (interim: no release until the flow exits). Hop
-payloads are still charged at `Send` / `Ask`. There is still no
-runtime-wide byte cap across all flows.
+registers charge heap with release-on-overwrite (delta accounting). Hop
+payloads are still charged at `Send` / `Ask`. The process-wide ceiling is
+[`RuntimeConfig::max_runtime_bytes`](../src/scheduler/runtime.rs) via
+[`MemoryBudget`](../src/memory.rs).
 
 Capability security prevents unauthorized access but does not automatically
 prevent an authorized flow from exhausting a budget it was granted.
@@ -433,7 +438,7 @@ because it originated outside bytecode.
 
 ---
 
-## 16. Capability Model (0.9.3 — implemented)
+## 16. Capability Model (0.9.6 — implemented)
 
 The security architecture is object-capability based:
 
@@ -441,8 +446,8 @@ The security architecture is object-capability based:
 token — **not** a [`FlowId`](crate::FlowId).
 
 A capability resolves through the per-runtime directory to
-`{ holder, target, rights, epoch }`. Resolution requires the calling flow
-to hold the token with sufficient rights.
+`{ holder, target, rights, native_mask, epoch }`. Resolution requires the
+calling flow to hold the token with sufficient rights.
 
 `LINK` / `MONITOR` / `ADMIN` bits are minted as follows: addressing Caps
 carry `LINK|MONITOR`; `ADMIN` requires [`CapTarget::Scheduler`](crate::CapTarget::Scheduler) and is
@@ -520,18 +525,30 @@ Native allowlists, per-flow quotas (CPU / memory / spawn-send rate),
 
 ### Phase 3 follow-ups (done — 0.9.3)
 
-Bytecode `register_name` / `whereis` (SEND Cap, never FlowId), interim
-heap charge for `Str`/`Bytes` in registers, `QuotaConfig::sandbox`,
-admin mem/send top-up, and host `Runtime::send` on the same hop auth path.
+Bytecode `register_name` / `whereis` (SEND Cap, never FlowId), heap charge
+for `Str`/`Bytes` in registers, `QuotaConfig::sandbox`, admin mem/send
+top-up, and host `Runtime::send` on the same hop auth path.
 
-### Tier 1 property / fuzz (done — unreleased)
+### Memory accounting + join guard (done — 0.9.5)
+
+Register heap charge/release on overwrite (delta accounting),
+[`RuntimeConfig::max_runtime_bytes`](../src/scheduler/runtime.rs) /
+[`MemoryBudget`](../src/memory.rs), and a machine-checked rejection of
+`FlowHandle::join*` from worker threads
+([`JoinError::CalledFromWorker`](../src/scheduler/handle.rs)).
+
+### Tier 1 property / fuzz (done — 0.9.5)
 
 proptest-free stress suites for mailbox bounds, CapTable mint/resolve/revoke, and
 decode/verify panic-freedom (`docs/properties.md`).
 
-### Phase 4
+### Phase 4 (done — 0.9.6)
 
-Optional host-side bytecode attestation.
+Host-side bytecode **integrity fingerprint**: [`fingerprint_bf`](crate::fingerprint_bf)
+ / [`decode_attested`](crate::decode_attested). Deterministic 32-byte digest over a
+`.bf` buffer so an embedder can refuse a module whose bytes do not match a
+known fingerprint. This is **not** cryptographic module attestation (no
+signatures, MACs, or trust roots inside Byteflow).
 
 ---
 
@@ -545,6 +562,7 @@ The following are explicitly outside the current security model:
 - constant-time scheduling;
 - protection against malicious trusted natives;
 - complete DoS resistance;
-- cryptographic module attestation.
+- cryptographic module attestation (signatures / PKI — hosts may layer this
+  on top of the Phase 4 integrity fingerprint).
 
 These may be implemented at higher layers where appropriate.

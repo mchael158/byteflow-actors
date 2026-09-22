@@ -138,7 +138,10 @@ impl std::fmt::Display for QuotaError {
         match self {
             QuotaError::CpuExhausted => f.write_str("flow CPU budget exhausted"),
             QuotaError::MemoryExhausted { requested, limit } => {
-                write!(f, "flow memory exhausted (requested {requested}, limit {limit})")
+                write!(
+                    f,
+                    "flow memory exhausted (requested {requested}, limit {limit})"
+                )
             }
             QuotaError::SpawnRateExceeded => f.write_str("spawn rate exceeded"),
             QuotaError::SendRateExceeded => f.write_str("send rate exceeded"),
@@ -281,7 +284,11 @@ impl QuotaTable {
         }
     }
 
-    pub fn insert(&self, id: super::process::FlowId, quota: Arc<FlowQuota>) -> Result<(), RuntimeError> {
+    pub fn insert(
+        &self,
+        id: super::process::FlowId,
+        quota: Arc<FlowQuota>,
+    ) -> Result<(), RuntimeError> {
         sync_lock::lock(&self.inner, "QuotaTable::insert")?.insert(id.as_u64(), quota);
         Ok(())
     }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use byteflow::samples::{self, add_forty_two, ping_pong};
 use byteflow::{
-    decode, disassemble, encode, std_native_table, verify, NativeTable, FlowOutcome, Runtime,
+    decode, disassemble, encode, std_native_table, verify, FlowOutcome, NativeTable, Runtime,
     RuntimeConfig,
 };
 
@@ -142,10 +142,22 @@ fn cmd_demo(name: &str) -> Result<(), ()> {
     let chunk = demo_chunk(name)?;
     // Atomic Hop demos (`ping-pong`) need make_msg / msg_*; `add` does not.
     let natives = match name {
-        "ping-pong" | "ping_pong" | "atomic" | "atomic-actors" | "atomic-request-reply"
-        | "selective" | "selective-receive" | "ask" | "ask-reply"
-        | "ask-timeout" | "server-loop" | "server" | "monitor" | "monitor-down"
-        | "ask-exit" | "ask-target-exits" => std_native_table(),
+        "ping-pong"
+        | "ping_pong"
+        | "atomic"
+        | "atomic-actors"
+        | "atomic-request-reply"
+        | "selective"
+        | "selective-receive"
+        | "ask"
+        | "ask-reply"
+        | "ask-timeout"
+        | "server-loop"
+        | "server"
+        | "monitor"
+        | "monitor-down"
+        | "ask-exit"
+        | "ask-target-exits" => std_native_table(),
         _ => NativeTable::empty(),
     };
     run_chunk(&chunk, Some("main"), natives)

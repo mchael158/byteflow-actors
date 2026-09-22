@@ -1,39 +1,10 @@
 //! Property-style mailbox stress tests (in-house PRNG — no external crates).
 
+use byteflow::prng::XorShift64;
 use byteflow::{
     Delivery, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFullReason,
     OverflowPolicy, Value,
 };
-
-#[derive(Clone)]
-struct XorShift64(u64);
-
-impl XorShift64 {
-    fn new(seed: u64) -> Self {
-        XorShift64(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    fn next_i64(&mut self) -> i64 {
-        self.next_u64() as i64
-    }
-
-    fn next_u32_inclusive(&mut self, lo: u32, hi: u32) -> u32 {
-        if lo >= hi {
-            return lo;
-        }
-        let span = (hi - lo) as u64 + 1;
-        lo + (self.next_u64() % span) as u32
-    }
-}
 
 fn mailbox(capacity: u32, policy: OverflowPolicy) -> Mailbox {
     let capacity = match MailboxCapacity::new(capacity) {
@@ -56,7 +27,8 @@ fn drop_newest_never_exceeds_capacity() -> Result<(), String> {
         let limit = capacity as usize;
         let n_payloads = rng.next_u32_inclusive(0, 200) as usize;
         for _ in 0..n_payloads {
-            mb.push(Value::Int(rng.next_i64()))
+            let _ = mb
+                .push(Value::Int(rng.next_i64()))
                 .map_err(|e| e.to_string())?;
             let stats = mb.stats().map_err(|e| e.to_string())?;
             if stats.queued_messages > limit {

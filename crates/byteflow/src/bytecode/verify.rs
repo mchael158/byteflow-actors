@@ -78,12 +78,31 @@ fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(
 /// §24 capability/sandboxing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
-    UnknownOpcode { at: usize, byte: u8 },
-    ConstOutOfRange { at: usize, index: u32, len: usize },
-    FunctionOutOfRange { at: usize, index: u32, len: usize },
-    JumpOutOfRange { at: usize, target: i64, len: usize },
+    UnknownOpcode {
+        at: usize,
+        byte: u8,
+    },
+    ConstOutOfRange {
+        at: usize,
+        index: u32,
+        len: usize,
+    },
+    FunctionOutOfRange {
+        at: usize,
+        index: u32,
+        len: usize,
+    },
+    JumpOutOfRange {
+        at: usize,
+        target: i64,
+        len: usize,
+    },
     EmptyFunctionTable,
-    EntryOutOfRange { function: usize, entry: u32, len: usize },
+    EntryOutOfRange {
+        function: usize,
+        entry: u32,
+        len: usize,
+    },
     /// A function declares more parameters than it has registers to hold
     /// them. The VM loads `r0..arity` on entry, so this makes the very first
     /// thing a call does — copying arguments in — reach past the register
@@ -96,7 +115,10 @@ pub enum VerifyError {
         num_registers: u8,
     },
     /// Untrusted chunk embedded a Cap, Pid, or Message in the constant pool.
-    ForbiddenConstant { index: usize, kind: ConstantKind },
+    ForbiddenConstant {
+        index: usize,
+        kind: ConstantKind,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -118,18 +140,25 @@ impl fmt::Display for VerifyError {
                 "instruction {at} jumps to {target}, out of code bounds (len={len})"
             ),
             VerifyError::EmptyFunctionTable => write!(f, "chunk has no entry function"),
-            VerifyError::EntryOutOfRange { function, entry, len } => write!(
+            VerifyError::EntryOutOfRange {
+                function,
+                entry,
+                len,
+            } => write!(
                 f,
                 "function {function} entry point {entry} is out of code bounds (len={len})"
             ),
-            VerifyError::ArityExceedsRegisters { function, arity, num_registers } => write!(
+            VerifyError::ArityExceedsRegisters {
+                function,
+                arity,
+                num_registers,
+            } => write!(
                 f,
                 "function {function} declares arity {arity} but only {num_registers} registers"
             ),
-            VerifyError::ForbiddenConstant { index, kind } => write!(
-                f,
-                "untrusted constant[{index}] must not embed {kind}"
-            ),
+            VerifyError::ForbiddenConstant { index, kind } => {
+                write!(f, "untrusted constant[{index}] must not embed {kind}")
+            }
         }
     }
 }
@@ -238,7 +267,6 @@ mod tests {
     use crate::bytecode::builder::ChunkBuilder;
     use crate::bytecode::opcode::Opcode;
 
-
     #[test]
     fn rejects_empty_function_table() {
         let chunk = Chunk::default();
@@ -297,7 +325,10 @@ mod tests {
             num_registers: 1,
         });
         chunk.code.push(Instruction::only_imm(Opcode::Jump, 999));
-        assert!(matches!(verify(&chunk), Err(VerifyError::JumpOutOfRange { .. })));
+        assert!(matches!(
+            verify(&chunk),
+            Err(VerifyError::JumpOutOfRange { .. })
+        ));
     }
 
     #[test]
@@ -305,8 +336,14 @@ mod tests {
         use crate::bytecode::cap::CapId;
         use crate::bytecode::value::Message;
         for (value, kind) in [
-            (crate::bytecode::value::Value::Cap(CapId::from_raw(1)), ConstantKind::Capability),
-            (crate::bytecode::value::Value::Pid(7), ConstantKind::ProcessId),
+            (
+                crate::bytecode::value::Value::Cap(CapId::from_raw(1)),
+                ConstantKind::Capability,
+            ),
+            (
+                crate::bytecode::value::Value::Pid(7),
+                ConstantKind::ProcessId,
+            ),
             (
                 crate::bytecode::value::Value::Message(Message::new(1, 2, 3, 4u64)),
                 ConstantKind::Message,

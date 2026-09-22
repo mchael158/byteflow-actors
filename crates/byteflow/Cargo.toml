@@ -14,6 +14,7 @@ categories = ["concurrency", "emulators"]
 include = [
     "src/**/*",
     "examples/**/*",
+    "benches/**/*",
     "docs/**/*",
     "tests/**/*",
     "README.md",
@@ -52,6 +53,13 @@ jit = [
     "dep:cranelift-module",
     "dep:cranelift-native",
 ]
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "runtime"
+harness = false
 
 [lints.rust]
 unsafe_code = "deny"

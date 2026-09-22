@@ -37,8 +37,9 @@
 //! - Reply with [`std_native_table`]'s `msg_reply_cap` — **not** `msg_sender`
 //!   (`Pid` is identity, not an address)
 //!
-//! Also: selective receive (`ReceiveMatch` / `ReceiveMatchCorr`),
-//! `Ask` / `AskTimeout` for correlated RPC, [`Fn::fresh_request_id`].
+//! Also: selective receive (`ReceiveMatch` / `ReceiveMatchCorr` /
+//! `ReceiveMatchKind`), `Ask` / `AskTimeout` for correlated RPC,
+//! [`Fn::fresh_request_id`].
 //!
 //! # FlowCap (addressing)
 //!
@@ -194,13 +195,14 @@
 #![deny(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod attest;
 pub mod bytecode;
 pub mod entropy;
 pub mod log;
 pub mod memory;
 pub mod natives;
 pub mod output;
-pub(crate) mod prng;
+pub mod prng;
 pub mod samples;
 pub mod scheduler;
 pub mod vm;
@@ -248,35 +250,35 @@ pub mod docs {
     pub mod properties {}
 }
 
+pub use attest::{decode_attested, fingerprint_bf, AttestError};
 pub use bytecode::{
     asm_macros, decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId,
-    CapIdError, CapRights, CapTarget, Chunk, Fn, ConstantKind, FormatError, FuncId, FunctionDef,
+    CapIdError, CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef,
     Instruction, Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow,
-    RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION, MAGIC,
-    TAG_SYS_DOWN, TAG_SYS_EXIT,
+    RestartPolicy, RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION,
+    MAGIC, TAG_SYS_DOWN, TAG_SYS_EXIT,
+};
+pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot};
+pub use natives::{
+    std_native, std_native_map, std_native_table, std_native_table_with, std_natives,
 };
 pub use output::{NullSink, OutputSink, StdoutSink};
-pub use memory::{
-    HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot,
-};
-pub use natives::{std_native, std_native_map, std_native_table, std_native_table_with, std_natives};
-pub use scheduler::{
-    fault_count, next_flow_id, flow_id_from_u64, report_fault, CapError, Capability,
-    ChildSpec, Delivery, DownEvent, FlowExitReason, FlowQuota, LifecycleError, LinkId, Mailbox, MailboxBytes,
-    MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats,
-    MonitorRef, OverflowPolicy, QuotaConfig, QuotaError, RegistryName, WaitEpoch, Flow, FlowHandle, FlowId,
-    FlowMetrics, FlowOutcome, JoinError, RestartPolicy, RestartStrategy, Runtime, RuntimeConfig,
-    RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError,
-    SpawnError, Supervisor, SupervisorConfig, DEFAULT_QUANTUM, check_admin, check_link,
-    check_monitor, exec_delegate, AdminError, DelegateError, LinkError,
-};
 #[cfg(feature = "jit")]
 pub use scheduler::JitConfig;
+pub use scheduler::{
+    check_admin, check_link, check_monitor, exec_delegate, fault_count, flow_id_from_u64,
+    next_flow_id, report_fault, AdminError, CapError, Capability, ChildSpec, DelegateError,
+    Delivery, DownEvent, Flow, FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome,
+    FlowQuota, JoinError, LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes,
+    MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef,
+    OverflowPolicy, QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime, RuntimeConfig,
+    RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
+    Supervisor, SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM,
+};
 pub use vm::{
-    expect_arg, expect_bool, expect_int, expect_message, expect_u64, check_native_call,
-    check_native_gate,
-    Fault, NativeCallError, NativeFn, NativeGate, NativeResult, NativeTable, NativeTableBuilder,
-    NativeTableError, Vm, VmResult, MAX_CALL_DEPTH,
+    check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,
+    expect_u64, Fault, NativeCallError, NativeFn, NativeGate, NativeResult, NativeTable,
+    NativeTableBuilder, NativeTableError, Vm, VmResult, MAX_CALL_DEPTH,
 };
 
 #[cfg(feature = "jit")]
@@ -285,7 +287,7 @@ pub use jit::{
     run_vm_with_jit, run_vm_with_jit_runtime, sync_slots_from_vm, try_run_hot, try_run_hot_runtime,
     CompileError, CompiledTrace, ExitReason, HotCounter, JitContext, JitEntry, JitFrame, JitReturn,
     JitRuntime, SyncSlotsResult, TraceCache, TraceCompiler, TraceKey, TraceSpan, HOT_THRESHOLD,
-    MAX_TRACE_LENGTH, JIT_BUDGET, JIT_CONTINUE, JIT_DEOPT, JIT_EFFECT, JIT_RETURN, JIT_TRAP,
+    JIT_BUDGET, JIT_CONTINUE, JIT_DEOPT, JIT_EFFECT, JIT_RETURN, JIT_TRAP, MAX_TRACE_LENGTH,
 };
 
 #[cfg(test)]

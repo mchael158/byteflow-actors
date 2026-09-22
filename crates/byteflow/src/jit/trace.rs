@@ -98,7 +98,8 @@ impl JitContext {
             .map_err(|e| super::error::CompileError::Backend(e.to_string()))?
             .finish(flags)
             .map_err(|e| super::error::CompileError::Backend(e.to_string()))?;
-        let builder = cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder =
+            cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let module = cranelift_jit::JITModule::new(builder);
         Ok(Self {
             chunk,

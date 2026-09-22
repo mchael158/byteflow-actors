@@ -117,9 +117,8 @@ impl CapRights {
     pub const NATIVE: CapRights = CapRights(1 << 7);
 
     /// Addressing grant minted on `SelfPid` / `Spawn` / `grant_cap`.
-    pub const ADDRESSING: CapRights = CapRights(
-        Self::SEND.0 | Self::ASK.0 | Self::LINK.0 | Self::MONITOR.0,
-    );
+    pub const ADDRESSING: CapRights =
+        CapRights(Self::SEND.0 | Self::ASK.0 | Self::LINK.0 | Self::MONITOR.0);
 
     /// Default child request from the high-level assembler (`Fn::spawn`).
     /// Does **not** include `ADMIN`. The raw opcode with `c = 0` is confined
@@ -244,38 +243,32 @@ impl NativeMask {
     /// Bitwise AND — there is no OR path on this type.
     pub fn intersect(&self, requested: &NativeMask) -> NativeMask {
         let n = self.0.len().min(requested.0.len());
-        let mut words = vec![0u64; n];
-        for i in 0..n {
-            let a = match self.0.get(i) {
-                Some(w) => *w,
-                None => 0,
-            };
-            let b = match requested.0.get(i) {
-                Some(w) => *w,
-                None => 0,
-            };
-            words[i] = a & b;
-        }
+        let words: Vec<u64> = self
+            .0
+            .iter()
+            .zip(requested.0.iter())
+            .take(n)
+            .map(|(a, b)| a & b)
+            .collect();
+        // If lengths differ, zip already truncated; pad remaining from the
+        // shorter side is all zeros under AND — nothing to keep.
         NativeMask(Arc::from(words.into_boxed_slice()))
     }
 
     /// `true` iff every bit set in `self` is also set in `other`.
     pub fn is_subset_of(&self, other: &NativeMask) -> bool {
         let n = self.0.len().max(other.0.len());
-        for i in 0..n {
-            let a = match self.0.get(i) {
+        (0..n).all(|idx| {
+            let a = match self.0.get(idx) {
                 Some(w) => *w,
                 None => 0,
             };
-            let b = match other.0.get(i) {
+            let b = match other.0.get(idx) {
                 Some(w) => *w,
                 None => 0,
             };
-            if a & !b != 0 {
-                return false;
-            }
-        }
-        true
+            a & !b == 0
+        })
     }
 }
 
@@ -448,12 +441,7 @@ mod tests {
         let cell = RevocationCell::new();
         for src in 0u32..=255 {
             for want in 0u32..=255 {
-                let parent = Cap::root(
-                    CapTarget::Flow(1),
-                    CapRights::from_bits(src),
-                    None,
-                    &cell,
-                );
+                let parent = Cap::root(CapTarget::Flow(1), CapRights::from_bits(src), None, &cell);
                 let child = parent.attenuate(CapRights::from_bits(want), None);
                 assert!(
                     child.rights.is_subset_of(parent.rights),

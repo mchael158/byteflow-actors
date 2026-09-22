@@ -326,7 +326,8 @@ impl<'a> Fn<'a> {
         self.b.emit_exit(reg.0);
     }
 
-    /// Self Cap (`SEND` / `ASK` target for this flow).
+    /// Self Cap ([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING):
+    /// `SEND|ASK|LINK|MONITOR` for this flow).
     ///
     /// Despite the opcode name (`SelfPid`), the value is a [`crate::Value::Cap`],
     /// not a Pid. In BEAM terms this is closer to a **reply address** grant
@@ -348,7 +349,12 @@ impl<'a> Fn<'a> {
     }
 
     /// Spawn a child that receives only `rights` ⊆ parent authority.
-    pub fn spawn_with_rights(&mut self, function: FuncId, argc: u8, rights: crate::bytecode::CapRights) -> Reg {
+    pub fn spawn_with_rights(
+        &mut self,
+        function: FuncId,
+        argc: u8,
+        rights: crate::bytecode::CapRights,
+    ) -> Reg {
         let cap = self.local();
         self.b.emit_spawn_with_rights(cap.0, function, argc, rights);
         cap
@@ -420,6 +426,13 @@ impl<'a> Fn<'a> {
         msg
     }
 
+    /// Wait for a hop whose `payload.wire_tag() == kind` (`0..=8`, FIFO skip).
+    pub fn receive_match_kind(&mut self, kind: u8) -> Reg {
+        let msg = self.local();
+        self.b.emit_receive_match_kind(msg.0, kind);
+        msg
+    }
+
     /// Build a hop with a freshly minted `request_id`.
     pub fn hop_fresh(&mut self, tag: i32, payload: Reg) -> Reg {
         let req_id = self.fresh_request_id();
@@ -456,7 +469,9 @@ impl<'a> Fn<'a> {
         self.b.emit_demonitor(monitor.0);
     }
 
-    /// Bidirectional link: abnormal exit of either side kills the peer.
+    /// Bidirectional link: without `trap_exit`, abnormal exit of either side
+    /// kills the peer. With [`Self::set_trap_exit`] on a peer, that peer gets
+    /// [`crate::TAG_SYS_EXIT`] hops instead (including `Normal`).
     pub fn link(&mut self, target_cap: Reg) -> Reg {
         let dst = self.local();
         self.b.emit_link(dst.0, target_cap.0);
@@ -467,9 +482,31 @@ impl<'a> Fn<'a> {
         self.b.emit_unlink(link.0);
     }
 
+    /// BEAM `process_flag(trap_exit, enabled)`. Truthy `enabled` converts
+    /// linked exits into [`crate::TAG_SYS_EXIT`] hops (including `Normal`)
+    /// instead of killing this flow / silently dropping the link.
+    pub fn set_trap_exit(&mut self, enabled: Reg) {
+        self.b.emit_set_trap_exit(enabled.0);
+    }
+
+    /// Set this flow's supervisor restart policy (bytecode slice of OTP
+    /// `child_spec` restart). Takes effect for the **current** incarnation;
+    /// the dying flow's policy is what the supervisor consults on exit.
+    pub fn set_restart_policy(&mut self, policy: super::RestartPolicy) {
+        self.b.emit_set_restart_policy(policy.as_u8());
+    }
+
     /// Load a UTF-8 constant into a new local.
     pub fn load_str(&mut self, s: impl AsRef<str>) -> Reg {
         let konst = self.b.const_(Value::str(s));
+        let reg = self.local();
+        self.b.emit_load_const(reg.0, konst);
+        reg
+    }
+
+    /// Load a byte-buffer constant into a new local.
+    pub fn load_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Reg {
+        let konst = self.b.const_(Value::bytes(bytes.as_ref()));
         let reg = self.local();
         self.b.emit_load_const(reg.0, konst);
         reg
@@ -577,13 +614,7 @@ impl<'a> Fn<'a> {
     /// There is no sender operand — the scheduler stamps identity on `Send`.
     /// A 4-arg legacy encoding is still accepted by the native (first arg
     /// discarded) so forged-sender regressions keep compiling.
-    pub fn make_msg(
-        &mut self,
-        native_index: u32,
-        request_id: Reg,
-        tag: i32,
-        payload: Reg,
-    ) -> Reg {
+    pub fn make_msg(&mut self, native_index: u32, request_id: Reg, tag: i32, payload: Reg) -> Reg {
         let w = self.window(3);
         self.mov(w.at(0), request_id);
         self.set(w.at(1), tag);

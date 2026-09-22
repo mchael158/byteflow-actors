@@ -4,11 +4,24 @@
 //! from the platform CSPRNG inside `std`. Adequate for [`crate::CapId`]
 //! uniqueness (collision retries remain in the caller).
 
+use core::fmt;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 
+/// Entropy fill failed (should be unreachable with `std` RandomState).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntropyError;
+
+impl fmt::Display for EntropyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("entropy fill failed")
+    }
+}
+
+impl std::error::Error for EntropyError {}
+
 /// Fill `buf` with entropy-derived bytes. Never panics.
-pub fn fill_bytes(buf: &mut [u8]) -> Result<(), ()> {
+pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
     let mut filled = 0;
     while filled < buf.len() {
         let mut hasher = RandomState::new().build_hasher();

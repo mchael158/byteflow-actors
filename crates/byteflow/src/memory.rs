@@ -9,10 +9,21 @@
 //! Order for overwrite (S3):
 //!
 //! ```text
-//! reserve(new) → liberar old → instalar new
+//! reserve(new) → release(old) → install(new)
 //! ```
 //!
-//! Never install before releasing the previous charge.
+//! Never install before releasing the previous charge. Peak usage during a
+//! successful replace is therefore `old + new` until the old charge is
+//! released — a same-size swap can fail against a tight ceiling even though
+//! the steady-state footprint would fit.
+//!
+//! # What this does *not* guarantee
+//!
+//! [`HeapStr`] / [`HeapBytes`] charge buffers **they own**. Rust code that
+//! builds a `String` / `Vec` before handing it to [`HeapStr::new`] has already
+//! allocated; the budget only learns about that capacity after the fact.
+//! [`RuntimeConfig::max_runtime_bytes`](crate::RuntimeConfig) is therefore a
+//! runtime-managed accounting ceiling, not a global allocator sandbox.
 
 use core::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +36,9 @@ pub struct MemoryLimit {
 }
 
 /// Point-in-time view of a budget (read-only observability).
+///
+/// Concurrent charges may change `used` immediately after this returns —
+/// treat it as metrics, not a transactional lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemorySnapshot {
     pub used: usize,
@@ -127,18 +141,33 @@ impl MemoryBudget {
         }
     }
 
-    /// Return previously charged bytes. Underflow is a programming bug.
+    /// Return previously charged bytes.
+    ///
+    /// Underflow is a programming bug. Uses CAS so a violated invariant never
+    /// wraps `used` to a huge value in release builds (unlike bare
+    /// `fetch_sub`).
     pub fn release(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
 
-        let previous = self.used.fetch_sub(bytes, Ordering::AcqRel);
-
-        debug_assert!(
-            previous >= bytes,
-            "memory accounting underflow: previous={previous}, release={bytes}"
-        );
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            assert!(
+                current >= bytes,
+                "memory accounting underflow: previous={current}, release={bytes}"
+            );
+            let next = current - bytes;
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
     }
 }
 
@@ -146,6 +175,10 @@ impl MemoryBudget {
 ///
 /// Charge is based on [`String::capacity`], not just `len`, so growth of the
 /// backing allocation is visible to the budget.
+///
+/// [`Self::new`] / [`Self::replace`] take an already-built `String` (via
+/// `Into`); any allocation performed by the caller happens **before** the
+/// budget sees it — see the module docs.
 pub struct HeapStr {
     budget: Arc<MemoryBudget>,
     value: String,
@@ -182,20 +215,24 @@ impl HeapStr {
         self.value.capacity()
     }
 
-    /// Replace contents: reserve new, install, release old (S3).
-    /// On failure the previous value and charge are unchanged.
+    /// Replace contents using the S3 overwrite order:
+    /// `reserve(new) → release(old) → install(new)`.
+    ///
+    /// If reservation fails, the previous value and charge remain unchanged.
     pub fn replace(&mut self, value: impl Into<String>) -> Result<(), MemoryError> {
         let next = value.into();
         let next_charge = next.capacity();
 
+        // S3: reserve the replacement before touching the old state.
         self.budget.try_charge(next_charge)?;
 
         let old_charge = self.charged;
 
+        // S3: release the previous charge before installing the replacement.
+        self.budget.release(old_charge);
+
         self.value = next;
         self.charged = next_charge;
-
-        self.budget.release(old_charge);
 
         Ok(())
     }
@@ -208,6 +245,8 @@ impl Drop for HeapStr {
 }
 
 /// Opaque byte buffer charged against a [`MemoryBudget`].
+///
+/// Same ownership / pre-allocation caveats as [`HeapStr`].
 pub struct HeapBytes {
     budget: Arc<MemoryBudget>,
     bytes: Vec<u8>,
@@ -215,10 +254,7 @@ pub struct HeapBytes {
 }
 
 impl HeapBytes {
-    pub fn new(
-        budget: Arc<MemoryBudget>,
-        bytes: impl Into<Vec<u8>>,
-    ) -> Result<Self, MemoryError> {
+    pub fn new(budget: Arc<MemoryBudget>, bytes: impl Into<Vec<u8>>) -> Result<Self, MemoryError> {
         let bytes = bytes.into();
         let charged = bytes.capacity();
 
@@ -247,7 +283,10 @@ impl HeapBytes {
         self.bytes.capacity()
     }
 
-    /// Replace contents: reserve new, install, release old (S3).
+    /// Replace contents using the S3 overwrite order:
+    /// `reserve(new) → release(old) → install(new)`.
+    ///
+    /// If reservation fails, the previous value and charge remain unchanged.
     pub fn replace(&mut self, bytes: impl Into<Vec<u8>>) -> Result<(), MemoryError> {
         let next = bytes.into();
         let next_charge = next.capacity();
@@ -256,10 +295,10 @@ impl HeapBytes {
 
         let old_charge = self.charged;
 
+        self.budget.release(old_charge);
+
         self.bytes = next;
         self.charged = next_charge;
-
-        self.budget.release(old_charge);
 
         Ok(())
     }
@@ -358,5 +397,83 @@ mod tests {
             Err(MemoryError::LimitExceeded { .. })
         ));
         assert_eq!(budget.used(), 10);
+    }
+
+    #[test]
+    fn try_charge_detects_arithmetic_overflow() {
+        let budget = MemoryBudget::new(usize::MAX);
+
+        assert!(matches!(budget.try_charge(usize::MAX), Ok(())));
+        assert!(matches!(
+            budget.try_charge(1),
+            Err(MemoryError::ArithmeticOverflow)
+        ));
+        assert_eq!(budget.used(), usize::MAX);
+    }
+
+    #[test]
+    fn zero_limit_rejects_non_zero_charge() {
+        let budget = MemoryBudget::new(0);
+
+        assert!(matches!(
+            budget.try_charge(1),
+            Err(MemoryError::LimitExceeded { .. })
+        ));
+        assert_eq!(budget.used(), 0);
+        assert!(budget.try_charge(0).is_ok());
+    }
+
+    #[test]
+    fn same_capacity_replace_needs_peak_headroom() {
+        // S3 peaks at old+new before releasing old. With limit == capacity,
+        // a same-size replace must fail even though steady-state would fit.
+        let mut buf = Vec::with_capacity(600);
+        buf.resize(600, 0);
+        let cap = buf.capacity();
+        let budget = Arc::new(MemoryBudget::new(cap));
+        let mut value = match HeapBytes::new(Arc::clone(&budget), buf) {
+            Ok(v) => v,
+            Err(e) => panic!("unexpected: {e}"),
+        };
+        assert_eq!(budget.used(), cap);
+
+        let mut next = Vec::with_capacity(cap);
+        next.resize(600, 0);
+        assert_eq!(next.capacity(), cap);
+
+        let err = value.replace(next);
+        assert!(
+            matches!(err, Err(MemoryError::LimitExceeded { .. })),
+            "same-size replace must need peak headroom under S3, got {err:?}"
+        );
+        assert_eq!(budget.used(), cap);
+        assert_eq!(value.len(), 600);
+    }
+
+    #[test]
+    fn same_capacity_replace_succeeds_with_peak_room() {
+        let budget = Arc::new(MemoryBudget::new(2048));
+        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0u8; 64]) {
+            Ok(v) => v,
+            Err(e) => panic!("unexpected: {e}"),
+        };
+        let before = value.capacity();
+        if let Err(e) = value.replace(vec![1u8; 64]) {
+            panic!("unexpected: {e}");
+        }
+        assert_eq!(budget.used(), value.capacity());
+        // Capacity may grow or stay; accounting must track the live buffer.
+        assert!(value.capacity() >= before.min(64));
+        assert_eq!(value.as_slice(), &[1u8; 64]);
+    }
+
+    #[test]
+    fn release_zero_is_noop() {
+        let budget = MemoryBudget::new(100);
+        assert!(budget.try_charge(40).is_ok());
+        budget.release(0);
+        assert_eq!(budget.used(), 40);
+        budget.release(40);
+        assert_eq!(budget.used(), 0);
     }
 }

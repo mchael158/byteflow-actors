@@ -46,15 +46,25 @@ impl fmt::Display for Instruction {
             Opcode::LoadConst => write!(f, "{} r{}, const[{}]", self.op, self.a, self.imm),
             Opcode::Move => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::LoadImm => write!(f, "{} r{}, {}", self.op, self.a, self.imm),
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod | Opcode::Eq
-            | Opcode::Lt | Opcode::Le => {
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::Mod
+            | Opcode::Eq
+            | Opcode::Lt
+            | Opcode::Le => {
                 write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
             }
             Opcode::Neg => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
             Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
             Opcode::Call | Opcode::CallNative => {
-                write!(f, "{} r{}, fn[{}], argc={}", self.op, self.a, self.imm, self.b)
+                write!(
+                    f,
+                    "{} r{}, fn[{}], argc={}",
+                    self.op, self.a, self.imm, self.b
+                )
             }
             Opcode::Return
             | Opcode::Exit
@@ -74,6 +84,9 @@ impl fmt::Display for Instruction {
                 write!(f, "{} r{}, r{}", self.op, self.a, self.b)
             }
             Opcode::ReceiveMatchImm => write!(f, "{} r{}, tag={}", self.op, self.a, self.imm),
+            Opcode::ReceiveMatchKind => {
+                write!(f, "{} r{}, kind={}", self.op, self.a, self.imm)
+            }
             Opcode::ReceiveMatchCorr => write!(
                 f,
                 "{} r{}, tag=r{}, id=r{}",
@@ -84,11 +97,7 @@ impl fmt::Display for Instruction {
                 "{} r{}, tag={}, id=r{}",
                 self.op, self.a, self.imm, self.b
             ),
-            Opcode::Ask => write!(
-                f,
-                "{} r{}, r{}, r{}",
-                self.op, self.a, self.b, self.c
-            ),
+            Opcode::Ask => write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c),
             Opcode::AskTimeout => write!(
                 f,
                 "{} r{}, r{}, r{}, timeout=r{}",
@@ -97,7 +106,7 @@ impl fmt::Display for Instruction {
             Opcode::Monitor | Opcode::Link => {
                 write!(f, "{} r{}, r{}", self.op, self.a, self.b)
             }
-            Opcode::Demonitor | Opcode::Unlink | Opcode::RegisterName => {
+            Opcode::Demonitor | Opcode::Unlink | Opcode::RegisterName | Opcode::SetTrapExit => {
                 write!(f, "{} r{}", self.op, self.a)
             }
             Opcode::Whereis => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
@@ -106,6 +115,7 @@ impl fmt::Display for Instruction {
                 "{} r{}, r{}, rights={:#x}, native=r{}",
                 self.op, self.a, self.b, self.imm as u32, self.c
             ),
+            Opcode::SetRestartPolicy => write!(f, "{} {}", self.op, self.imm),
             Opcode::Trap => write!(f, "{} {}", self.op, self.imm),
         }
     }

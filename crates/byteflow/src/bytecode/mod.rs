@@ -17,23 +17,25 @@ pub(crate) mod builder;
 mod cap;
 mod chunk;
 mod disasm;
-mod program;
 mod format;
 mod instruction;
 mod macros;
 mod opcode;
+mod program;
+mod restart;
 mod value;
 mod verify;
 
 pub use cap::{
     Cap, CapId, CapIdError, CapRights, CapTarget, NativeIdx, NativeMask, RevocationCell,
 };
-pub use program::{Fn, FuncId, Label, Program, Reg, RegWindow};
 pub use chunk::{Chunk, FunctionDef, ABI_VERSION, MAGIC};
 pub use disasm::disassemble;
 pub use format::{decode, decode_with, encode, FormatError};
 pub use instruction::Instruction;
 pub use macros::asm_macros;
 pub use opcode::Opcode;
+pub use program::{Fn, FuncId, Label, Program, Reg, RegWindow};
+pub use restart::RestartPolicy;
 pub use value::{Message, Value, TAG_SYS_DOWN, TAG_SYS_EXIT};
 pub use verify::{verify, verify_with, ConstantKind, TrustLevel, VerifyConfig, VerifyError};

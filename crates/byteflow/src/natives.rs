@@ -140,12 +140,17 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
         })
         .and_then(|b| {
             b.register("msg_tag", |args| {
-                Ok(Value::Int(i64::from(expect_message(args, 0, "msg_tag")?.tag)))
+                Ok(Value::Int(i64::from(
+                    expect_message(args, 0, "msg_tag")?.tag,
+                )))
             })
         })
         .and_then(|b| {
             b.register("msg_payload", |args| {
-                Ok(expect_message(args, 0, "msg_payload")?.payload.as_ref().clone())
+                Ok(expect_message(args, 0, "msg_payload")?
+                    .payload
+                    .as_ref()
+                    .clone())
             })
         })
         .and_then(|b| {
@@ -216,11 +221,7 @@ mod tests {
     fn make_msg_and_unpack_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let table = std_native_table();
         let make = table.get(2).ok_or("make_msg")?;
-        let msg = make(&[
-            Value::Int(3),
-            Value::Int(7),
-            Value::Int(42),
-        ])?;
+        let msg = make(&[Value::Int(3), Value::Int(7), Value::Int(42)])?;
         let expected = Message::new(0, 3, 7, 42);
         assert_eq!(msg.as_message(), Some(&expected));
         let sender = table.get(3).ok_or("msg_sender")?;

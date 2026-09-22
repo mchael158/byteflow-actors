@@ -11,12 +11,13 @@
 //! ```
 
 use byteflow::{
-    Chunk, FlowOutcome, MailboxConfig, Program, Runtime, RuntimeConfig, Value, DEFAULT_QUANTUM,
-    std_native_table,
+    std_native_table, Chunk, FlowOutcome, MailboxConfig, Program, Runtime, RuntimeConfig, Value,
+    DEFAULT_QUANTUM,
 };
 
 const TAG_REQ: i32 = 1;
 const TAG_REP: i32 = 2;
+const TAG_DONE: i32 = 3;
 const ROUNDS: i32 = 8;
 
 fn atomic_actors_chunk() -> Chunk {
@@ -44,7 +45,7 @@ fn atomic_actors_chunk() -> Chunk {
             f.mov(acc, sum);
             f.add_imm(i, 1);
         });
-        let done = f.hop_fresh(TAG_REP, acc);
+        let done = f.hop_fresh(TAG_DONE, acc);
         f.send(parent_cap, done);
         f.return_(acc);
     });
@@ -59,8 +60,8 @@ fn atomic_actors_chunk() -> Chunk {
         f.mov(w2.at(1), server_cap);
         f.mov(w2.at(2), me);
         f.spawn_at(w2.at(0), client, 2);
-        let a = f.receive_match_imm(TAG_REP as u16);
-        let b = f.receive_match_imm(TAG_REP as u16);
+        let a = f.receive_match_imm(TAG_DONE as u16);
+        let b = f.receive_match_imm(TAG_DONE as u16);
         let pa = f.hop_payload(a);
         let pb = f.hop_payload(b);
         let out = f.add(pa, pb);

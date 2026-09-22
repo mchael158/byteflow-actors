@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bytecode::{Cap, CapRights, CapTarget, RevocationCell};
+use crate::bytecode::{Cap, CapRights, CapTarget, RestartPolicy, RevocationCell};
 use crate::vm::Vm;
 
 use super::mailbox::Mailbox;
@@ -70,15 +70,6 @@ pub(crate) fn try_next_flow_id() -> Result<FlowId, super::error::RuntimeError> {
     Ok(FlowId(id))
 }
 
-/// Restart policy consulted by a [`super::supervisor::Supervisor`] when a
-/// supervised flow terminates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RestartPolicy {
-    Always,
-    OnFailure,
-    Never,
-}
-
 /// Live counters for one flow (updated only by the worker currently
 /// running it).
 #[derive(Debug, Default)]
@@ -106,7 +97,8 @@ pub struct Flow {
     pub(crate) completion: oneshot::Sender<FlowOutcome>,
     /// Set by [`Mailbox::park`] when a hop wins the park race.
     pub pending_message: Option<crate::bytecode::Value>,
-    /// Destination register of the most recent `Receive` / `ReceiveTimeout`.
+    /// Destination register of the most recent `Receive` /
+    /// `ReceiveTimeout` / selective receive (`ReceiveMatch*`).
     pub last_receive_dest: Option<u8>,
     /// Continuation after a `WAITING_SEND` park is admitted.
     pub(crate) pending_send: Option<PendingSend>,

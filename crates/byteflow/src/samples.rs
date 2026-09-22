@@ -12,6 +12,7 @@
 //! | [`atomic_actors`] | Server loop + two `Ask` clients + minted `request_id` |
 //! | [`cap_in_payload`] | Cap in hop payload is reissued to the recipient |
 //! | [`selective_receive`] | `ReceiveMatch` FIFO skip |
+//! | [`receive_match_kind`] | `ReceiveMatchKind` by payload wire-tag |
 //! | [`ask_reply`] | `Ask` RPC hop |
 //! | [`ask_timeout_expires`] | `AskTimeout` writes `Unit` when the server stays silent |
 //! | [`ask_target_exits`] | `Ask` dest is `TAG_SYS_EXIT` when the server dies first |
@@ -22,10 +23,13 @@
 //! | [`monitor_down`] | Monitor → [`crate::TAG_SYS_DOWN`] on child exit |
 //! | [`waiting_send`] | `WAITING_SEND`: second hop parks until the first is received |
 //!
+//! Lifecycle regression tests in this module (not demo samples) also cover
+//! `trap_exit` / `SetTrapExit` and linked `TAG_SYS_EXIT` hops.
+//!
 //! Hop samples require [`crate::std_native_table`].
 
-use crate::{Chunk, Program};
 use crate::natives::std_native;
+use crate::{Chunk, Program};
 
 /// Native indices (must match [`crate::std_native_map`]).
 const N_PRINT: u32 = std_native::PRINT;
@@ -34,6 +38,10 @@ const N_MAKE_MSG: u32 = std_native::MAKE_MSG;
 /// Protocol tags for Atomic Hop samples.
 pub const TAG_REQ: i32 = 1;
 pub const TAG_REP: i32 = 2;
+/// Client → parent completion hop in [`atomic_actors`] (not an RPC reply).
+pub const TAG_DONE: i32 = 3;
+/// Readiness handshake (e.g. `SetTrapExit` before link).
+pub const TAG_READY: i32 = 4;
 pub const TAG_PING: i32 = 10;
 pub const TAG_PONG: i32 = 11;
 /// Decoy hop for [`selective_receive`] — must be skipped by `ReceiveMatch`.
@@ -127,6 +135,34 @@ pub fn selective_receive() -> Chunk {
         let junk = f.hop(req_id, TAG_JUNK, zero);
         f.send(server_cap, junk);
         let payload = f.load_i32(41);
+        let req = f.hop(req_id, TAG_REQ, payload);
+        f.send(server_cap, req);
+        let reply = f.receive_match_imm(TAG_REP as u16);
+        let out = f.hop_payload(reply);
+        f.return_(out);
+    });
+    p.build()
+}
+
+/// Selective receive by payload wire-tag (`ReceiveMatchKind`): skip hops
+/// whose payload is not `Int` (tag 2), then reply with that payload.
+pub fn receive_match_kind() -> Chunk {
+    let mut p = Program::new("receive-match-kind");
+    let server = p.function("server", 0, |f| {
+        // BFV0 Int = 2
+        let msg = f.receive_match_kind(2);
+        let payload = f.hop_payload(msg);
+        f.send_reply(msg, TAG_REP, payload);
+        let _junk = f.receive();
+        f.exit(payload);
+    });
+    p.function("main", 0, |f| {
+        let server_cap = f.spawn(server, 0);
+        let req_id = f.load_i32(1);
+        let decoy = f.load_str("skip-me");
+        let junk = f.hop(req_id, TAG_JUNK, decoy);
+        f.send(server_cap, junk);
+        let payload = f.load_i32(42);
         let req = f.hop(req_id, TAG_REQ, payload);
         f.send(server_cap, req);
         let reply = f.receive_match_imm(TAG_REP as u16);
@@ -292,7 +328,7 @@ pub fn atomic_actors() -> Chunk {
             f.mov(acc, sum);
             f.add_imm(i, 1);
         });
-        let done = f.hop_fresh(TAG_REP, acc);
+        let done = f.hop_fresh(TAG_DONE, acc);
         f.send(parent_cap, done);
         f.return_(acc);
     });
@@ -307,8 +343,8 @@ pub fn atomic_actors() -> Chunk {
         f.mov(w2.at(1), server_cap);
         f.mov(w2.at(2), me);
         f.spawn_at(w2.at(0), client, 2);
-        let a = f.receive_match_imm(TAG_REP as u16);
-        let b = f.receive_match_imm(TAG_REP as u16);
+        let a = f.receive_match_imm(TAG_DONE as u16);
+        let b = f.receive_match_imm(TAG_DONE as u16);
         let pa = f.hop_payload(a);
         let pb = f.hop_payload(b);
         let out = f.add(pa, pb);
@@ -575,6 +611,23 @@ mod tests {
     }
 
     #[test]
+    fn receive_match_kind_skips_non_int_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = receive_match_kind();
+        assert!(verify(&chunk).is_ok());
+        let bytes = encode(&chunk);
+        let chunk = decode(&bytes)?;
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ask_reply_joins_42() -> Result<(), Box<dyn std::error::Error>> {
         let chunk = ask_reply();
         assert!(verify(&chunk).is_ok());
@@ -785,6 +838,127 @@ mod tests {
     }
 
     #[test]
+    fn trap_exit_converts_link_kill_to_exit_hop() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("trap-exit");
+        p.function("trapper", 0, |f| {
+            let msg = f.receive_match_imm(crate::TAG_SYS_EXIT);
+            let out = f.hop_payload(msg);
+            f.return_(out);
+        });
+        p.function("boom", 0, |f| {
+            let ms = f.load_i32(30);
+            f.sleep(ms);
+            f.trap(1);
+        });
+        let rt = tiny_natives(p.build())?;
+        let trapper = rt.spawn(rt.function_index("trapper").ok_or("trapper")?, &[])?;
+        let killer = rt.spawn(rt.function_index("boom").ok_or("boom")?, &[])?;
+        rt.set_trap_exit(trapper.id(), true)?;
+        rt.link(trapper.id(), killer.id())?;
+        let boom_out = killer.join();
+        let trap_out = trapper.join();
+        rt.shutdown();
+        assert!(matches!(boom_out, FlowOutcome::Failed(_)), "{boom_out:?}");
+        assert!(
+            matches!(
+                trap_out,
+                FlowOutcome::Completed(Value::Int(n))
+                    if n == crate::FlowExitReason::Fault.as_u64() as i64
+            ),
+            "trap_exit peer must receive EXIT with Fault reason, got {trap_out:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trap_exit_receives_normal_exit_signal() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("trap-exit-normal");
+        p.function("trapper", 0, |f| {
+            let msg = f.receive_match_imm(crate::TAG_SYS_EXIT);
+            let out = f.hop_payload(msg);
+            f.return_(out);
+        });
+        p.function("done", 0, |f| {
+            let ms = f.load_i32(30);
+            f.sleep(ms);
+            let z = f.load_i32(0);
+            f.return_(z);
+        });
+        let rt = tiny_natives(p.build())?;
+        let trapper = rt.spawn(rt.function_index("trapper").ok_or("trapper")?, &[])?;
+        let peer = rt.spawn(rt.function_index("done").ok_or("done")?, &[])?;
+        rt.set_trap_exit(trapper.id(), true)?;
+        rt.link(trapper.id(), peer.id())?;
+        let _ = peer.join();
+        let trap_out = trapper.join();
+        rt.shutdown();
+        assert!(
+            matches!(
+                trap_out,
+                FlowOutcome::Completed(Value::Int(n))
+                    if n == crate::FlowExitReason::Normal.as_u64() as i64
+            ),
+            "trap_exit must surface Normal as EXIT hop, got {trap_out:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn set_trap_exit_opcode_enables_trapping() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("trap-exit-opcode");
+        // Parent waits for READY so SetTrapExit is known to have run before link.
+        p.function("parent", 0, |f| {
+            let msg = f.receive_match_imm(TAG_READY as u16);
+            let out = f.hop_payload(msg);
+            f.return_(out);
+        });
+        p.function("trapper", 1, |f| {
+            let parent = f.reg(0);
+            let on = f.load_i32(1);
+            f.set_trap_exit(on);
+            let z = f.load_i32(1);
+            let ready = f.hop_fresh(TAG_READY, z);
+            f.send(parent, ready);
+            let msg = f.receive_match_imm(crate::TAG_SYS_EXIT);
+            let out = f.hop_payload(msg);
+            f.return_(out);
+        });
+        p.function("boom", 0, |f| {
+            // Stay parked until the host wakes us *after* the link is installed.
+            let _wake = f.receive();
+            f.trap(1);
+        });
+        let rt = tiny_natives(p.build())?;
+        let parent = rt.spawn(rt.function_index("parent").ok_or("parent")?, &[])?;
+        let parent_cap = rt.mint_cap(parent.id())?;
+        let trapper = rt.spawn(
+            rt.function_index("trapper").ok_or("trapper")?,
+            &[Value::Cap(parent_cap)],
+        )?;
+        let killer = rt.spawn(rt.function_index("boom").ok_or("boom")?, &[])?;
+        let ready = parent.join();
+        assert!(
+            matches!(ready, FlowOutcome::Completed(Value::Int(1))),
+            "trapper must signal READY after SetTrapExit, got {ready:?}"
+        );
+        rt.link(trapper.id(), killer.id())?;
+        rt.send(killer.id(), Value::Message(Message::request(0, TAG_REQ as u16, 0)))?;
+        let boom_out = killer.join();
+        let trap_out = trapper.join();
+        rt.shutdown();
+        assert!(matches!(boom_out, FlowOutcome::Failed(_)), "{boom_out:?}");
+        assert!(
+            matches!(
+                trap_out,
+                FlowOutcome::Completed(Value::Int(n))
+                    if n == crate::FlowExitReason::Fault.as_u64() as i64
+            ),
+            "bytecode SetTrapExit must receive EXIT with Fault reason, got {trap_out:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn linked_exit_down_carries_link_reason() -> Result<(), Box<dyn std::error::Error>> {
         let mut p = Program::new("link-down-reason");
         p.function("watcher", 0, |f| {
@@ -920,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn heap_quota_charges_str_on_register_store() -> Result<(), Box<dyn std::error::Error>> {
+    fn heap_quota_rejects_oversized_str() -> Result<(), Box<dyn std::error::Error>> {
         let mut p = Program::new("heap-str");
         p.function("main", 0, |f| {
             let s = f.load_str("x".repeat(200));
@@ -948,19 +1122,61 @@ mod tests {
     }
 
     #[test]
-    fn host_send_stamps_sender_zero_and_mints_request_id() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let mut p = Program::new("host-send");
+    fn heap_quota_rejects_oversized_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("heap-bytes");
+        p.function("main", 0, |f| {
+            let b = f.load_bytes(vec![0u8; 200]);
+            f.return_(b);
+        });
+        let mut quota = QuotaConfig::permissive();
+        quota.mem_limit = 64;
+        let rt = Runtime::with_config(
+            p.build(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 10_000,
+                mailbox: crate::MailboxConfig::DEFAULT,
+                quota,
+                ..Default::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Failed(_)),
+            "200-byte Bytes must exceed 64-byte heap quota, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn host_send_stamps_sender_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("host-send-sender");
         p.function("main", 0, |f| {
             let msg = f.receive();
             let sender = f.hop_sender(msg);
-            let rid = f.hop_request_id(msg);
-            let miss = f.label();
-            f.branch_if_falsy(rid, miss);
             f.return_(sender);
-            f.bind(miss);
-            let neg = f.load_i32(-1);
-            f.return_(neg);
+        });
+        let rt = tiny_natives(p.build())?;
+        let h = rt.spawn(0, &[])?;
+        // Non-zero request_id so minting is not under test here.
+        rt.send(h.id(), Value::Message(Message::request(7, 1, 0)))?;
+        let outcome = h.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Pid(0))),
+            "host send must stamp sender=0 (Pid), got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn host_send_mints_request_id() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("host-send-rid");
+        p.function("main", 0, |f| {
+            let msg = f.receive();
+            let rid = f.hop_request_id(msg);
+            f.return_(rid);
         });
         let rt = tiny_natives(p.build())?;
         let h = rt.spawn(0, &[])?;
@@ -968,8 +1184,101 @@ mod tests {
         let outcome = h.join();
         rt.shutdown();
         assert!(
-            matches!(outcome, FlowOutcome::Completed(Value::Pid(0))),
-            "host send must stamp sender=0 (Pid) and mint request_id, got {outcome:?}"
+            matches!(outcome, FlowOutcome::Completed(Value::Int(n)) if n > 0),
+            "host send must mint a non-zero request_id when unset, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hop_fresh_mints_distinct_request_ids() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("fresh-ids");
+        p.function("main", 0, |f| {
+            let z = f.load_i32(0);
+            let a = f.hop_fresh(TAG_REQ, z);
+            let b = f.hop_fresh(TAG_REQ, z);
+            let ida = f.hop_request_id(a);
+            let idb = f.hop_request_id(b);
+            let same = f.eq(ida, idb);
+            let ok = f.label();
+            let miss = f.label();
+            // Distinct ids → eq is falsy → branch to ok.
+            f.branch_if_falsy(same, ok);
+            f.trap(1);
+            f.bind(ok);
+            f.branch_if_falsy(ida, miss);
+            f.branch_if_falsy(idb, miss);
+            f.return_(ida);
+            f.bind(miss);
+            let neg = f.load_i32(-1);
+            f.return_(neg);
+        });
+        let rt = tiny_natives(p.build())?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(n)) if n > 0),
+            "hop_fresh must mint two distinct non-zero request_ids, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ask_reply_preserves_request_id() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("ask-corr");
+        let server = p.function("server", 0, |f| {
+            let msg = f.receive_match_imm(TAG_REQ as u16);
+            let payload = f.hop_payload(msg);
+            f.add_imm(payload, 1);
+            f.send_reply(msg, TAG_REP, payload);
+            f.exit(payload);
+        });
+        p.function("main", 0, |f| {
+            let server_cap = f.spawn(server, 0);
+            let payload = f.load_i32(41);
+            let req = f.hop_fresh(TAG_REQ, payload);
+            let expect = f.hop_request_id(req);
+            let reply = f.ask(server_cap, req);
+            // Correlate explicitly: wait would have already matched by Ask;
+            // assert the delivered reply carries the same request_id.
+            let got = f.hop_request_id(reply);
+            let same = f.eq(expect, got);
+            let bad = f.label();
+            f.branch_if_falsy(same, bad);
+            let out = f.hop_payload(reply);
+            f.return_(out);
+            f.bind(bad);
+            let neg = f.load_i32(-1);
+            f.return_(neg);
+        });
+        let rt = tiny_natives(p.build())?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt
+            .spawn(idx, &[])?
+            .join_timeout(std::time::Duration::from_secs(2))
+            .ok_or("ask_reply_preserves_request_id timed out")?;
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "Ask reply must echo request_id and payload+1, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn send_receive_match_corr_binds_request_id() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = atomic_request_reply();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt
+            .spawn(idx, &[])?
+            .join_timeout(std::time::Duration::from_secs(2))
+            .ok_or("atomic_request_reply timed out")?;
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "ReceiveMatchCorr must bind the minted request_id, got {outcome:?}"
         );
         Ok(())
     }

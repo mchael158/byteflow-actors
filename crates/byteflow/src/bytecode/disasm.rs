@@ -38,7 +38,6 @@ pub fn disassemble(chunk: &Chunk) -> String {
 mod tests {
     use crate::bytecode::builder::ChunkBuilder;
 
-
     #[test]
     fn lists_main() {
         let mut b = ChunkBuilder::new("d");

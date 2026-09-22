@@ -5,10 +5,7 @@ pub enum CompileError {
     Backend(String),
     EmptyTrace { function: u32, pc: u32 },
     UndefinedRegister { reg: u8, pc: u32 },
-    UnsupportedOpcode {
-        opcode: crate::Opcode,
-        pc: u32,
-    },
+    UnsupportedOpcode { opcode: crate::Opcode, pc: u32 },
     TraceTooLong { pc: u32, limit: usize },
     Module(String),
 }

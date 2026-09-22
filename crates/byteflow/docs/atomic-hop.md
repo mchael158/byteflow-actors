@@ -8,7 +8,7 @@ Hardware (`byteflow-hw`) was removed from the monorepo — do not restore it her
 Byteflow's concurrent unit is a **flow** (`Flow`, `FlowId`, `FlowHandle`, `FlowOutcome`) — not an “actor” API surface.
 
 Wire identity still uses `Value::Pid` (FlowId as `u64`) inside messages.
-**Addressing** for bytecode `Send` / `Ask` uses `Value::Cap` (FlowCap, ABI v5 / 0.9.3).
+**Addressing** for bytecode `Send` / `Ask` uses `Value::Cap` (FlowCap, ABI v5 / 0.9.0+).
 Scalars include `Value::Str` / `Value::Bytes` in the constant pool; hops remain
 `Message`-only. Untrusted `.bf` loads reject `Cap` / `Pid` / `Message` in the
 pool unless [`TrustLevel::Trusted`](../src/bytecode/verify.rs) is set.
@@ -62,8 +62,14 @@ by a matching hop; junk is queued behind the same lock.
 | `FreshRequestId` `0x5C` | `ra` — next per-flow correlation id |
 | `ReceiveMatchCorr` `0x5D` | `ra, rb, rc` — `tag == r[b]` and `request_id == r[c]` |
 | `ReceiveMatchCorrImm` `0x5E` | `ra, rb, imm` — immediate tag + `request_id` from `r[b]` |
+| `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=8`) |
+| `SetTrapExit` `0x5F` | `ra` — BEAM `trap_exit` from truthy `r[a]` (see [`lifecycle.md`](lifecycle.md)) |
+| `SetRestartPolicy` `0x65` | `imm` — `0` Always / `1` OnFailure / `2` Never (supervisor exit decision) |
 
-Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_REQ`).
+Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_REQ`);
+[`samples::receive_match_kind`](../src/samples.rs) (Str decoy then Int payload).
+
+Tag + payload-kind filters are still **not** full BEAM pattern matching.
 
 ### `Ask` — atomic RPC hop (`0x55`)
 

@@ -5,7 +5,8 @@ use super::cap::CapId;
 
 /// Reserved Atomic Hop tag for monitor `DOWN` events (not an application tag).
 pub const TAG_SYS_DOWN: u16 = 0xFF01;
-/// Reserved Atomic Hop tag for linked-exit notices.
+/// Reserved Atomic Hop tag for linked-exit notices (`Ask` target death or
+/// `trap_exit` link signal).
 pub const TAG_SYS_EXIT: u16 = 0xFF02;
 
 /// Envelope carried in mailboxes and registers (**Atomic Hop**).
@@ -71,7 +72,8 @@ impl Message {
         )
     }
 
-    /// Runtime lifecycle hop: Ask target exited (`tag == `[`TAG_SYS_EXIT`]).
+    /// Runtime lifecycle hop: Ask target exited, or a linked peer exited
+    /// while this flow has `trap_exit` enabled (`tag == `[`TAG_SYS_EXIT`]).
     pub fn linked_exit(target_flow: u64, reason: u64) -> Self {
         Self::new(target_flow, 0, TAG_SYS_EXIT, Value::Int(reason as i64))
     }
@@ -136,6 +138,24 @@ pub enum Value {
 }
 
 impl Value {
+    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`).
+    ///
+    /// Used by [`crate::Opcode::ReceiveMatchKind`] selective receive.
+    #[inline]
+    pub fn wire_tag(&self) -> u8 {
+        match self {
+            Value::Unit => 0,
+            Value::Bool(_) => 1,
+            Value::Int(_) => 2,
+            Value::Float(_) => 3,
+            Value::Pid(_) => 4,
+            Value::Message(_) => 5,
+            Value::Cap(_) => 6,
+            Value::Str(_) => 7,
+            Value::Bytes(_) => 8,
+        }
+    }
+
     /// Build a [`Value::Str`] from anything string-like.
     #[inline]
     pub fn str(s: impl AsRef<str>) -> Self {

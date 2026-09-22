@@ -1,8 +1,10 @@
 //! Bidirectional links (`A <──────────> B`).
 //!
 //! Distinct from monitors: a monitor delivers `DOWN` to the owner; a link
-//! **propagates abnormal exit** to the peer (BEAM: `normal` does not kill).
-//! Propagation is cooperative — see [`super::finalize`].
+//! **propagates abnormal exit** to the peer (BEAM: `normal` does not kill)
+//! unless the peer has `trap_exit` enabled — then every exit becomes a
+//! [`crate::TAG_SYS_EXIT`] hop. Propagation is cooperative — see
+//! [`super::finalize`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,7 +119,11 @@ impl LinkStore {
         }
     }
 
-    pub fn link(&self, a: FlowId, b: FlowId) -> Result<Result<LinkId, LifecycleError>, RuntimeError> {
+    pub fn link(
+        &self,
+        a: FlowId,
+        b: FlowId,
+    ) -> Result<Result<LinkId, LifecycleError>, RuntimeError> {
         Ok(sync_lock::lock(&self.inner, "LinkStore::link")?.link(a, b))
     }
 
@@ -146,18 +152,23 @@ mod tests {
     use crate::scheduler::process::next_flow_id;
 
     #[test]
-    fn remove_links_returns_both_directions() {
+    fn remove_links_returns_both_directions() -> Result<(), String> {
         let mut table = LinkTable::new();
         let a = next_flow_id();
         let b = next_flow_id();
         let c = next_flow_id();
-        table.link(a, b).expect("link a-b");
-        table.link(c, a).expect("link c-a");
-        let peers: Vec<FlowId> = table.remove_links_of(a).into_iter().map(|(_, p)| p).collect();
+        table.link(a, b).map_err(|e| e.to_string())?;
+        table.link(c, a).map_err(|e| e.to_string())?;
+        let peers: Vec<FlowId> = table
+            .remove_links_of(a)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
         assert_eq!(peers.len(), 2);
         assert!(peers.contains(&b));
         assert!(peers.contains(&c));
         assert!(table.remove_links_of(a).is_empty());
+        Ok(())
     }
 
     #[test]

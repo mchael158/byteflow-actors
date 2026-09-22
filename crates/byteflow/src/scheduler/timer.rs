@@ -158,7 +158,8 @@ impl TimerWheel {
                     return;
                 }
             };
-            let shutting_down = match sync_lock::lock(&self.shutdown, "TimerWheel::drive/shutdown") {
+            let shutting_down = match sync_lock::lock(&self.shutdown, "TimerWheel::drive/shutdown")
+            {
                 Ok(g) => *g,
                 Err(e) => {
                     report_fault(e);

@@ -71,7 +71,10 @@ fn main() {
     }
 
     let metrics = rt.metrics();
-    println!("intensity exceeded after {} failures", metrics.processes_failed);
+    println!(
+        "intensity exceeded after {} failures",
+        metrics.processes_failed
+    );
     println!("{metrics}");
     sup.shutdown();
     rt.shutdown();

@@ -15,10 +15,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bytecode::{CapId, Message, Value};
-use crate::log;
-use crate::vm::VmResult;
-use super::runqueue::{Steal, Worker as LocalDeque};
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
 use super::finalize::{finalize_flow, request_kill, resume_or_fail, DuplicateAsk};
@@ -28,8 +24,12 @@ use super::metrics::RuntimeMetrics;
 use super::monitor::{FlowExitReason, MonitorRef};
 use super::process::{Flow, FlowId, FlowOutcome, PendingSend};
 use super::registry::RegistryName;
+use super::runqueue::{Steal, Worker as LocalDeque};
 use super::runtime::{flow_id_from_u64, spawn_on, wake_workers, BytecodeSpawn, Shared};
 use super::sync_lock;
+use crate::bytecode::{CapId, Message, Value};
+use crate::log;
+use crate::vm::VmResult;
 
 thread_local! {
     /// True while this OS thread is executing inside a Byteflow worker loop.
@@ -85,7 +85,9 @@ fn authenticate_outgoing_message(
         .caps
         .mint_or_reuse(recipient, sender, CapRights::SEND)
         .map_err(CapError::from)?;
-    Ok(message.with_payload(payload).authenticate(sender.as_u64(), reply))
+    Ok(message
+        .with_payload(payload)
+        .authenticate(sender.as_u64(), reply))
 }
 
 /// Host `Runtime::send`: same choke-point as bytecode hops.
@@ -155,7 +157,14 @@ fn reissue_caps_in_value(
     }
 }
 
-fn receive_filter(match_tag: Option<u16>, match_request_id: Option<u64>) -> WaitFilter {
+fn receive_filter(
+    match_tag: Option<u16>,
+    match_request_id: Option<u64>,
+    match_payload_kind: Option<u8>,
+) -> WaitFilter {
+    if let Some(kind) = match_payload_kind {
+        return WaitFilter::PayloadKind(kind);
+    }
     match (match_tag, match_request_id) {
         (Some(tag), Some(rid)) => WaitFilter::TaggedCorrelation {
             tag,
@@ -177,11 +186,11 @@ fn resolve_cap_held(
     holder: FlowId,
     need: CapRights,
 ) -> Result<FlowId, CapError> {
-    Ok(shared
+    shared
         .caps
         .resolve(id, holder, need)?
         .target()
-        .ok_or(CapError::WrongTarget)?)
+        .ok_or(CapError::WrongTarget)
 }
 
 fn resolve_relation_cap(
@@ -194,7 +203,9 @@ fn resolve_relation_cap(
         .caps
         .resolve(id, holder, need)
         .map_err(|e| e.to_string())?;
-    let target = entry.target().ok_or_else(|| CapError::WrongTarget.to_string())?;
+    let target = entry
+        .target()
+        .ok_or_else(|| CapError::WrongTarget.to_string())?;
     let cell = match shared.caps.flow_cell(target) {
         Ok(Some(c)) => c,
         Ok(None) => return Err(CapError::Unknown.to_string()),
@@ -228,24 +239,14 @@ fn find_work(shared: &Shared, local: &LocalDeque<Box<Flow>>) -> Option<Box<Flow>
         return Some(flow);
     }
 
-    loop {
-        match shared.injector.steal() {
-            Steal::Success(flow) => return Some(flow),
-            Steal::Empty => break,
-            Steal::Retry => continue,
-        }
+    if let Steal::Success(flow) = shared.injector.steal() {
+        return Some(flow);
     }
 
     for stealer in &shared.stealers {
-        loop {
-            match stealer.steal() {
-                Steal::Success(flow) => {
-                    RuntimeMetrics::inc(&shared.metrics.steals);
-                    return Some(flow);
-                }
-                Steal::Empty => break,
-                Steal::Retry => continue,
-            }
+        if let Steal::Success(flow) = stealer.steal() {
+            RuntimeMetrics::inc(&shared.metrics.steals);
+            return Some(flow);
         }
     }
 
@@ -264,18 +265,17 @@ fn wait_for_work(shared: &Shared) {
     if shared.shutdown.load(Ordering::Acquire) {
         return;
     }
-    if let Err(e) =
-        sync_lock::wait_timeout(cvar, guard, Duration::from_millis(50), "worker::wait_timeout")
-    {
+    if let Err(e) = sync_lock::wait_timeout(
+        cvar,
+        guard,
+        Duration::from_millis(50),
+        "worker::wait_timeout",
+    ) {
         report_fault(e);
     }
 }
 
-fn drive_process(
-    shared: &Arc<Shared>,
-    local: &LocalDeque<Box<Flow>>,
-    mut flow: Box<Flow>,
-) {
+fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: Box<Flow>) {
     if let Some(msg) = flow.pending_message.take() {
         match flow.last_receive_dest {
             Some(dest) => {
@@ -320,7 +320,11 @@ fn drive_process(
 
         let remaining = flow.quota.remaining_cpu();
         if remaining <= 0 {
-            finish_failed(shared, *flow, super::quota::QuotaError::CpuExhausted.to_string());
+            finish_failed(
+                shared,
+                *flow,
+                super::quota::QuotaError::CpuExhausted.to_string(),
+            );
             return;
         }
         let slice = (shared.quantum as i64).min(remaining) as u32;
@@ -335,16 +339,12 @@ fn drive_process(
                 flow.vm.run(slice)
             }
         }));
-        let delta = flow
-            .vm
-            .instructions_executed()
-            .saturating_sub(before);
+        let delta = flow.vm.instructions_executed().saturating_sub(before);
         if let Err(e) = flow.quota.charge_cpu(delta as i64) {
             finish_failed(shared, *flow, e.to_string());
             return;
         }
-        flow
-            .metrics
+        flow.metrics
             .instructions
             .store(flow.vm.instructions_executed(), Ordering::Relaxed);
 
@@ -466,28 +466,22 @@ fn drive_process(
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
-                let stamped = match authenticate_outgoing_message(
-                    shared,
-                    flow.id,
-                    target,
-                    msg,
-                    &mut flow.vm,
-                ) {
-                    Ok(m) => Value::Message(m),
-                    Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                };
+                let stamped =
+                    match authenticate_outgoing_message(shared, flow.id, target, msg, &mut flow.vm)
+                    {
+                        Ok(m) => Value::Message(m),
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
                 let hop_cost = stamped.memory_size();
                 if let Err(e) = flow.quota.alloc(hop_cost) {
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
                 RuntimeMetrics::inc(&shared.metrics.messages_sent);
-                flow.metrics
-                    .messages_sent
-                    .fetch_add(1, Ordering::Relaxed);
+                flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
                     "send from=flow#{} to=flow#{} via=cap#{} msg={}",
                     flow.id.as_u64(),
@@ -528,13 +522,18 @@ fn drive_process(
                 timeout,
                 match_tag,
                 match_request_id,
+                match_payload_kind,
             } => {
                 if !flow.authority.rights.contains(CapRights::RECV) {
-                    finish_failed(shared, *flow, "receive denied: flow lacks RECV right".into());
+                    finish_failed(
+                        shared,
+                        *flow,
+                        "receive denied: flow lacks RECV right".into(),
+                    );
                     return;
                 }
                 flow.last_receive_dest = Some(dest_reg);
-                let filter = receive_filter(match_tag, match_request_id);
+                let filter = receive_filter(match_tag, match_request_id, match_payload_kind);
                 match flow.mailbox.try_pop_filter(filter) {
                     Ok(Some(msg)) => {
                         flow.metrics
@@ -618,9 +617,7 @@ fn drive_process(
                 };
                 flow.last_receive_dest = Some(dest_reg);
                 RuntimeMetrics::inc(&shared.metrics.messages_sent);
-                flow.metrics
-                    .messages_sent
-                    .fetch_add(1, Ordering::Relaxed);
+                flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
                     "ask from=flow#{} to=flow#{} via=cap#{} req={} wait={filter:?}",
                     flow.id.as_u64(),
@@ -704,13 +701,14 @@ fn drive_process(
                 dest_reg,
                 target_cap,
             } => {
-                let target = match resolve_relation_cap(shared, target_cap, flow.id, CapRights::MONITOR) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                };
+                let target =
+                    match resolve_relation_cap(shared, target_cap, flow.id, CapRights::MONITOR) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
                 if target == flow.id {
                     finish_failed(shared, *flow, "cannot monitor self".into());
                     return;
@@ -721,8 +719,7 @@ fn drive_process(
                             Ok(n) => n,
                             Err(_) => i64::MAX,
                         };
-                        let Some(f) =
-                            resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
                         else {
                             return;
                         };
@@ -735,14 +732,21 @@ fn drive_process(
                 }
             }
             VmResult::Demonitor { monitor_reg } => {
-                let raw = match flow.vm.top_registers().and_then(|r| r.get(monitor_reg as usize)) {
+                let raw = match flow
+                    .vm
+                    .top_registers()
+                    .and_then(|r| r.get(monitor_reg as usize))
+                {
                     Some(Value::Int(n)) if *n >= 0 => *n as u64,
                     _ => {
                         finish_failed(shared, *flow, "demonitor: expected Int ref".into());
                         return;
                     }
                 };
-                match shared.monitors.remove_owned(flow.id, MonitorRef::from_u64(raw)) {
+                match shared
+                    .monitors
+                    .remove_owned(flow.id, MonitorRef::from_u64(raw))
+                {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -758,13 +762,14 @@ fn drive_process(
                 dest_reg,
                 target_cap,
             } => {
-                let target = match resolve_relation_cap(shared, target_cap, flow.id, CapRights::LINK) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                };
+                let target =
+                    match resolve_relation_cap(shared, target_cap, flow.id, CapRights::LINK) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
                 if target == flow.id {
                     finish_failed(shared, *flow, "cannot link self".into());
                     return;
@@ -775,8 +780,7 @@ fn drive_process(
                             Ok(n) => n,
                             Err(_) => i64::MAX,
                         };
-                        let Some(f) =
-                            resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
                         else {
                             return;
                         };
@@ -793,7 +797,11 @@ fn drive_process(
                 }
             }
             VmResult::Unlink { link_reg } => {
-                let raw = match flow.vm.top_registers().and_then(|r| r.get(link_reg as usize)) {
+                let raw = match flow
+                    .vm
+                    .top_registers()
+                    .and_then(|r| r.get(link_reg as usize))
+                {
                     Some(Value::Int(n)) if *n >= 0 => *n as u64,
                     _ => {
                         finish_failed(shared, *flow, "unlink: expected Int id".into());
@@ -812,6 +820,25 @@ fn drive_process(
                     }
                 }
             }
+            VmResult::SetTrapExit { enabled } => {
+                if let Err(e) = shared.trap_exits.set(flow.id, enabled) {
+                    finish_failed(shared, *flow, e.to_string());
+                    return;
+                }
+            }
+            VmResult::SetRestartPolicy { policy } => {
+                match crate::bytecode::RestartPolicy::from_u8(policy) {
+                    Some(p) => flow.restart_policy = p,
+                    None => {
+                        finish_failed(
+                            shared,
+                            *flow,
+                            "SetRestartPolicy: invalid policy immediate".into(),
+                        );
+                        return;
+                    }
+                }
+            }
             VmResult::RegisterName { name } => {
                 if !flow.authority.rights.contains(CapRights::SEND) {
                     finish_failed(
@@ -822,13 +849,14 @@ fn drive_process(
                     return;
                 }
                 if name.is_empty() {
-                    finish_failed(shared, *flow, "register_name: name must be non-empty".into());
+                    finish_failed(
+                        shared,
+                        *flow,
+                        "register_name: name must be non-empty".into(),
+                    );
                     return;
                 }
-                let cap = match shared
-                    .caps
-                    .mint(flow.id, flow.id, CapRights::ADDRESSING)
-                {
+                let cap = match shared.caps.mint(flow.id, flow.id, CapRights::ADDRESSING) {
                     Ok(id) => id,
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -879,10 +907,7 @@ fn drive_process(
                         return;
                     }
                 }
-                match shared
-                    .caps
-                    .mint_or_reuse(flow.id, target, CapRights::SEND)
-                {
+                match shared.caps.mint_or_reuse(flow.id, target, CapRights::SEND) {
                     Ok(cap) => {
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
                         else {
@@ -920,8 +945,7 @@ fn drive_process(
                     want_native.as_ref(),
                 ) {
                     Ok(new_id) => {
-                        let Some(f) =
-                            resume_or_fail(shared, flow, dest_reg, Value::Cap(new_id))
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(new_id))
                         else {
                             return;
                         };
@@ -1028,9 +1052,7 @@ fn deliver(
             DeliverStatus::Ok
         }
         Ok(Ok(Delivery::DroppedNewest)) => {
-            log::debug(format!(
-                "deliver drop-newest → flow#{target} msg={message}"
-            ));
+            log::debug(format!("deliver drop-newest → flow#{target} msg={message}"));
             DeliverStatus::Dropped
         }
         Ok(Ok(Delivery::Handoff(flow))) => {
@@ -1228,7 +1250,12 @@ fn finish_ok(shared: &Shared, flow: Flow, value: Value) {
 }
 
 fn finish_failed(shared: &Shared, flow: Flow, msg: String) {
-    finalize_flow(shared, flow, FlowOutcome::Failed(msg), FlowExitReason::Fault);
+    finalize_flow(
+        shared,
+        flow,
+        FlowOutcome::Failed(msg),
+        FlowExitReason::Fault,
+    );
 }
 
 fn park_waiting_send(

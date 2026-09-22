@@ -4,19 +4,21 @@
 //! what the scheduler needs: push ready flows, pop locally first, then
 //! steal from the injector, then from peer workers. All synchronization is
 //! `std::sync::Mutex` — fail-closed via [`super::sync_lock`].
+//!
+//! Steal outcomes are only [`Steal::Empty`] / [`Steal::Success`]: under a
+//! mutex queue there is no transient "retry" state like classic
+//! work-stealing deques.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use super::sync_lock;
 
-/// Outcome of a steal attempt (Retry is unused under mutex queues; kept so
-/// call sites stay structured like a classic work-stealing loop).
+/// Outcome of a steal attempt under mutex queues (Empty / Success).
 #[derive(Debug)]
 pub enum Steal<T> {
     Empty,
     Success(T),
-    Retry,
 }
 
 /// Shared FIFO for newly spawned / externally woken flows.

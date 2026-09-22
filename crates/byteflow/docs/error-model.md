@@ -169,11 +169,18 @@ a "timeout" with no upper bound — a failure that is invisible in testing and
 unbounded in production. `oneshot` has a regression test that drives a storm
 of spurious wakeups through the wait to pin this.
 
-### Still open
+### Join from a worker (0.9.5)
 
-Calling `join` from inside a worker (from a native function, say) blocks
-that worker on a flow that may need that very worker to progress. The rule
-is documented but not yet machine-checked.
+Calling `join` / `try_join` / `join_timeout` / `join_deadline` from inside a
+worker (for example from a native) must not block that worker on a flow that
+may need the same pool to progress. The runtime rejects those calls
+fail-closed with [`JoinError::CalledFromWorker`](../src/scheduler/handle.rs):
+unbounded `join` returns `FlowOutcome::Failed(...)`;
+`try_join` / `join_timeout` / `join_deadline` return `Some(Failed(...))`
+without waiting; `join_checked` returns `Err(CalledFromWorker)`. Covered by
+`join_from_worker_is_rejected`.
+
+### Ask on target exit
 
 `Ask` without a deadline used to hang if the target died. It now resumes
 with a [`TAG_SYS_EXIT`](../src/bytecode/value.rs) hop. `AskTimeout` still

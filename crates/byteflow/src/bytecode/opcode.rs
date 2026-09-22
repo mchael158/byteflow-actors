@@ -83,7 +83,9 @@ pub enum Opcode {
     Sleep = 0x42,
     /// `Exit ra` → terminate the Flow, `r[a]` is delivered to `.join()`.
     Exit = 0x43,
-    /// `SelfPid ra` → `r[a] =` a **self Cap** (`SEND|ASK`) for this flow.
+    /// `SelfPid ra` → `r[a] =` a **self Cap**
+    /// ([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING) =
+    /// `SEND|ASK|LINK|MONITOR`) for this flow.
     /// (Opcode name kept for ABI; the value is `Value::Cap`, not Pid.)
     /// The VM does not store its own id (it has no scheduler state); this
     /// is a scheduler effect, same class as `Spawn`/`Receive`.
@@ -91,7 +93,9 @@ pub enum Opcode {
 
     // ---- messaging --------------------------------------------------------
     /// `Send ra, rb` → Atomic Hop: deliver `r[b]` (`Message`) to the Cap in
-    /// `r[a]`. Never blocks the sender flow (see [`crate::docs::mailbox`]).
+    /// `r[a]`. With a full `Reject` inbox the sender parks (`WAITING_SEND`);
+    /// otherwise the hop is queued / handed off without blocking the worker
+    /// (see [`crate::docs::mailbox`]).
     ///
     /// VM requires Cap + Message; worker resolves Cap (SEND), stamps sender
     /// + `reply_cap`, then pushes to the resolved mailbox.
@@ -158,6 +162,14 @@ pub enum Opcode {
     /// with immediate tag (`imm` as `u16`) and `request_id` from `r[b]`.
     /// Append-only ABI slot (`0x5E`); `Trap` stays `0x60`.
     ReceiveMatchCorrImm = 0x5E,
+    /// `SetTrapExit ra` → BEAM `process_flag(trap_exit, r[a])`.
+    ///
+    /// Truthy `r[a]` (same rules as [`Opcode::Branch`]) enables trapping:
+    /// this flow receives [`crate::TAG_SYS_EXIT`] when a linked peer exits
+    /// (including `Normal`), instead of being killed / silently dropping the
+    /// link.
+    /// Append-only ABI slot (`0x5F`); `Trap` stays `0x60`.
+    SetTrapExit = 0x5F,
     /// `RegisterName ra` → publish `r[a]` (`Str`) as this flow's name.
     /// Only the calling flow is registered. Requires `SEND` on self-authority
     /// (confined spawn cannot squat names). Append-only (`0x62`).
@@ -165,6 +177,15 @@ pub enum Opcode {
     /// `Whereis ra, rb` → look up `r[b]` (`Str`); write a **SEND** Cap for
     /// the caller, or `Unit` if missing. Never a raw FlowId. (`0x63`)
     Whereis = 0x63,
+    /// `ReceiveMatchKind ra, imm` → block until a [`crate::Value::Message`]
+    /// whose `payload.wire_tag() == imm` (BFV0 tag `0..=8`) is available.
+    /// Non-matching hops stay queued (FIFO skip). Append-only (`0x64`);
+    /// `Trap` stays `0x60`.
+    ReceiveMatchKind = 0x64,
+    /// `SetRestartPolicy imm` → set this flow's supervisor restart policy:
+    /// `0` = Always, `1` = OnFailure, `2` = Never. Invalid `imm` → Trap.
+    /// Append-only (`0x65`); `Trap` stays `0x60`.
+    SetRestartPolicy = 0x65,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -222,9 +243,12 @@ impl Opcode {
             0x5C => FreshRequestId,
             0x5D => ReceiveMatchCorr,
             0x5E => ReceiveMatchCorrImm,
+            0x5F => SetTrapExit,
             0x60 => Trap,
             0x62 => RegisterName,
             0x63 => Whereis,
+            0x64 => ReceiveMatchKind,
+            0x65 => SetRestartPolicy,
             0x61 => Nop,
             _ => return None,
         })
@@ -277,8 +301,11 @@ impl std::fmt::Display for Opcode {
             Opcode::FreshRequestId => "FreshRequestId",
             Opcode::ReceiveMatchCorr => "ReceiveMatchCorr",
             Opcode::ReceiveMatchCorrImm => "ReceiveMatchCorrImm",
+            Opcode::SetTrapExit => "SetTrapExit",
             Opcode::RegisterName => "RegisterName",
             Opcode::Whereis => "Whereis",
+            Opcode::ReceiveMatchKind => "ReceiveMatchKind",
+            Opcode::SetRestartPolicy => "SetRestartPolicy",
             Opcode::Trap => "Trap",
             Opcode::Nop => "Nop",
         };

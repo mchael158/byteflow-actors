@@ -1,4 +1,7 @@
 //! Deterministic PRNG for in-crate property-style tests (no external crates).
+//!
+//! Used by integration tests (`tests/properties_*`) and CapTable stress
+//! suites. Not for CapId entropy — see [`crate::entropy`].
 
 /// xorshift64* — enough for stress loops; not for CapId entropy.
 #[derive(Clone, Debug)]
@@ -48,5 +51,35 @@ impl XorShift64 {
             buf[i..i + take].copy_from_slice(&word[..take]);
             i += take;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_seed_is_forced_nonzero_and_deterministic() {
+        let mut a = XorShift64::new(0);
+        let mut b = XorShift64::new(0);
+        let x = a.next_u64();
+        let y = b.next_u64();
+        assert_ne!(x, 0);
+        assert_eq!(x, y);
+        assert_eq!(a.next_u64(), b.next_u64());
+    }
+
+    #[test]
+    fn width_helpers_and_fill_are_wired() {
+        let mut rng = XorShift64::new(0x71E5_7001);
+        let _ = rng.next_u32();
+        let _ = rng.next_i64();
+        let _ = rng.next_i32();
+        assert_eq!(rng.next_u32_inclusive(5, 5), 5);
+        let n = rng.next_u32_inclusive(1, 4);
+        assert!((1..=4).contains(&n));
+        let mut buf = [0u8; 20];
+        rng.fill_bytes(&mut buf);
+        assert!(buf.iter().any(|&b| b != 0));
     }
 }

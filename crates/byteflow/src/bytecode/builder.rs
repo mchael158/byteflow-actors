@@ -85,8 +85,14 @@ impl ChunkBuilder {
     pub fn emit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
         debug_assert!(matches!(
             op,
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod
-                | Opcode::Eq | Opcode::Lt | Opcode::Le
+            Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Div
+                | Opcode::Mod
+                | Opcode::Eq
+                | Opcode::Lt
+                | Opcode::Le
         ));
         self.emit(Instruction::abc(op, dst, lhs, rhs));
     }
@@ -149,7 +155,8 @@ impl ChunkBuilder {
         self.emit(Instruction::abc(Opcode::Exit, reg, 0, 0));
     }
 
-    /// Write a **self Cap** (`SEND|ASK`) into `dst` (opcode still named `SelfPid`).
+    /// Write a **self Cap** ([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING))
+    /// into `dst` (opcode still named `SelfPid`).
     pub fn emit_self_pid(&mut self, dst: u8) {
         self.emit(Instruction::abc(Opcode::SelfPid, dst, 0, 0));
     }
@@ -179,12 +186,21 @@ impl ChunkBuilder {
 
     /// Selective Atomic Hop with an immediate `u16` tag.
     pub fn emit_receive_match_imm(&mut self, dst: u8, tag: u16) {
-        self.emit(Instruction::a_imm(Opcode::ReceiveMatchImm, dst, i32::from(tag)));
+        self.emit(Instruction::a_imm(
+            Opcode::ReceiveMatchImm,
+            dst,
+            i32::from(tag),
+        ));
     }
 
     /// Selective receive: `tag == r[tag_reg]` and `request_id == r[id_reg]`.
     pub fn emit_receive_match_corr(&mut self, dst: u8, tag_reg: u8, id_reg: u8) {
-        self.emit(Instruction::abc(Opcode::ReceiveMatchCorr, dst, tag_reg, id_reg));
+        self.emit(Instruction::abc(
+            Opcode::ReceiveMatchCorr,
+            dst,
+            tag_reg,
+            id_reg,
+        ));
     }
 
     /// Selective receive with immediate tag and `request_id` from `id_reg`.
@@ -195,6 +211,15 @@ impl ChunkBuilder {
             id_reg,
             0,
             i32::from(tag),
+        ));
+    }
+
+    /// Selective receive: wait for a hop whose payload wire-tag equals `kind`.
+    pub fn emit_receive_match_kind(&mut self, dst: u8, kind: u8) {
+        self.emit(Instruction::a_imm(
+            Opcode::ReceiveMatchKind,
+            dst,
+            i32::from(kind),
         ));
     }
 
@@ -210,13 +235,7 @@ impl ChunkBuilder {
     }
 
     /// Like [`Self::emit_ask`], with a timeout register in `imm`.
-    pub fn emit_ask_timeout(
-        &mut self,
-        dest: u8,
-        target_cap_reg: u8,
-        msg_reg: u8,
-        millis_reg: u8,
-    ) {
+    pub fn emit_ask_timeout(&mut self, dest: u8, target_cap_reg: u8, msg_reg: u8, millis_reg: u8) {
         self.emit(Instruction::new(
             Opcode::AskTimeout,
             dest,
@@ -242,6 +261,18 @@ impl ChunkBuilder {
         self.emit(Instruction::abc(Opcode::Unlink, link_reg, 0, 0));
     }
 
+    pub fn emit_set_trap_exit(&mut self, enabled_reg: u8) {
+        self.emit(Instruction::abc(Opcode::SetTrapExit, enabled_reg, 0, 0));
+    }
+
+    /// `imm`: 0=Always, 1=OnFailure, 2=Never.
+    pub fn emit_set_restart_policy(&mut self, policy: u8) {
+        self.emit(Instruction::only_imm(
+            Opcode::SetRestartPolicy,
+            i32::from(policy),
+        ));
+    }
+
     pub fn emit_register_name(&mut self, name_reg: u8) {
         self.emit(Instruction::abc(Opcode::RegisterName, name_reg, 0, 0));
     }
@@ -255,7 +286,13 @@ impl ChunkBuilder {
     }
 
     pub fn emit_call(&mut self, dst: u8, function: u32, argc: u8) {
-        self.emit(Instruction::new(Opcode::Call, dst, argc, 0, function as i32));
+        self.emit(Instruction::new(
+            Opcode::Call,
+            dst,
+            argc,
+            0,
+            function as i32,
+        ));
     }
 
     /// Emit a call through the runtime's native (FFI) function table

@@ -52,7 +52,12 @@ impl Vm {
     ///
     /// Native calls are **denied** until [`Self::with_native_gate`] installs
     /// an allowlist (the runtime does this from the flow's attenuated Cap).
-    pub fn new(chunk: Arc<Chunk>, natives: Arc<NativeTable>, function: u32, args: &[Value]) -> Result<Self, Fault> {
+    pub fn new(
+        chunk: Arc<Chunk>,
+        natives: Arc<NativeTable>,
+        function: u32,
+        args: &[Value],
+    ) -> Result<Self, Fault> {
         let gate = NativeGate::deny(natives.len());
         Self::with_native_gate(chunk, natives, gate, function, args)
     }
@@ -64,9 +69,10 @@ impl Vm {
         function: u32,
         args: &[Value],
     ) -> Result<Self, Fault> {
-        let def = chunk
-            .function(function)
-            .ok_or(Fault::BadFunction { index: function, table_size: chunk.functions.len() as u32 })?;
+        let def = chunk.function(function).ok_or(Fault::BadFunction {
+            index: function,
+            table_size: chunk.functions.len() as u32,
+        })?;
         let mut frame = Frame::new(function, def.num_registers, None);
         frame.set_pc(def.entry as usize);
         load_frame_args(&mut frame, args.iter().cloned(), def.arity)?;
@@ -236,7 +242,10 @@ impl Vm {
                 *slot = value;
                 Ok(())
             }
-            None => Err(Fault::RegisterOutOfRange { reg, frame_size: len }),
+            None => Err(Fault::RegisterOutOfRange {
+                reg,
+                frame_size: len,
+            }),
         }
     }
 
@@ -484,8 +493,14 @@ impl Vm {
                     let v = trap!(self.get_reg(instr.b));
                     trap!(self.set_reg(instr.a, v));
                 }
-                Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod
-                | Opcode::Eq | Opcode::Lt | Opcode::Le => {
+                Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Div
+                | Opcode::Mod
+                | Opcode::Eq
+                | Opcode::Lt
+                | Opcode::Le => {
                     trap!(self.numeric_binop(instr.op, instr.a, instr.b, instr.c));
                 }
                 Opcode::Neg => {
@@ -516,7 +531,9 @@ impl Vm {
                     let argc = instr.b;
                     let dst = instr.a;
                     if self.frames.len() >= MAX_CALL_DEPTH {
-                        return VmResult::Trap(Fault::CallStackOverflow { depth: self.frames.len() });
+                        return VmResult::Trap(Fault::CallStackOverflow {
+                            depth: self.frames.len(),
+                        });
                     }
                     let (num_registers, arity, entry) = match self.chunk.function(function) {
                         Some(d) => (d.num_registers, d.arity, d.entry as usize),
@@ -537,7 +554,8 @@ impl Vm {
                     let native_index = instr.imm as u32;
                     let argc = instr.b;
                     let dst = instr.a;
-                    if let Err(err) = check_native_gate(&self.native_gate, &self.natives, native_index)
+                    if let Err(err) =
+                        check_native_gate(&self.native_gate, &self.natives, native_index)
                     {
                         return VmResult::Trap(match err {
                             NativeCallError::IndexOutOfRange(index) => Fault::BadNative {
@@ -613,6 +631,7 @@ impl Vm {
                         timeout: None,
                         match_tag: None,
                         match_request_id: None,
+                        match_payload_kind: None,
                     };
                 }
                 Opcode::ReceiveTimeout => {
@@ -622,6 +641,7 @@ impl Vm {
                         timeout: Some(timeout),
                         match_tag: None,
                         match_request_id: None,
+                        match_payload_kind: None,
                     };
                 }
                 Opcode::ReceiveMatch => {
@@ -631,6 +651,7 @@ impl Vm {
                         timeout: None,
                         match_tag: Some(tag),
                         match_request_id: None,
+                        match_payload_kind: None,
                     };
                 }
                 Opcode::ReceiveMatchImm => {
@@ -640,6 +661,27 @@ impl Vm {
                         timeout: None,
                         match_tag: Some(tag),
                         match_request_id: None,
+                        match_payload_kind: None,
+                    };
+                }
+                Opcode::ReceiveMatchKind => {
+                    // Selective receive by payload wire-tag (`Value::wire_tag`,
+                    // 0..=8). Non-matching hops stay queued (FIFO skip).
+                    let kind = match u8::try_from(instr.imm) {
+                        Ok(k) if k <= 8 => k,
+                        _ => {
+                            return VmResult::Trap(Fault::TypeMismatch {
+                                expected: "payload kind 0..=8",
+                                got: "imm-out-of-range",
+                            })
+                        }
+                    };
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: None,
+                        match_tag: None,
+                        match_request_id: None,
+                        match_payload_kind: Some(kind),
                     };
                 }
                 Opcode::FreshRequestId => {
@@ -654,6 +696,7 @@ impl Vm {
                         timeout: None,
                         match_tag: Some(tag),
                         match_request_id: Some(rid),
+                        match_payload_kind: None,
                     };
                 }
                 Opcode::ReceiveMatchCorrImm => {
@@ -664,6 +707,7 @@ impl Vm {
                         timeout: None,
                         match_tag: Some(tag),
                         match_request_id: Some(rid),
+                        match_payload_kind: None,
                     };
                 }
                 Opcode::Ask => {
@@ -716,9 +760,25 @@ impl Vm {
                     };
                 }
                 Opcode::Unlink => {
-                    return VmResult::Unlink {
-                        link_reg: instr.a,
+                    return VmResult::Unlink { link_reg: instr.a };
+                }
+                Opcode::SetTrapExit => {
+                    let enabled = trap!(self.get_reg(instr.a)).is_truthy();
+                    return VmResult::SetTrapExit { enabled };
+                }
+                Opcode::SetRestartPolicy => {
+                    // Flow-local OTP restart policy for the host Supervisor
+                    // (`0` Always / `1` OnFailure / `2` Never).
+                    let policy = match instr.imm {
+                        0..=2 => instr.imm as u8,
+                        _ => {
+                            return VmResult::Trap(Fault::TypeMismatch {
+                                expected: "restart policy 0..=2",
+                                got: "imm-out-of-range",
+                            })
+                        }
                     };
+                    return VmResult::SetRestartPolicy { policy };
                 }
                 Opcode::RegisterName => {
                     return VmResult::RegisterName {
@@ -788,7 +848,12 @@ fn load_frame_args(
     for (i, a) in args.into_iter().enumerate().take(arity as usize) {
         match frame.registers_mut().get_mut(i) {
             Some(slot) => *slot = a,
-            None => return Err(Fault::RegisterOutOfRange { reg: i as u8, frame_size }),
+            None => {
+                return Err(Fault::RegisterOutOfRange {
+                    reg: i as u8,
+                    frame_size,
+                })
+            }
         }
     }
     Ok(())
@@ -862,7 +927,10 @@ fn as_f64(v: &Value) -> Result<f64, Fault> {
     match v {
         Value::Int(i) => Ok(*i as f64),
         Value::Float(f) => Ok(*f),
-        other => Err(Fault::TypeMismatch { expected: "int or float", got: other.type_name() }),
+        other => Err(Fault::TypeMismatch {
+            expected: "int or float",
+            got: other.type_name(),
+        }),
     }
 }
 
@@ -1129,7 +1197,9 @@ mod tests {
         vm.set_quota(quota)?;
         match vm.run(50) {
             VmResult::Trap(Fault::QuotaExceeded(_)) => Ok(()),
-            other => Err(format!("expected QuotaExceeded from return writeback, got {other:?}").into()),
+            other => {
+                Err(format!("expected QuotaExceeded from return writeback, got {other:?}").into())
+            }
         }
     }
 
@@ -1139,8 +1209,7 @@ mod tests {
         b.begin_function("main", 0, 1);
         b.emit_call_native(0, 0, 0);
         b.emit_return(0);
-        let table = NativeTable::builder()
-            .register("noop", |_| Ok(Value::Unit))?;
+        let table = NativeTable::builder().register("noop", |_| Ok(Value::Unit))?;
         let mut vm = Vm::new(Arc::new(b.finish()), table.build(), 0, &[])?;
         match vm.run(10) {
             VmResult::Trap(Fault::NativeDenied(NativeCallError::NoNativeRight)) => Ok(()),

@@ -10,10 +10,10 @@
 
 use std::collections::HashMap;
 
-use crate::bytecode::CapId;
 use super::error::{LifecycleError, RuntimeError};
 use super::process::FlowId;
 use super::sync_lock;
+use crate::bytecode::CapId;
 
 /// Registry key. Interned as `Box<str>` so lookups do not allocate a `String`
 /// on the happy path when the caller already has a `&str`.
@@ -66,10 +66,7 @@ impl Registry {
         if self.by_name.contains_key(&name) {
             return Err(LifecycleError::AlreadyRegistered);
         }
-        self.by_flow
-            .entry(flow)
-            .or_default()
-            .push(name.clone());
+        self.by_flow.entry(flow).or_default().push(name.clone());
         self.by_name.insert(name, Entry { cap, flow });
         Ok(())
     }

@@ -135,15 +135,17 @@ impl MonitorTable {
 
     pub fn create(&mut self, owner: FlowId, target: FlowId) -> MonitorRef {
         let monitor = MonitorRef(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
-        self.monitors.insert(
-            monitor,
-            MonitorEntry { owner, target },
-        );
+        self.monitors
+            .insert(monitor, MonitorEntry { owner, target });
         monitor
     }
 
     /// Remove `monitor` only if `owner` still owns it.
-    pub fn remove_owned(&mut self, owner: FlowId, monitor: MonitorRef) -> Result<(), LifecycleError> {
+    pub fn remove_owned(
+        &mut self,
+        owner: FlowId,
+        monitor: MonitorRef,
+    ) -> Result<(), LifecycleError> {
         match self.monitors.get(&monitor) {
             Some(entry) if entry.owner == owner => {
                 self.monitors.remove(&monitor);
@@ -160,11 +162,7 @@ impl MonitorTable {
     }
 
     /// Collect `DOWN` events for monitors watching `target`, then drop them.
-    pub fn notify_target_exit(
-        &mut self,
-        target: FlowId,
-        reason: FlowExitReason,
-    ) -> Vec<DownEvent> {
+    pub fn notify_target_exit(&mut self, target: FlowId, reason: FlowExitReason) -> Vec<DownEvent> {
         let mut events = Vec::new();
         self.monitors.retain(|monitor, entry| {
             if entry.target != target {
@@ -210,7 +208,10 @@ impl MonitorStore {
         owner: FlowId,
         monitor: MonitorRef,
     ) -> Result<Result<(), LifecycleError>, RuntimeError> {
-        Ok(sync_lock::lock(&self.inner, "MonitorStore::remove_owned")?.remove_owned(owner, monitor))
+        Ok(
+            sync_lock::lock(&self.inner, "MonitorStore::remove_owned")?
+                .remove_owned(owner, monitor),
+        )
     }
 
     pub fn remove_owned_by(&self, owner: FlowId) -> Result<(), RuntimeError> {
@@ -223,8 +224,10 @@ impl MonitorStore {
         target: FlowId,
         reason: FlowExitReason,
     ) -> Result<Vec<DownEvent>, RuntimeError> {
-        Ok(sync_lock::lock(&self.inner, "MonitorStore::notify_target_exit")?
-            .notify_target_exit(target, reason))
+        Ok(
+            sync_lock::lock(&self.inner, "MonitorStore::notify_target_exit")?
+                .notify_target_exit(target, reason),
+        )
     }
 }
 
@@ -250,7 +253,9 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].monitor, a);
         assert_eq!(events[1].monitor, b);
-        assert!(table.notify_target_exit(target, FlowExitReason::Fault).is_empty());
+        assert!(table
+            .notify_target_exit(target, FlowExitReason::Fault)
+            .is_empty());
     }
 
     #[test]
@@ -260,7 +265,10 @@ mod tests {
         let other = next_flow_id();
         let target = next_flow_id();
         let mon = table.create(owner, target);
-        assert_eq!(table.remove_owned(other, mon), Err(LifecycleError::NotOwner));
+        assert_eq!(
+            table.remove_owned(other, mon),
+            Err(LifecycleError::NotOwner)
+        );
         assert!(table.remove_owned(owner, mon).is_ok());
     }
 }

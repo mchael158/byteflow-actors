@@ -119,7 +119,9 @@ impl FlowHandle {
     /// `None` for "still running", `Some(Failed)` for an infrastructure
     /// error, since an embedder polling a handle has no separate error
     /// channel to report one on.
-    fn settle(state: Result<JoinState<FlowOutcome>, super::error::RuntimeError>) -> Option<FlowOutcome> {
+    fn settle(
+        state: Result<JoinState<FlowOutcome>, super::error::RuntimeError>,
+    ) -> Option<FlowOutcome> {
         match state {
             Ok(JoinState::Ready(outcome)) => Some(outcome),
             Ok(JoinState::Pending) => None,
@@ -130,8 +132,8 @@ impl FlowHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::worker::WorkerGuard;
+    use super::*;
 
     #[test]
     fn join_from_worker_is_rejected() {

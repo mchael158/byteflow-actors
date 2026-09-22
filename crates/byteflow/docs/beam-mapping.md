@@ -29,7 +29,7 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `spawn(fun)` | `Fn::spawn(fn, argc)` | `Spawn` → Cap |
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
-| selective receive (pattern) | `Fn::receive_match_imm(tag)` | `ReceiveMatchImm` — **tag u16 only** |
+| selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` | Tag **or** payload wire-tag — still not full pattern match |
 | `gen_server:call` | `Fn::ask(cap, hop)` / `Fn::ask_timeout` | `Ask` / `AskTimeout` |
 | `gen_server:cast` | `Fn::send(cap, hop)` | fire-and-forget |
 | reply to caller | `Fn::send_reply(req, tag, payload)` | uses `msg_reply_cap` |
@@ -94,25 +94,28 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 
 | BEAM / OTP | Byteflow today |
 |------------|----------------|
-| **links** | `Runtime::link` / `Fn::link` — abnormal exit kills the peer |
+| **links** | `Runtime::link` / `Fn::link` — abnormal exit kills the peer unless `trap_exit` |
 | **monitors** `{'DOWN', ...}` | `Runtime::monitor` / `Fn::monitor` → `TAG_SYS_DOWN` hop |
 | **OTP supervisor strategies** | Host `Supervisor` + `RestartStrategy` (`OneForOne` / `OneForAll` / `RestForOne`) |
 | **`register` / `whereis`** | `Fn::register_name` / `Fn::whereis` (and host `Runtime::*`). Cap, not FlowId |
 | **`exit(Pid, kill)`** | `Runtime::kill` (cooperative) or `Runtime::admin_kill` (ADMIN Cap) |
+| **`process_flag(trap_exit, …)`** | `Fn::set_trap_exit` / `Runtime::set_trap_exit` → `TAG_SYS_EXIT` hop (**done**) |
 | **capability pass** | `Fn::delegate` / `Cap::attenuate` (AND of rights + native mask) |
 | **confined spawn** | `Fn::spawn_confined` (child rights `NONE`) |
+| **`child_spec` restart** | `Fn::set_restart_policy` (bytecode) + host `ChildSpec` / `Supervisor` |
 
 ## What BEAM has that Byteflow does not (yet)
 
 | BEAM / OTP | Byteflow today |
 |------------|----------------|
 | **distribution** | Single process, in-memory |
-| **pattern matching receive** | Tag-based selective receive only |
+| **pattern matching receive** | Tag + payload-kind selective receive only (not full patterns) |
 | **process dictionary** | No |
 | **ETS** | No |
-| **`trap_exit`** | No — links always kill on abnormal exit |
+| **full bytecode supervisor trees** | Host `Supervisor` + `SetRestartPolicy` slice; trees stay mostly host Rust |
 
-Failures surface as `FlowOutcome::Failed` on `join`, not as mailbox messages.
+Failures without `trap_exit` / monitors surface as `FlowOutcome::Failed` on
+`join`, not as mailbox messages.
 
 ## Backpressure
 
@@ -130,21 +133,24 @@ Failures surface as `FlowOutcome::Failed` on `join`, not as mailbox messages.
 | restart policy | `Supervisor` (Rust) |
 | protocol in flows | `Program` / `Fn` bytecode |
 
-Supervisor trees are **not** expressed as bytecode flows today — plan host
-Rust for OTP-style supervision.
+Supervisor trees are **mostly host Rust** today — `SetRestartPolicy` lets a
+flow override its own restart decision at exit, but OTP-style trees are still
+assembled with [`Supervisor`](../src/scheduler/supervisor.rs) / [`ChildSpec`](../src/scheduler/supervisor.rs).
 
 ## Quick equivalence cheat sheet
 
 ```text
 self()              →  hop_sender on received msg; self_address() for Cap
 !                   →  send(cap, hop(...))
-receive             →  receive() / receive_match_imm(TAG)
+receive             →  receive() / receive_match_imm(TAG) / receive_match_kind(kind)
 call                →  ask(cap, hop(...)) / ask_timeout(cap, hop, ms)
 reply               →  send_reply(req, TAG_REP, payload)
 spawn               →  spawn(fn) → Cap; spawn_confined(fn) → Cap with rights NONE
 register/whereis    →  Fn::register_name / whereis (Cap reminted for caller); host Runtime::*; ChildSpec.name also registers
 link/monitor        →  Fn::link / Fn::monitor (need LINK / MONITOR on the addressing Cap)
 delegate            →  Fn::delegate(cap, rights) → weaker Cap
+trap_exit           →  Fn::set_trap_exit / Runtime::set_trap_exit
+restart policy      →  Fn::set_restart_policy / ChildSpec.restart
 ```
 
 ## Further reading

@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use crate::bytecode::Value;
 
 use super::{MailboxFullReason, OverflowPolicy, WaitFilter};
@@ -9,9 +7,9 @@ use super::{MailboxFullReason, OverflowPolicy, WaitFilter};
 ///
 /// # Logical vs physical
 ///
-/// `limit` is how many hops this inbox may hold. `VecDeque` capacity is
-/// how much the allocator currently reserved. A flow that receives one hop
-/// with `limit = 4096` must **not** pay for 4096 slots up front.
+/// `limit` is how many hops this inbox may hold. Physical capacity is
+/// how many slots the ring currently reserved. A flow that receives one
+/// hop with `limit = 4096` must **not** pay for 4096 slots up front.
 ///
 /// Growth is geometric and capped at `limit` (`reserve_for_push`). That
 /// keeps hot mailboxes from reallocating on every push without pre-paying
@@ -22,18 +20,17 @@ use super::{MailboxFullReason, OverflowPolicy, WaitFilter};
 /// `bytes` must move in lockstep with every push **and** pop, or the
 /// budget drifts until the inbox wedges (a leaked charge is never
 /// refunded, so the mailbox rejects forever). That is why this type owns
-/// the filtered take ([`Self::take`]) instead of handing out `&mut
-/// VecDeque`: there is no way to remove a hop without going through the
-/// accounting.
+/// the filtered take ([`Self::take`]) instead of handing out raw slots:
+/// there is no way to remove a hop without going through the accounting.
 ///
-/// # Why `VecDeque`, not an `unsafe` ring
+/// # Safe growable ring
 ///
-/// A dedicated `MaybeUninit` ring would be a natural next step, but this
-/// crate is `#![forbid(unsafe_code)]`. The queue is a `pub(crate)`
-/// abstraction so a later ring can replace `inner` without touching
-/// FlowCap, Ask, or the worker loop.
+/// Storage is `Vec<Option<Value>>` with `head` / `len` — no `unsafe`,
+/// compatible with `#![forbid(unsafe_code)]`.
 pub(crate) struct MailboxQueue {
-    inner: VecDeque<Value>,
+    buf: Vec<Option<Value>>,
+    head: usize,
+    len: usize,
     limit: usize,
     bytes: usize,
     byte_limit: usize,
@@ -44,7 +41,9 @@ impl MailboxQueue {
         debug_assert!(limit >= 1);
         debug_assert!(byte_limit >= 1);
         Self {
-            inner: VecDeque::new(),
+            buf: Vec::new(),
+            head: 0,
+            len: 0,
             limit,
             bytes: 0,
             byte_limit,
@@ -53,7 +52,7 @@ impl MailboxQueue {
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.inner.len()
+        self.len
     }
 
     /// Bytes currently charged to this inbox (see
@@ -71,7 +70,7 @@ impl MailboxQueue {
 
     #[inline]
     fn is_full(&self) -> bool {
-        self.inner.len() >= self.limit
+        self.len >= self.limit
     }
 
     #[inline]
@@ -79,14 +78,82 @@ impl MailboxQueue {
         self.bytes.saturating_add(cost) > self.byte_limit
     }
 
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn pop_front(&mut self) -> Option<Value> {
+        if self.len == 0 {
+            return None;
+        }
+        let value = self.buf[self.head].take();
+        let cap = self.capacity();
+        self.head = if cap == 0 { 0 } else { (self.head + 1) % cap };
+        self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
+        }
+        value
+    }
+
+    fn push_back(&mut self, value: Value) {
+        let cap = self.capacity();
+        debug_assert!(cap > 0 && self.len < cap);
+        let idx = (self.head + self.len) % cap;
+        self.buf[idx] = Some(value);
+        self.len += 1;
+    }
+
+    fn remove_at(&mut self, logical: usize) -> Option<Value> {
+        if logical >= self.len {
+            return None;
+        }
+        let cap = self.capacity();
+        debug_assert!(cap > 0);
+        let idx = (self.head + logical) % cap;
+        let value = self.buf[idx].take();
+        // Shift later elements toward the hole (preserves FIFO order).
+        let mut i = logical;
+        while i + 1 < self.len {
+            let from = (self.head + i + 1) % cap;
+            let to = (self.head + i) % cap;
+            self.buf[to] = self.buf[from].take();
+            i += 1;
+        }
+        self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
+        }
+        value
+    }
+
     /// Remove one hop matching `filter`, preserving the relative order of
     /// everything else (FIFO skip — non-matching hops are never dropped).
     pub(crate) fn take(&mut self, filter: WaitFilter) -> Option<Value> {
         let value = match filter {
-            WaitFilter::Any => self.inner.pop_front(),
+            WaitFilter::Any => self.pop_front(),
             other => {
-                let idx = self.inner.iter().position(|v| other.matches(v))?;
-                self.inner.remove(idx)
+                let mut found = None;
+                let cap = self.capacity();
+                if cap == 0 {
+                    return None;
+                }
+                for i in 0..self.len {
+                    let idx = (self.head + i) % cap;
+                    if let Some(v) = &self.buf[idx] {
+                        if other.matches(v) {
+                            found = Some(i);
+                            break;
+                        }
+                    }
+                }
+                self.remove_at(found?)
             }
         };
         if let Some(v) = &value {
@@ -108,11 +175,11 @@ impl MailboxQueue {
     ) -> Result<EnqueueEffect, MailboxFullReason> {
         let cost = value.memory_size();
         if !self.is_full() && !self.would_exceed_bytes(cost) {
-            if !reserve_for_push(&mut self.inner, self.limit) {
+            if !self.reserve_for_push(self.limit) {
                 return Err(MailboxFullReason::MessageLimit);
             }
             self.bytes = self.bytes.saturating_add(cost);
-            self.inner.push_back(value);
+            self.push_back(value);
             return Ok(EnqueueEffect::Enqueued);
         }
         let reason = if self.is_full() {
@@ -127,8 +194,8 @@ impl MailboxQueue {
             OverflowPolicy::DropNewest => Ok(EnqueueEffect::DroppedNewest),
             OverflowPolicy::DropOldest => {
                 let mut dropped = false;
-                while (self.is_full() || self.would_exceed_bytes(cost)) && !self.inner.is_empty() {
-                    if let Some(old) = self.inner.pop_front() {
+                while (self.is_full() || self.would_exceed_bytes(cost)) && !self.is_empty() {
+                    if let Some(old) = self.pop_front() {
                         self.bytes = self.bytes.saturating_sub(old.memory_size());
                         dropped = true;
                     }
@@ -139,8 +206,11 @@ impl MailboxQueue {
                 if self.would_exceed_bytes(cost) {
                     return Err(MailboxFullReason::ByteLimit);
                 }
+                if !self.reserve_for_push(self.limit) {
+                    return Err(MailboxFullReason::MessageLimit);
+                }
                 self.bytes = self.bytes.saturating_add(cost);
-                self.inner.push_back(value);
+                self.push_back(value);
                 Ok(if dropped {
                     EnqueueEffect::DroppedOldest
                 } else {
@@ -156,30 +226,39 @@ impl MailboxQueue {
     /// losing DOWN is worse.
     pub(crate) fn force_push(&mut self, value: Value) {
         let cost = value.memory_size();
-        while (self.is_full() || self.would_exceed_bytes(cost)) && !self.inner.is_empty() {
-            if let Some(old) = self.inner.pop_front() {
+        while (self.is_full() || self.would_exceed_bytes(cost)) && !self.is_empty() {
+            if let Some(old) = self.pop_front() {
                 self.bytes = self.bytes.saturating_sub(old.memory_size());
             }
         }
-        let cap = self.limit.max(self.inner.len().saturating_add(1));
-        let _ = reserve_for_push(&mut self.inner, cap);
+        let cap = self.limit.max(self.len.saturating_add(1));
+        let _ = self.reserve_for_push(cap);
         self.bytes = self.bytes.saturating_add(cost);
-        self.inner.push_back(value);
+        self.push_back(value);
     }
-}
 
-/// Physical growth: double current `VecDeque` capacity, never past `limit`.
-fn reserve_for_push(queue: &mut VecDeque<Value>, capacity: usize) -> bool {
-    if queue.len() < queue.capacity() {
-        return true;
+    /// Physical growth: double current capacity, never past `capacity`.
+    fn reserve_for_push(&mut self, capacity: usize) -> bool {
+        if self.len < self.capacity() {
+            return true;
+        }
+        let current = self.capacity();
+        let next = current.max(1).saturating_mul(2).min(capacity);
+        if next <= current {
+            return self.len < capacity;
+        }
+        let mut new_buf = Vec::with_capacity(next);
+        new_buf.resize_with(next, || None);
+        if current > 0 {
+            for (i, slot) in new_buf.iter_mut().enumerate().take(self.len) {
+                let old_idx = (self.head + i) % current;
+                *slot = self.buf[old_idx].take();
+            }
+        }
+        self.buf = new_buf;
+        self.head = 0;
+        true
     }
-    let current = queue.capacity();
-    let next = current.max(1).saturating_mul(2).min(capacity);
-    if next <= current {
-        return queue.len() < capacity;
-    }
-    queue.reserve(next - current);
-    true
 }
 
 /// What [`MailboxQueue::enqueue`] did (stats + [`super::Delivery`] mapping).
@@ -207,7 +286,10 @@ mod tests {
     }
 
     fn hop_payload_int(msg: &Message) -> i64 {
-        msg.payload.as_int().unwrap_or(0)
+        match msg.payload.as_int() {
+            Some(i) => i,
+            None => 0,
+        }
     }
 
     fn hop_payload(q: &mut MailboxQueue) -> Result<i64, &'static str> {
@@ -351,5 +433,25 @@ mod tests {
             Ok(EnqueueEffect::DroppedOldest)
         );
         assert!(q.bytes() <= 4096);
+    }
+
+    #[test]
+    fn payload_kind_filter_skips_non_matching() {
+        let mut q = MailboxQueue::new(8, ROOMY);
+        let _ = q.enqueue(
+            Value::Message(Message::new(1, 1, 1, Value::Int(1))),
+            OverflowPolicy::Reject,
+        );
+        let _ = q.enqueue(
+            Value::Message(Message::new(1, 2, 1, Value::str("hi"))),
+            OverflowPolicy::Reject,
+        );
+        // Str wire tag = 7
+        let got = q.take(WaitFilter::PayloadKind(7));
+        assert!(matches!(
+            got.as_ref().and_then(|v| v.as_message()),
+            Some(m) if m.payload.as_str() == Some("hi")
+        ));
+        assert_eq!(q.len(), 1);
     }
 }

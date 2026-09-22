@@ -149,7 +149,10 @@ pub fn fault_count() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
     /// `function` index is outside the runtime chunk's function table.
-    BadFunction { index: u32, table_size: u32 },
+    BadFunction {
+        index: u32,
+        table_size: u32,
+    },
     /// Chunk failed verification before the runtime could start.
     VerifyFailed(crate::bytecode::VerifyError),
     /// Spawn arguments contained an unknown or unusable capability.
@@ -159,14 +162,19 @@ pub enum SpawnError {
     /// Flow-id counter wrapped onto the reserved host id.
     FlowIdExhausted,
     /// Live flow count would exceed [`crate::RuntimeConfig::max_flows`].
-    FlowLimit { current: usize, max: u32 },
+    FlowLimit {
+        current: usize,
+        max: u32,
+    },
     /// Bytecode spawn failed the quota / SPAWN-right / attenuation check.
     SpawnDenied(String),
     SpawnRateExceeded,
     ParentCapRevoked,
     MissingSpawnRight,
     /// [`crate::ChildSpec::name`] is already in the runtime registry.
-    NameTaken { name: String },
+    NameTaken {
+        name: String,
+    },
     /// OS refused to create a worker / timer / supervisor thread.
     ThreadSpawnFailed(String),
     /// `Vm::new` failed for a reason other than a bad function index

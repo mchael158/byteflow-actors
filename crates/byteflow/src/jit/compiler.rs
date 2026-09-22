@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, Block, Function, InstBuilder, MachMemFlags, Signature, Value as ClifValue};
+use cranelift_codegen::ir::{
+    AbiParam, Block, Function, InstBuilder, MachMemFlags, Signature, Value as ClifValue,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
 
@@ -12,8 +14,8 @@ use crate::{Chunk, Instruction, Opcode, Value};
 use super::error::CompileError;
 use super::exit::{JIT_BUDGET, JIT_CONTINUE, JIT_RETURN, JIT_TRAP};
 use super::frame::{
-    JitEntry, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_EXIT_KIND, OFF_FUNCTION,
-    OFF_PC, OFF_REGISTER_COUNT, OFF_RETURN_REG, MAX_JIT_CALL_DEPTH,
+    JitEntry, MAX_JIT_CALL_DEPTH, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_EXIT_KIND,
+    OFF_FUNCTION, OFF_PC, OFF_REGISTER_COUNT, OFF_RETURN_REG,
 };
 use super::trace::{CompiledTrace, TraceKey, TraceSpan, MAX_TRACE_LENGTH};
 
@@ -60,10 +62,12 @@ impl<'a> TraceCompiler<'a> {
         chunk: &Chunk,
         key: TraceKey,
     ) -> Result<CompiledTrace, CompileError> {
-        let def = chunk.function(key.function).ok_or(CompileError::EmptyTrace {
-            function: key.function,
-            pc: key.entry_pc,
-        })?;
+        let def = chunk
+            .function(key.function)
+            .ok_or(CompileError::EmptyTrace {
+                function: key.function,
+                pc: key.entry_pc,
+            })?;
         let region = collect_trace_region(chunk, key)?;
         if region.blocks.is_empty() {
             return Err(CompileError::EmptyTrace {
@@ -105,7 +109,9 @@ impl<'a> TraceCompiler<'a> {
         builder.switch_to_block(entry);
 
         let frame_ptr = builder.block_params(entry)[0];
-        let slots_ptr = builder.ins().load(pointer_type, MachMemFlags::new(), frame_ptr, 0);
+        let slots_ptr = builder
+            .ins()
+            .load(pointer_type, MachMemFlags::new(), frame_ptr, 0);
         let budget_ptr = field_ptr(&mut builder, frame_ptr, pointer_type, OFF_BUDGET);
         let call_depth_ptr = field_ptr(&mut builder, frame_ptr, pointer_type, OFF_CALL_DEPTH);
         let call_stack_ptr = {
@@ -144,13 +150,7 @@ impl<'a> TraceCompiler<'a> {
             let mut registers = RegisterMap::new(def.num_registers as usize);
 
             for pc in &block.pcs {
-                emit_budget_tick(
-                    &mut builder,
-                    budget_ptr,
-                    frame_ptr,
-                    pointer_type,
-                    *pc,
-                );
+                emit_budget_tick(&mut builder, budget_ptr, frame_ptr, pointer_type, *pc);
                 let instr = chunk.code[*pc as usize];
                 let mut emit_ctx = EmitContext {
                     builder: &mut builder,
@@ -173,14 +173,7 @@ impl<'a> TraceCompiler<'a> {
         builder.switch_to_block(trap_block);
         builder.seal_block(trap_block);
         let trap_pc = region_max_pc(&region, key)?;
-        write_exit(
-            &mut builder,
-            frame_ptr,
-            pointer_type,
-            JIT_TRAP,
-            trap_pc,
-            0,
-        );
+        write_exit(&mut builder, frame_ptr, pointer_type, JIT_TRAP, trap_pc, 0);
 
         builder.switch_to_block(return_block);
         builder.seal_block(return_block);
@@ -312,33 +305,12 @@ fn emit_instruction(
             registers.set(instr.a as usize, v);
         }
         Opcode::Move => {
-            let v = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.b,
-                pc,
-            )?;
+            let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             registers.set(instr.a as usize, v);
         }
         Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Eq | Opcode::Lt | Opcode::Le => {
-            let lhs = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.b,
-                pc,
-            )?;
-            let rhs = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.c,
-                pc,
-            )?;
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
             let result = match instr.op {
                 Opcode::Add => builder.ins().iadd(lhs, rhs),
                 Opcode::Sub => builder.ins().isub(lhs, rhs),
@@ -372,29 +344,14 @@ fn emit_instruction(
             registers.set(instr.a as usize, result);
         }
         Opcode::Div | Opcode::Mod => {
-            let lhs = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.b,
-                pc,
-            )?;
-            let rhs = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.c,
-                pc,
-            )?;
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
             flush_registers(builder, registers, slots_ptr, pointer_type);
             let zero = builder.ins().iconst(types::I64, 0);
-            let is_zero = builder.ins().icmp(
-                cranelift_codegen::ir::condcodes::IntCC::Equal,
-                rhs,
-                zero,
-            );
+            let is_zero =
+                builder
+                    .ins()
+                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rhs, zero);
             let ok = builder.create_block();
             builder.ins().brif(is_zero, trap_block, &[], ok, &[]);
             builder.switch_to_block(ok);
@@ -407,44 +364,23 @@ fn emit_instruction(
             registers.set(instr.a as usize, result);
         }
         Opcode::Neg => {
-            let v = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.b,
-                pc,
-            )?;
+            let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             let zero = builder.ins().iconst(types::I64, 0);
             registers.set(instr.a as usize, builder.ins().isub(zero, v));
         }
         Opcode::Jump => {
             flush_registers(builder, registers, slots_ptr, pointer_type);
             let target_pc = jump_target(pc, instr.imm);
-            branch_to_pc(
-                builder,
-                frame_ptr,
-                pointer_type,
-                pc_to_block,
-                target_pc,
-            );
+            branch_to_pc(builder, frame_ptr, pointer_type, pc_to_block, target_pc);
         }
         Opcode::Branch => {
-            let cond = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.a,
-                pc,
-            )?;
+            let cond = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
             flush_registers(builder, registers, slots_ptr, pointer_type);
             let zero = builder.ins().iconst(types::I64, 0);
-            let is_falsy = builder.ins().icmp(
-                cranelift_codegen::ir::condcodes::IntCC::Equal,
-                cond,
-                zero,
-            );
+            let is_falsy =
+                builder
+                    .ins()
+                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, cond, zero);
             let fall_pc = pc + 1;
             let falsy_pc = branch_target(pc, instr.imm);
             match (pc_to_block.get(&fall_pc), pc_to_block.get(&falsy_pc)) {
@@ -456,50 +392,22 @@ fn emit_instruction(
                     builder.ins().brif(is_falsy, side, &[], *fall, &[]);
                     builder.switch_to_block(side);
                     builder.seal_block(side);
-                    write_exit(
-                        builder,
-                        frame_ptr,
-                        pointer_type,
-                        JIT_CONTINUE,
-                        falsy_pc,
-                        0,
-                    );
+                    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, falsy_pc, 0);
                 }
                 (None, Some(falsy)) => {
                     let side = builder.create_block();
                     builder.ins().brif(is_falsy, *falsy, &[], side, &[]);
                     builder.switch_to_block(side);
                     builder.seal_block(side);
-                    write_exit(
-                        builder,
-                        frame_ptr,
-                        pointer_type,
-                        JIT_CONTINUE,
-                        fall_pc,
-                        0,
-                    );
+                    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, fall_pc, 0);
                 }
                 (None, None) => {
-                    write_exit(
-                        builder,
-                        frame_ptr,
-                        pointer_type,
-                        JIT_CONTINUE,
-                        falsy_pc,
-                        0,
-                    );
+                    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, falsy_pc, 0);
                 }
             }
         }
         Opcode::Return => {
-            let v = load_reg(
-                builder,
-                registers,
-                slots_ptr,
-                pointer_type,
-                instr.a,
-                pc,
-            )?;
+            let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
             store_slot(builder, slots_ptr, pointer_type, instr.a, v);
             if supports_calls {
                 emit_return(
@@ -551,14 +459,7 @@ fn branch_to_pc(
     if let Some(block) = pc_to_block.get(&target_pc) {
         builder.ins().jump(*block, &[]);
     } else {
-        write_exit(
-            builder,
-            frame_ptr,
-            pointer_type,
-            JIT_CONTINUE,
-            target_pc,
-            0,
-        );
+        write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, target_pc, 0);
     }
 }
 
@@ -586,11 +487,11 @@ fn load_reg(
     if let Some(v) = registers.get(reg as usize) {
         return Ok(v);
     }
-    let offset = builder.ins().iconst(pointer_type, i64::from(u32::from(reg) * 8));
-    let addr = builder.ins().iadd(slots_ptr, offset);
-    let v = builder
+    let offset = builder
         .ins()
-        .load(types::I64, MachMemFlags::new(), addr, 0);
+        .iconst(pointer_type, i64::from(u32::from(reg) * 8));
+    let addr = builder.ins().iadd(slots_ptr, offset);
+    let v = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
     registers.set(reg as usize, v);
     Ok(v)
 }
@@ -652,7 +553,10 @@ fn collect_trace_region(chunk: &Chunk, key: TraceKey) -> Result<TraceRegion, Com
         }
 
         if !pcs.is_empty() {
-            blocks.push(TraceBlock { start_pc: start, pcs });
+            blocks.push(TraceBlock {
+                start_pc: start,
+                pcs,
+            });
         }
     }
 
@@ -679,10 +583,13 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::Demonitor
             | Opcode::Link
             | Opcode::Unlink
+            | Opcode::SetTrapExit
+            | Opcode::SetRestartPolicy
             | Opcode::Delegate
             | Opcode::FreshRequestId
             | Opcode::ReceiveMatchCorr
             | Opcode::ReceiveMatchCorrImm
+            | Opcode::ReceiveMatchKind
             | Opcode::RegisterName
             | Opcode::Whereis
             | Opcode::Trap
@@ -707,7 +614,9 @@ fn store_slot(
     reg: u8,
     value: ClifValue,
 ) {
-    let offset = builder.ins().iconst(pointer_type, i64::from(u32::from(reg) * 8));
+    let offset = builder
+        .ins()
+        .iconst(pointer_type, i64::from(u32::from(reg) * 8));
     let addr = builder.ins().iadd(slots, offset);
     builder.ins().store(MachMemFlags::new(), value, addr, 0);
 }
@@ -725,16 +634,19 @@ fn emit_budget_tick(
     pointer_type: types::Type,
     pc: u32,
 ) {
-    let budget = builder.ins().load(types::I32, MachMemFlags::new(), budget_ptr, 0);
+    let budget = builder
+        .ins()
+        .load(types::I32, MachMemFlags::new(), budget_ptr, 0);
     let zero = builder.ins().iconst(types::I32, 0);
-    let exhausted = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::Equal,
-        budget,
-        zero,
-    );
+    let exhausted =
+        builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, budget, zero);
     let continue_insn = builder.create_block();
     let budget_exit = builder.create_block();
-    builder.ins().brif(exhausted, budget_exit, &[], continue_insn, &[]);
+    builder
+        .ins()
+        .brif(exhausted, budget_exit, &[], continue_insn, &[]);
     builder.switch_to_block(budget_exit);
     builder.seal_block(budget_exit);
     write_exit(builder, frame_ptr, pointer_type, JIT_BUDGET, pc, 0);
@@ -742,7 +654,9 @@ fn emit_budget_tick(
     builder.seal_block(continue_insn);
     let one = builder.ins().iconst(types::I32, 1);
     let new_budget = builder.ins().isub(budget, one);
-    builder.ins().store(MachMemFlags::new(), new_budget, budget_ptr, 0);
+    builder
+        .ins()
+        .store(MachMemFlags::new(), new_budget, budget_ptr, 0);
 }
 
 fn write_u32_field(
@@ -788,21 +702,16 @@ fn emit_call(
     let callee = instr.imm as u32;
     let argc = instr.b;
     let dst = instr.a;
-    let def = chunk.function(callee).ok_or(CompileError::UnsupportedOpcode {
-        opcode: Opcode::Call,
-        pc,
-    })?;
+    let def = chunk
+        .function(callee)
+        .ok_or(CompileError::UnsupportedOpcode {
+            opcode: Opcode::Call,
+            pc,
+        })?;
     let callee_entry = def.entry;
     let Some(callee_block) = pc_to_block.get(&callee_entry) else {
         flush_registers(builder, registers, slots_ptr, pointer_type);
-        write_exit(
-            builder,
-            frame_ptr,
-            pointer_type,
-            JIT_CONTINUE,
-            pc,
-            0,
-        );
+        write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
         return Ok(());
     };
 
@@ -867,9 +776,7 @@ fn emit_call(
         let off = builder.ins().iconst(pointer_type, 8);
         builder.ins().iadd(record_addr, off)
     };
-    builder
-        .ins()
-        .store(MachMemFlags::new(), dest, dest_addr, 0);
+    builder.ins().store(MachMemFlags::new(), dest, dest_addr, 0);
 
     let reg_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_REGISTER_COUNT);
     let caller_regs = builder
@@ -896,18 +803,20 @@ fn emit_call(
         let value = builder
             .ins()
             .load(types::I64, MachMemFlags::new(), src_addr, 0);
-        let dst_offset = builder.ins().iconst(pointer_type, i64::from(u32::from(i) * 8));
-        let dst_addr = builder.ins().iadd(slots_ptr, dst_offset);
-        builder
+        let dst_offset = builder
             .ins()
-            .store(MachMemFlags::new(), value, dst_addr, 0);
+            .iconst(pointer_type, i64::from(u32::from(i) * 8));
+        let dst_addr = builder.ins().iadd(slots_ptr, dst_offset);
+        builder.ins().store(MachMemFlags::new(), value, dst_addr, 0);
     }
 
     let callee_fn = builder.ins().iconst(types::I32, i64::from(callee));
     builder
         .ins()
         .store(MachMemFlags::new(), callee_fn, func_ptr, 0);
-    let callee_regs = builder.ins().iconst(types::I32, i64::from(def.num_registers));
+    let callee_regs = builder
+        .ins()
+        .iconst(types::I32, i64::from(def.num_registers));
     builder
         .ins()
         .store(MachMemFlags::new(), callee_regs, reg_ptr, 0);
@@ -933,16 +842,12 @@ fn emit_return(
         .ins()
         .load(types::I32, MachMemFlags::new(), call_depth_ptr, 0);
     let zero = builder.ins().iconst(types::I32, 0);
-    let is_outer = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::Equal,
-        depth,
-        zero,
-    );
+    let is_outer = builder
+        .ins()
+        .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, depth, zero);
     let outer = builder.create_block();
     let inner = builder.create_block();
-    builder
-        .ins()
-        .brif(is_outer, outer, &[], inner, &[]);
+    builder.ins().brif(is_outer, outer, &[], inner, &[]);
     builder.switch_to_block(outer);
     builder.seal_block(outer);
     write_exit(
@@ -995,7 +900,9 @@ fn emit_return(
         .ins()
         .load(types::I32, MachMemFlags::new(), caller_regs_addr, 0);
 
-    let ret_offset = builder.ins().iconst(pointer_type, i64::from(u32::from(return_reg) * 8));
+    let ret_offset = builder
+        .ins()
+        .iconst(pointer_type, i64::from(u32::from(return_reg) * 8));
     let ret_addr = builder.ins().iadd(slots_ptr, ret_offset);
     let ret_val = builder
         .ins()
@@ -1018,14 +925,7 @@ fn emit_return(
         .store(MachMemFlags::new(), caller_regs, reg_ptr, 0);
 
     registers.clear();
-    write_dynamic_exit(
-        builder,
-        frame_ptr,
-        pointer_type,
-        JIT_CONTINUE,
-        return_pc,
-        0,
-    );
+    write_dynamic_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, return_pc, 0);
     let _ = pc;
 }
 
@@ -1101,14 +1001,8 @@ mod tests {
         let mut compiler = TraceCompiler::new(ctx.module_mut());
         let trace = compiler.compile_trace(&chunk, key)?;
         let mut slots = vec![0i64; 1];
-        let ret = super::super::dispatch::run_compiled_trace_ref(
-            &trace,
-            &mut slots,
-            0,
-            10_000,
-            0,
-            1,
-        );
+        let ret =
+            super::super::dispatch::run_compiled_trace_ref(&trace, &mut slots, 0, 10_000, 0, 1);
         assert_eq!(slots[0], 7);
         assert!(matches!(
             ret.into_reason(),
@@ -1140,14 +1034,8 @@ mod tests {
         let mut compiler = TraceCompiler::new(ctx.module_mut());
         let trace = compiler.compile_trace(&chunk, key)?;
         let mut slots = vec![0i64; 1];
-        let ret = super::super::dispatch::run_compiled_trace_ref(
-            &trace,
-            &mut slots,
-            0,
-            10_000,
-            0,
-            1,
-        );
+        let ret =
+            super::super::dispatch::run_compiled_trace_ref(&trace, &mut slots, 0, 10_000, 0, 1);
         assert!(matches!(
             ret.into_reason(),
             super::super::exit::ExitReason::Return { return_reg: 0 }

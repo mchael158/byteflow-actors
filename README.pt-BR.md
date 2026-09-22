@@ -9,7 +9,7 @@ Concorrência embutível em Rust: bytecode com **`Program`** / **`Fn`**, **flows
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.5"
+byteflow-actors = "0.9.6"
 ```
 
 ```rust
@@ -36,6 +36,7 @@ Atomic Hop (`Value::Message`): ver `crates/byteflow/docs/atomic-hop.md`. Use `BY
 [mailbox](crates/byteflow/docs/mailbox.md) ·
 [vm-safety](crates/byteflow/docs/vm-safety.md) ·
 [error-model](crates/byteflow/docs/error-model.md) ·
+[properties](crates/byteflow/docs/properties.md) ·
 [security](crates/byteflow/docs/security.md)
 
 Licença: MIT OR Apache-2.0 · [github.com/mchael158/bytecode-vm](https://github.com/mchael158/bytecode-vm)

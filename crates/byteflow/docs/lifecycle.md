@@ -42,6 +42,12 @@ Abnormal exit (`Fault`, `Link`, …) **kills** the peer (cooperative: parked
 flows are taken out of the mailbox; running flows see a kill signal at the
 next quantum). `Normal` (clean `return` / `Exit`) only drops the link.
 
+With [`Fn::set_trap_exit`](../src/bytecode/program.rs) /
+[`Runtime::set_trap_exit`](../src/scheduler/runtime.rs) enabled on a peer
+(BEAM `process_flag(trap_exit, true)`), every exit of the linked flow —
+including `Normal` — delivers a [`TAG_SYS_EXIT`](../src/bytecode/value.rs)
+(`0xFF02`) hop (`Message::linked_exit`) instead of killing that peer.
+
 ## Registry
 
 `register_name(name, CapId)` stores a **Cap**, never a FlowId.
@@ -91,8 +97,11 @@ is checked on every host and bytecode `spawn`. Over the cap →
 Each flow also carries a [`FlowQuota`](../src/scheduler/quota.rs) from
 [`RuntimeConfig::quota`](../src/scheduler/runtime.rs): remaining CPU
 (distinct from the scheduler *quantum*), heap charge (`Str`/`Bytes` on
-register store, interim — no release until exit), and spawn/send token
-buckets. Default is [`QuotaConfig::permissive`](../src/scheduler/quota.rs);
+register store, with release-on-overwrite delta accounting), and
+spawn/send token buckets. Process-wide heap is capped by
+[`RuntimeConfig::max_runtime_bytes`](../src/scheduler/runtime.rs) via
+[`MemoryBudget`](../src/memory.rs). Default is
+[`QuotaConfig::permissive`](../src/scheduler/quota.rs);
 [`QuotaConfig::sandbox`](../src/scheduler/quota.rs) is the isolation
 starting point. Exhaustion fails closed (`QuotaError`). An ADMIN Cap can
 top up CPU, heap limit, or the send bucket.

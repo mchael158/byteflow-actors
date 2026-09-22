@@ -23,6 +23,47 @@ use super::process::{Flow, FlowId, FlowOutcome};
 use super::runtime::{wake_workers, Shared};
 use super::sync_lock;
 
+/// Per-flow BEAM-style `trap_exit` flag (default off).
+///
+/// When set on a flow, **that** flow receives a [`crate::TAG_SYS_EXIT`] hop
+/// instead of being killed when a linked peer exits (including `Normal`).
+pub struct TrapExitFlags {
+    inner: Mutex<HashSet<FlowId>>,
+}
+
+impl TrapExitFlags {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn set(&self, id: FlowId, enabled: bool) -> Result<(), RuntimeError> {
+        let mut set = sync_lock::lock(&self.inner, "TrapExitFlags::set")?;
+        if enabled {
+            set.insert(id);
+        } else {
+            set.remove(&id);
+        }
+        Ok(())
+    }
+
+    pub fn is_enabled(&self, id: FlowId) -> Result<bool, RuntimeError> {
+        Ok(sync_lock::lock(&self.inner, "TrapExitFlags::is_enabled")?.contains(&id))
+    }
+
+    pub fn clear(&self, id: FlowId) -> Result<(), RuntimeError> {
+        sync_lock::lock(&self.inner, "TrapExitFlags::clear")?.remove(&id);
+        Ok(())
+    }
+}
+
+impl Default for TrapExitFlags {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Kill / linked-exit signal consumed at the start of a worker quantum.
 pub struct KillSignals {
     inner: Mutex<HashMap<FlowId, FlowExitReason>>,
@@ -228,6 +269,9 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
     if let Err(e) = shared.kill_signals.take(id) {
         report_fault(e);
     }
+    if let Err(e) = shared.trap_exits.clear(id) {
+        report_fault(e);
+    }
     if let Err(e) = shared.waiting_send_at.remove(id) {
         report_fault(e);
     }
@@ -298,8 +342,18 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
             Vec::new()
         }
     };
-    if reason.is_abnormal() {
-        for (_, peer) in peers {
+    for (_, peer) in peers {
+        let trapping = match shared.trap_exits.is_enabled(peer) {
+            Ok(v) => v,
+            Err(e) => {
+                report_fault(e);
+                false
+            }
+        };
+        if trapping {
+            // BEAM: every exit signal becomes {'EXIT', From, Reason}.
+            deliver_exit(shared, peer, id, reason);
+        } else if reason.is_abnormal() {
             collect_link_exit(shared, peer, work);
         }
     }
@@ -310,7 +364,7 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
         RuntimeMetrics::inc(&shared.metrics.processes_failed);
     }
     if let Some(link) = pending.flow.supervisor.take() {
-        link.notify(id, pending.outcome.clone());
+        link.notify(id, pending.outcome.clone(), pending.flow.restart_policy);
     }
     pending.flow.complete(pending.outcome);
 }
@@ -321,7 +375,17 @@ pub(crate) fn deliver_down(shared: &Shared, event: DownEvent) {
         event.target.as_u64(),
         event.reason.as_u64(),
     ));
-    let mailbox = match shared.directory.lookup(event.owner) {
+    deliver_system_hop(shared, event.owner, hop);
+}
+
+/// Linked-exit notice for a peer with `trap_exit` enabled.
+fn deliver_exit(shared: &Shared, owner: FlowId, dead: FlowId, reason: FlowExitReason) {
+    let hop = Value::Message(Message::linked_exit(dead.as_u64(), reason.as_u64()));
+    deliver_system_hop(shared, owner, hop);
+}
+
+fn deliver_system_hop(shared: &Shared, owner: FlowId, hop: Value) {
+    let mailbox = match shared.directory.lookup(owner) {
         Ok(Some(m)) => m,
         Ok(None) => return,
         Err(e) => {
@@ -330,24 +394,24 @@ pub(crate) fn deliver_down(shared: &Shared, event: DownEvent) {
         }
     };
     match mailbox.push_system(hop.clone()) {
-        Ok(Delivery::Handoff(owner)) => {
-            let _ = shared.ask_waits.remove_asker(owner.id);
-            match owner.last_receive_dest {
+        Ok(Delivery::Handoff(parked)) => {
+            let _ = shared.ask_waits.remove_asker(parked.id);
+            match parked.last_receive_dest {
                 Some(dest) => {
-                    let Some(owner) = resume_or_fail(shared, owner, dest, hop) else {
+                    let Some(parked) = resume_or_fail(shared, parked, dest, hop) else {
                         return;
                     };
-                    owner
+                    parked
                         .metrics
                         .messages_received
                         .fetch_add(1, Ordering::Relaxed);
-                    shared.injector.push(owner);
+                    shared.injector.push(parked);
                     wake_workers(shared);
                 }
                 None => {
                     finalize_flow(
                         shared,
-                        *owner,
+                        *parked,
                         FlowOutcome::Failed("handoff missing dest register".into()),
                         FlowExitReason::Fault,
                     );
@@ -381,29 +445,26 @@ fn wake_orphaned_asks(shared: &Shared, target: FlowId, reason: FlowExitReason) {
             }
         };
         match mailbox.take_parked() {
-            Ok(Some(flow)) => {
-                match flow.last_receive_dest {
-                    Some(dest) => {
-                        let Some(flow) = resume_or_fail(shared, flow, dest, hop.clone())
-                        else {
-                            continue;
-                        };
-                        flow.metrics
-                            .messages_received
-                            .fetch_add(1, Ordering::Relaxed);
-                        shared.injector.push(flow);
-                        wake_workers(shared);
-                    }
-                    None => {
-                        finalize_flow(
-                            shared,
-                            *flow,
-                            FlowOutcome::Failed("handoff missing dest register".into()),
-                            FlowExitReason::Fault,
-                        );
-                    }
+            Ok(Some(flow)) => match flow.last_receive_dest {
+                Some(dest) => {
+                    let Some(flow) = resume_or_fail(shared, flow, dest, hop.clone()) else {
+                        continue;
+                    };
+                    flow.metrics
+                        .messages_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    shared.injector.push(flow);
+                    wake_workers(shared);
                 }
-            }
+                None => {
+                    finalize_flow(
+                        shared,
+                        *flow,
+                        FlowOutcome::Failed("handoff missing dest register".into()),
+                        FlowExitReason::Fault,
+                    );
+                }
+            },
             // Not parked yet: `park_ask` inserts into the index *before*
             // `park_filter`. That asker revalidates via `target_of` after
             // parking and self-wakes with `TAG_SYS_EXIT` if membership is gone.

@@ -56,7 +56,9 @@ pub fn exec_spawn_authority(
     if !parent_cap.rights.contains(CapRights::SPAWN) {
         return Err(ConfinedSpawnError::MissingSpawnRight);
     }
-    parent_quota.check_spawn().map_err(|_| ConfinedSpawnError::RateLimited)?;
+    parent_quota
+        .check_spawn()
+        .map_err(|_| ConfinedSpawnError::RateLimited)?;
 
     let attenuated = parent_cap.attenuate(requested_rights, requested_native);
     Ok(Cap::root(
@@ -93,10 +95,7 @@ mod tests {
             &child_cell,
         ) {
             Ok(c) => c,
-            Err(_) => {
-                assert!(false, "spawn authority must succeed");
-                return;
-            }
+            Err(_) => panic!("spawn authority must succeed"),
         };
         assert!(!out.rights.contains(CapRights::ADMIN));
         assert!(out.rights.contains(CapRights::NATIVE));
@@ -118,10 +117,7 @@ mod tests {
             &child_cell,
         ) {
             Ok(c) => c,
-            Err(_) => {
-                assert!(false, "confined spawn must succeed");
-                return;
-            }
+            Err(_) => panic!("confined spawn must succeed"),
         };
         assert_eq!(out.rights, CapRights::NONE);
     }

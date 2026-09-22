@@ -8,8 +8,8 @@
 //! ```
 
 use byteflow::{
-    Chunk, FlowOutcome, MailboxConfig, Program, Runtime, RuntimeConfig, Value, DEFAULT_QUANTUM,
-    std_native_table,
+    std_native_table, Chunk, FlowOutcome, MailboxConfig, Program, Runtime, RuntimeConfig, Value,
+    DEFAULT_QUANTUM,
 };
 
 const TAG_PING: i32 = 10;

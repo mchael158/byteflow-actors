@@ -48,9 +48,11 @@ impl FlowLimit {
 
     /// Release one reserved slot (finalize or aborted spawn).
     pub fn release(&self) {
-        let _ = self.live.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-            Some(c.saturating_sub(1))
-        });
+        let _ = self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                Some(c.saturating_sub(1))
+            });
     }
 
     #[cfg(test)]

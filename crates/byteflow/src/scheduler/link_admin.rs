@@ -4,7 +4,7 @@
 //! rights) and succeeded if the target existed — knowing the id was enough.
 //! Now: the Cap must target that exact flow and carry the matching right.
 
-use crate::bytecode::{Cap, CapTarget, CapRights, RevocationCell};
+use crate::bytecode::{Cap, CapRights, CapTarget, RevocationCell};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkError {

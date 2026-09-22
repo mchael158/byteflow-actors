@@ -58,9 +58,7 @@ impl JitRuntime {
 
     pub fn get_trace(&self, key: &TraceKey) -> Option<JitEntryCopy> {
         let cache = self.cache.read().ok()?;
-        cache.get(key).map(|t| JitEntryCopy {
-            entry: t.entry,
-        })
+        cache.get(key).map(|t| JitEntryCopy { entry: t.entry })
     }
 
     pub fn insert_trace(&self, key: TraceKey, trace: CompiledTrace) {

@@ -26,24 +26,29 @@ pub enum VmResult {
     /// `Sleep` opcode. Register the Flow on the timer wheel; resume with
     /// a plain `run()` call (no writeback) once it elapses.
     Sleep(Duration),
-    /// `Spawn` — create a child flow; parent receives a **Cap** (`SEND|ASK`).
+    /// `Spawn` — create a child flow; parent receives a **Cap**
+    /// ([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING)).
     Spawn {
         function: u32,
         args: Vec<Value>,
         dest_reg: u8,
         requested_rights: crate::bytecode::CapRights,
     },
-    /// `SelfPid` — write a **self Cap** (`SEND|ASK`) into `dest_reg`.
+    /// `SelfPid` — write a **self Cap**
+    /// ([`CapRights::ADDRESSING`](crate::CapRights::ADDRESSING)) into `dest_reg`.
     SelfPid { dest_reg: u8 },
     /// `Send` — Atomic Hop to a **capability** target (requires SEND).
     Send { target_cap: CapId, message: Value },
     /// `Receive` / `ReceiveTimeout` / `ReceiveMatch` / `ReceiveMatchImm` /
-    /// `ReceiveMatchCorr` / `ReceiveMatchCorrImm`.
+    /// `ReceiveMatchCorr` / `ReceiveMatchCorrImm` / `ReceiveMatchKind`.
     Receive {
         dest_reg: u8,
         timeout: Option<Duration>,
         match_tag: Option<u16>,
         match_request_id: Option<u64>,
+        /// When set, wait for a hop whose `payload.wire_tag()` equals this
+        /// BFV0 tag (`0..=8`). Independent of [`Self::Receive::match_tag`].
+        match_payload_kind: Option<u8>,
     },
     /// `Ask` / `AskTimeout` — RPC hop to a **capability** target (requires ASK).
     Ask {
@@ -60,6 +65,11 @@ pub enum VmResult {
     Link { dest_reg: u8, target_cap: CapId },
     /// `Unlink ra` — drop link whose id is `r[a]` (Int).
     Unlink { link_reg: u8 },
+    /// `SetTrapExit ra` — enable/disable link exit trapping from truthy `r[a]`
+    /// (including converting `Normal` linked exits into hops).
+    SetTrapExit { enabled: bool },
+    /// `SetRestartPolicy imm` — update this flow's restart policy (`0..=2`).
+    SetRestartPolicy { policy: u8 },
     /// `RegisterName ra` — publish `r[a]` (`Str`) as this flow's name.
     RegisterName { name: Arc<str> },
     /// `Whereis ra, rb` — resolve `r[b]` (`Str`) to a SEND Cap or Unit.

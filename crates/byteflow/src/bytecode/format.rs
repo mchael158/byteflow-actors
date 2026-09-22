@@ -42,7 +42,10 @@ impl std::fmt::Display for FormatError {
                 write!(f, "unknown opcode 0x{byte:02X} at instruction {at}")
             }
             FormatError::ForbiddenConstant(kind) => {
-                write!(f, "untrusted module must not embed {kind} in the constant pool")
+                write!(
+                    f,
+                    "untrusted module must not embed {kind} in the constant pool"
+                )
             }
             FormatError::ValueTooNested => write!(f, "value nesting exceeds decoder limit"),
         }
@@ -88,7 +91,10 @@ pub fn decode(bytes: &[u8]) -> Result<Chunk, FormatError> {
 /// Decode with an explicit trust level. Trusted decode is for host-packed
 /// modules that may embed authority tags in the constant pool.
 pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError> {
-    let mut r = Reader { data: bytes, pos: 0 };
+    let mut r = Reader {
+        data: bytes,
+        pos: 0,
+    };
     let magic = r.read_array::<4>()?;
     if magic != MAGIC {
         return Err(FormatError::BadMagic { found: magic });
@@ -333,7 +339,6 @@ mod tests {
     use crate::bytecode::opcode::Opcode;
     use crate::bytecode::verify::{verify, TrustLevel};
 
-
     #[test]
     fn roundtrip_preserves_chunk() -> Result<(), FormatError> {
         let mut b = ChunkBuilder::new("roundtrip");
@@ -411,9 +416,6 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        assert!(matches!(
-            decode(b"XXXX"),
-            Err(FormatError::BadMagic { .. })
-        ));
+        assert!(matches!(decode(b"XXXX"), Err(FormatError::BadMagic { .. })));
     }
 }

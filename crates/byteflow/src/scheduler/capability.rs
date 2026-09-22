@@ -10,7 +10,8 @@
 //! Every derived grant goes through [`Cap::attenuate`]. `mint` is the
 //! trusted-runtime root path (self Cap, spawn addressing). Hop `reply_cap`
 //! uses [`CapTable::mint_or_reuse`] — one live SEND token per
-//! `(holder, target)` pair.
+//! `(holder, target)` pair. `revoke_flow` sweeps every Cap that targets or
+//! is held by the exiting flow (including the reverse reply index).
 //!
 //! See `docs/security.md` (S6 / S7) and `docs/atomic-hop.md`.
 
@@ -111,7 +112,10 @@ impl CapTable {
         Arc::clone(&self.native_cell)
     }
 
-    fn lock(&self, where_: &'static str) -> Result<std::sync::MutexGuard<'_, CapTableInner>, RuntimeError> {
+    fn lock(
+        &self,
+        where_: &'static str,
+    ) -> Result<std::sync::MutexGuard<'_, CapTableInner>, RuntimeError> {
         sync_lock::lock(&self.inner, where_)
     }
 
@@ -125,7 +129,11 @@ impl CapTable {
     }
 
     pub fn flow_cell(&self, flow: FlowId) -> Result<Option<Arc<RevocationCell>>, RuntimeError> {
-        Ok(self.lock("CapTable::flow_cell")?.flow_cells.get(&flow.as_u64()).cloned())
+        Ok(self
+            .lock("CapTable::flow_cell")?
+            .flow_cells
+            .get(&flow.as_u64())
+            .cloned())
     }
 
     pub fn scheduler_cell(&self) -> Arc<RevocationCell> {
@@ -149,10 +157,7 @@ impl CapTable {
 
     fn insert(&self, holder: FlowId, cap: Cap) -> Result<CapId, RuntimeError> {
         let mut table = self.lock("CapTable::insert")?;
-        Self::insert_fresh(
-            &mut table.entries,
-            Capability { holder, cap },
-        )
+        Self::insert_fresh(&mut table.entries, Capability { holder, cap })
     }
 
     /// Trusted root mint: always a **new** token.
@@ -167,7 +172,12 @@ impl CapTable {
         rights: CapRights,
     ) -> Result<CapId, RuntimeError> {
         let cell = self.bind_flow(target)?;
-        let cap = Cap::root(CapTarget::Flow(target.as_u64()), rights, None, cell.as_ref());
+        let cap = Cap::root(
+            CapTarget::Flow(target.as_u64()),
+            rights,
+            None,
+            cell.as_ref(),
+        );
         self.grant(holder, cap)
     }
 
@@ -197,7 +207,12 @@ impl CapTable {
             .entry(target.as_u64())
             .or_insert_with(|| Arc::new(RevocationCell::new()))
             .clone();
-        let cap = Cap::root(CapTarget::Flow(target.as_u64()), rights, None, cell.as_ref());
+        let cap = Cap::root(
+            CapTarget::Flow(target.as_u64()),
+            rights,
+            None,
+            cell.as_ref(),
+        );
         let id = Self::insert_fresh(&mut g.entries, Capability { holder, cap })?;
         g.reply_index.insert((holder, target), id);
         Ok(id)
@@ -296,20 +311,17 @@ impl CapTable {
                 return Err(CapError::WrongTarget);
             }
         };
-        let narrowed = match super::delegate::exec_delegate(
-            &src.cap,
-            cell.as_ref(),
-            want_rights,
-            want_native,
-        ) {
-            Ok(c) => c,
-            Err(super::delegate::DelegateError::SourceRevoked) => {
-                return Err(CapError::Unknown)
-            }
-            Err(super::delegate::DelegateError::SourceLacksNative) => {
-                return Err(CapError::InsufficientRights)
-            }
-        };
+        let narrowed =
+            match super::delegate::exec_delegate(&src.cap, cell.as_ref(), want_rights, want_native)
+            {
+                Ok(c) => c,
+                Err(super::delegate::DelegateError::SourceRevoked) => {
+                    return Err(CapError::Unknown)
+                }
+                Err(super::delegate::DelegateError::SourceLacksNative) => {
+                    return Err(CapError::InsufficientRights)
+                }
+            };
         if !narrowed.is_valid(cell.as_ref()) {
             return Err(CapError::Unknown);
         }
@@ -324,7 +336,13 @@ impl CapTable {
         to_holder: FlowId,
     ) -> Result<CapId, CapError> {
         let src = self.resolve(id, from_holder, CapRights::empty())?;
-        self.attenuate(id, from_holder, to_holder, src.cap.rights, src.cap.native_mask.as_ref())
+        self.attenuate(
+            id,
+            from_holder,
+            to_holder,
+            src.cap.rights,
+            src.cap.native_mask.as_ref(),
+        )
     }
 
     /// Host spawn: re-issue a live Cap so `new_holder` can use it.
@@ -345,7 +363,9 @@ impl CapTable {
         if !valid {
             return Err(CapError::Unknown);
         }
-        let narrowed = cap.cap.attenuate(cap.cap.rights, cap.cap.native_mask.as_ref());
+        let narrowed = cap
+            .cap
+            .attenuate(cap.cap.rights, cap.cap.native_mask.as_ref());
         self.insert(new_holder, narrowed).map_err(CapError::from)
     }
 
@@ -359,9 +379,8 @@ impl CapTable {
         g.flow_cells.remove(&flow.as_u64());
         let before = g.entries.len();
         let fid = flow.as_u64();
-        g.entries.retain(|_, e| {
-            e.holder != flow && e.cap.target != CapTarget::Flow(fid)
-        });
+        g.entries
+            .retain(|_, e| e.holder != flow && e.cap.target != CapTarget::Flow(fid));
         g.reply_index.retain(|(h, t), _| *h != flow && *t != flow);
         Ok(before - g.entries.len())
     }
@@ -545,7 +564,8 @@ mod tests {
     }
 
     #[test]
-    fn revoke_flow_clears_reply_index_for_holder_and_target() -> Result<(), Box<dyn std::error::Error>> {
+    fn revoke_flow_clears_reply_index_for_holder_and_target(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let table = CapTable::new();
         let a = next_flow_id();
         let b = next_flow_id();
@@ -608,7 +628,7 @@ mod properties {
             let table = CapTable::new();
             let holder = next_flow_id();
             let target = next_flow_id();
-            let extra = (rng.next_u32() & 0b10) as u32;
+            let extra = rng.next_u32() & 0b10;
             let rights = CapRights::SEND.union(CapRights::from_bits(extra));
             let id = table
                 .mint(holder, target, rights)

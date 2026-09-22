@@ -5,11 +5,12 @@ wrote, or from a plugin, a download, or a corrupted disk. The register
 indices, jump offsets and table indices inside it are just bytes, and none
 of them are guaranteed to make sense.
 
-The crate is `#![forbid(unsafe_code)]`, so a malformed chunk can never
-corrupt host memory. That is the floor, not the goal: an index that is
-merely *checked* still has to fail the right way — as one flow's fault, not
-as a panic that takes down the OS thread running it and every flow queued
-behind it.
+The crate is `#![deny(unsafe_code)]` (the optional `jit` feature allows
+`unsafe` only inside the Cranelift backend), so a malformed chunk can never
+corrupt host memory through the interpreter path. That is the floor, not
+the goal: an index that is merely *checked* still has to fail the right
+way — as one flow's fault, not as a panic that takes down the OS thread
+running it and every flow queued behind it.
 
 ```text
   .bf bytes

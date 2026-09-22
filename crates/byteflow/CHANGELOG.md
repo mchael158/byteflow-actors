@@ -2,6 +2,33 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.6] — 2026-09-18
+
+### Added
+
+- **`trap_exit`:** `Opcode::SetTrapExit` (`0x5F`), `Fn::set_trap_exit`, and
+  `Runtime::set_trap_exit`. Linked peers with the flag set receive a
+  `TAG_SYS_EXIT` hop (including `Normal`) instead of being killed.
+- **`ReceiveMatchKind` (`0x64`):** selective receive by Message payload
+  wire-tag (`Value::wire_tag`), beyond tag-only matching.
+- **`SetRestartPolicy` (`0x65`):** flow-local restart policy; supervisor
+  consults the dying flow's policy via `ChildExit`.
+- **Phase 4 attestation (host integrity):** `fingerprint_bf` /
+  `decode_attested` — deterministic `.bf` fingerprint (not crypto PKI).
+- Criterion benches (`benches/runtime.rs`: spawn/join + Atomic Hop `Ask`).
+- Hermetic GitHub Actions CI: `cargo fetch --locked`, then
+  `fmt` / clippy (`-D warnings`) / test / bench `--locked --offline`
+  (std + `jit`).
+- Safe growable mailbox **ring** (`Vec<Option<Value>>` + head/len).
+
+### Changed
+
+- Docs synced for memory release-on-overwrite, `max_runtime_bytes`, join
+  worker guard, `trap_exit`, Phase 4, BEAM mapping gaps, `WAITING_SEND`
+  under `Reject`, and `#![deny(unsafe_code)]` (not forbid).
+- Clippy hygiene: shared `prng`, entropy `EntropyError`, steal without
+  unused `Retry`.
+
 ## [0.9.5] — 2026-09-18
 
 ### Fixed

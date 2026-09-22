@@ -41,7 +41,10 @@ impl std::error::Error for NativeCallError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fault {
     DivideByZero,
-    RegisterOutOfRange { reg: u8, frame_size: u8 },
+    RegisterOutOfRange {
+        reg: u8,
+        frame_size: u8,
+    },
     /// An instruction's register operand plus the offset it gathers at does
     /// not fit the register index space *at all* — e.g. `Spawn a=255`, which
     /// reads its arguments from `a+1..`.
@@ -51,21 +54,38 @@ pub enum Fault {
     /// Kept separate so the fault cannot lie: reporting "register 255 is out
     /// of range" for a request that was really for register 256 would send
     /// whoever reads it looking in the wrong place.
-    RegisterIndexOverflow { base: u8, offset: u8 },
-    BadConstant { index: u32, pool_size: u32 },
-    BadFunction { index: u32, table_size: u32 },
+    RegisterIndexOverflow {
+        base: u8,
+        offset: u8,
+    },
+    BadConstant {
+        index: u32,
+        pool_size: u32,
+    },
+    BadFunction {
+        index: u32,
+        table_size: u32,
+    },
     /// Function call nesting exceeded `Vm::MAX_CALL_DEPTH`. Bytecode has no
     /// native stack overflow (frames are heap-allocated `Vec<Value>`s), so
     /// this is a deliberate, checked limit rather than a segfault.
-    CallStackOverflow { depth: usize },
-    TypeMismatch { expected: &'static str, got: &'static str },
+    CallStackOverflow {
+        depth: usize,
+    },
+    TypeMismatch {
+        expected: &'static str,
+        got: &'static str,
+    },
     /// `CallNative` referenced a slot outside the runtime's registered
     /// native function table (design notes §30-31). Distinct from
     /// `BadFunction`, which is about the *bytecode* function table baked
     /// into the chunk — natives are supplied by the embedder at `Vm`
     /// construction time and can't be range-checked by
     /// `crate::bytecode::verify`, which has no visibility into them.
-    BadNative { index: u32, table_size: u32 },
+    BadNative {
+        index: u32,
+        table_size: u32,
+    },
     /// A native function returned an error (host-side failure — I/O,
     /// invalid argument the Rust side rejected, capability denied, etc).
     /// The message is native-function-defined.
@@ -85,7 +105,10 @@ pub enum Fault {
     /// Verified chunks never hit this — `verify` already proved every offset.
     /// Without paranoid mode, a corrupt jump fail-opens as an implicit
     /// `return Unit` (see `docs::vm_safety`).
-    BadJump { target: usize, code_len: usize },
+    BadJump {
+        target: usize,
+        code_len: usize,
+    },
 }
 
 impl fmt::Display for Fault {
@@ -93,13 +116,22 @@ impl fmt::Display for Fault {
         match self {
             Fault::DivideByZero => write!(f, "division by zero"),
             Fault::RegisterOutOfRange { reg, frame_size } => {
-                write!(f, "register r{reg} out of range (frame has {frame_size} registers)")
+                write!(
+                    f,
+                    "register r{reg} out of range (frame has {frame_size} registers)"
+                )
             }
             Fault::BadConstant { index, pool_size } => {
-                write!(f, "constant index {index} out of range (pool size {pool_size})")
+                write!(
+                    f,
+                    "constant index {index} out of range (pool size {pool_size})"
+                )
             }
             Fault::BadFunction { index, table_size } => {
-                write!(f, "function index {index} out of range (table size {table_size})")
+                write!(
+                    f,
+                    "function index {index} out of range (table size {table_size})"
+                )
             }
             Fault::RegisterIndexOverflow { base, offset } => write!(
                 f,
@@ -110,7 +142,10 @@ impl fmt::Display for Fault {
                 write!(f, "type mismatch: expected {expected}, got {got}")
             }
             Fault::BadNative { index, table_size } => {
-                write!(f, "native function index {index} out of range (table size {table_size})")
+                write!(
+                    f,
+                    "native function index {index} out of range (table size {table_size})"
+                )
             }
             Fault::NativeError(msg) => write!(f, "native function error: {msg}"),
             Fault::NativeDenied(err) => write!(f, "{err}"),
@@ -118,7 +153,10 @@ impl fmt::Display for Fault {
             Fault::Invariant(msg) => write!(f, "vm invariant broken: {msg}"),
             Fault::QuotaExceeded(msg) => write!(f, "{msg}"),
             Fault::BadJump { target, code_len } => {
-                write!(f, "jump target {target} out of range (code length {code_len})")
+                write!(
+                    f,
+                    "jump target {target} out of range (code length {code_len})"
+                )
             }
         }
     }

@@ -2,9 +2,9 @@
 //!
 //! # Memory contract
 //!
-//! Unbounded `VecDeque` growth is not a capacity API — it is an OOM path
-//! when many flows share few workers. Every mailbox is constructed with a
-//! [`MailboxConfig`]: a validated [`MailboxCapacity`], a [`MailboxBytes`]
+//! Unbounded growth without a logical limit is not a capacity API — it is
+//! an OOM path when many flows share few workers. Every mailbox is constructed
+//! with a [`MailboxConfig`]: a validated [`MailboxCapacity`], a [`MailboxBytes`]
 //! budget, and an [`OverflowPolicy`]. Logical bound ≠ physical allocation;
 //! the queue grows geometrically up to the limit (see [`queue`]).
 //!
@@ -59,6 +59,8 @@ pub(crate) enum WaitFilter {
     Any,
     /// `ReceiveMatch`: oldest `Message` whose application `tag` matches.
     Tag(u16),
+    /// `ReceiveMatchKind`: oldest `Message` whose `payload.wire_tag()` matches.
+    PayloadKind(u8),
     /// `Ask`: reply belonging to one specific request.
     ///
     /// `expect_request_id` is the RPC correlation key.
@@ -81,6 +83,10 @@ impl WaitFilter {
             Self::Any => true,
             Self::Tag(expected_tag) => match value.as_message() {
                 Some(m) => m.tag == expected_tag,
+                None => false,
+            },
+            Self::PayloadKind(kind) => match value.as_message() {
+                Some(m) => m.payload.wire_tag() == kind,
                 None => false,
             },
             Self::Correlation {
@@ -353,17 +359,9 @@ impl Mailbox {
                 return Ok(Ok(Delivery::Handoff(flow)));
             }
             inner.parked = Some(flow);
-            return Ok(enqueue_locked(
-                &mut inner,
-                value,
-                self.config.overflow(),
-            ));
+            return Ok(enqueue_locked(&mut inner, value, self.config.overflow()));
         }
-        Ok(enqueue_locked(
-            &mut inner,
-            value,
-            self.config.overflow(),
-        ))
+        Ok(enqueue_locked(&mut inner, value, self.config.overflow()))
     }
 
     /// Non-blocking pop of the front hop (classic `Receive`).
@@ -377,10 +375,7 @@ impl Mailbox {
     }
 
     /// Non-blocking pop under an arbitrary [`WaitFilter`] (FIFO skip).
-    pub(crate) fn try_pop_filter(
-        &self,
-        filter: WaitFilter,
-    ) -> Result<Option<Value>, RuntimeError> {
+    pub(crate) fn try_pop_filter(&self, filter: WaitFilter) -> Result<Option<Value>, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::try_pop_filter")?;
         let got = inner.queue.take(filter);
         if got.is_some() {
@@ -488,11 +483,12 @@ impl Mailbox {
         Ok(inner.parked.take())
     }
 
-    /// Enqueue a hop even when the inbox is at a bound (system `DOWN`).
+    /// Enqueue a hop even when the inbox is at a bound (system `DOWN` /
+    /// `TAG_SYS_EXIT` from `trap_exit` or orphaned Ask).
     pub(crate) fn push_system(&self, value: Value) -> Result<Delivery, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::push_system")?;
-        // System DOWN may still target a live owner; if that owner is already
-        // closed, drop the hop (owner is exiting / gone).
+        // System lifecycle hops may still target a live owner; if that owner
+        // is already closed, drop the hop (owner is exiting / gone).
         if inner.closed {
             return Ok(Delivery::Queued);
         }
@@ -534,7 +530,9 @@ impl Mailbox {
                 if inner.waiting_senders.len() >= self.config.capacity().get() {
                     return ParkSender::Closed(flow);
                 }
-                inner.waiting_senders.push_back(WaitingSender { flow, message });
+                inner
+                    .waiting_senders
+                    .push_back(WaitingSender { flow, message });
                 ParkSender::Parked
             }
             Err(e) => {
@@ -571,12 +569,15 @@ impl Mailbox {
         sender: FlowId,
     ) -> Result<Option<Box<Flow>>, RuntimeError> {
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::take_waiting_sender")?;
-        if let Some(pos) = inner.waiting_senders.iter().position(|w| w.flow.id == sender) {
+        if let Some(pos) = inner
+            .waiting_senders
+            .iter()
+            .position(|w| w.flow.id == sender)
+        {
             return Ok(inner.waiting_senders.remove(pos).map(|w| w.flow));
         }
         Ok(None)
     }
-
 }
 
 /// Outcome of [`Mailbox::park_sender`].
@@ -624,8 +625,7 @@ fn enqueue_locked(
         Err(reason) => {
             inner.stats.rejected = inner.stats.rejected.saturating_add(1);
             if reason == MailboxFullReason::ByteLimit {
-                inner.stats.rejected_byte_limit =
-                    inner.stats.rejected_byte_limit.saturating_add(1);
+                inner.stats.rejected_byte_limit = inner.stats.rejected_byte_limit.saturating_add(1);
             }
             Err(MailboxFull { reason })
         }
@@ -643,11 +643,12 @@ fn with_pending(mut flow: Box<Flow>, value: Value) -> Box<Flow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::Message;
-    use crate::scheduler::oneshot;
-    use crate::scheduler::process::{next_flow_id, RestartPolicy};
-    use crate::vm::{NativeTable, Vm};
     use crate::bytecode::builder::ChunkBuilder;
+    use crate::bytecode::Message;
+    use crate::bytecode::RestartPolicy;
+    use crate::scheduler::oneshot;
+    use crate::scheduler::process::next_flow_id;
+    use crate::vm::{NativeTable, Vm};
     use std::sync::Arc;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -689,7 +690,9 @@ mod tests {
     }
 
     fn hop_msg(value: &Value) -> Result<&Message, Box<dyn std::error::Error>> {
-        value.as_message().ok_or_else(|| "expected Message hop".into())
+        value
+            .as_message()
+            .ok_or_else(|| "expected Message hop".into())
     }
 
     #[test]
@@ -700,10 +703,7 @@ mod tests {
         mb.push(msg(9, 2))??;
         let got = mb.try_pop_match(1)?.ok_or("match")?;
         assert_eq!(hop_payload_int(hop_msg(&got)?), 42);
-        assert_eq!(
-            hop_msg(&mb.try_pop()?.ok_or("first leftover")?)?.tag,
-            9
-        );
+        assert_eq!(hop_msg(&mb.try_pop()?.ok_or("first leftover")?)?.tag, 9);
         assert_eq!(
             hop_payload_int(hop_msg(&mb.try_pop()?.ok_or("second leftover")?)?),
             2
@@ -768,10 +768,7 @@ mod tests {
             expect_request_id: 1,
             expect_sender: Some(10),
         };
-        assert!(mb
-            .park_filter(flow, filter)
-            .map_err(|(e, _)| e)?
-            .is_ok());
+        assert!(mb.park_filter(flow, filter).map_err(|(e, _)| e)?.is_ok());
         assert!(matches!(mb.push(hop(99, 1, 2, 0))??, Delivery::Queued));
         assert!(matches!(mb.push(hop(10, 1, 2, 42))??, Delivery::Handoff(_)));
         assert_eq!(
@@ -884,7 +881,10 @@ mod tests {
         let mb = Mailbox::with_config(
             MailboxConfig::new(cap, OverflowPolicy::Reject).with_bytes(budget),
         );
-        assert!(matches!(mb.push(Value::bytes(vec![0u8; 900]))??, Delivery::Queued));
+        assert!(matches!(
+            mb.push(Value::bytes(vec![0u8; 900]))??,
+            Delivery::Queued
+        ));
         match mb.push(Value::bytes(vec![0u8; 900]))? {
             Err(full) => assert_eq!(full.reason(), MailboxFullReason::ByteLimit),
             Ok(_) => return Err("expected the byte budget to refuse".into()),
@@ -909,7 +909,10 @@ mod tests {
         assert_eq!(mb.stats()?.queued_bytes, 0);
         // A receiver that keeps up must not be permanently throttled by a
         // charge that was never refunded.
-        assert!(matches!(mb.push(Value::bytes(vec![0u8; 900]))??, Delivery::Queued));
+        assert!(matches!(
+            mb.push(Value::bytes(vec![0u8; 900]))??,
+            Delivery::Queued
+        ));
         Ok(())
     }
 
@@ -940,7 +943,10 @@ mod tests {
                 return Err("expected admitted sender, got Undeliverable".into())
             }
         }
-        assert_eq!(hop_payload_int(hop_msg(&mb.try_pop()?.ok_or("second hop")?)?), 2);
+        assert_eq!(
+            hop_payload_int(hop_msg(&mb.try_pop()?.ok_or("second hop")?)?),
+            2
+        );
         assert!(matches!(mb.admit_waiting_sender()?, AdmitSender::Idle));
         Ok(())
     }

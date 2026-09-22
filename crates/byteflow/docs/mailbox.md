@@ -41,16 +41,17 @@ and stay "within budget" everywhere.
 
 The charge is refunded when the hop leaves the queue. Push and take both
 go through `MailboxQueue`, which is why that type owns the filtered take
-instead of exposing its `VecDeque`: a leaked charge is never refunded,
+instead of exposing its ring slots: a leaked charge is never refunded,
 and an inbox whose budget has drifted upward rejects forever.
 
 Logical capacity ≠ physical allocation. The queue grows geometrically
 and stops at the limit — a flow that receives one hop with `limit=4096`
 does not pre-pay 4096 slots.
 
-`MailboxQueue` is a `pub(crate)` abstraction so a future ring buffer can
-replace `VecDeque` without touching FlowCap, Ask, or the worker loop.
-`#![forbid(unsafe_code)]` — no `MaybeUninit` ring in this revision.
+`MailboxQueue` is a **safe growable ring** (`Vec<Option<Value>>` +
+`head` / `len`), still behind a `pub(crate)` abstraction so FlowCap,
+Ask, and the worker loop stay untouched. Compatible with
+`#![deny(unsafe_code)]` — no `MaybeUninit` / raw pointers.
 
 ## Wake (lost-wakeup)
 
@@ -99,7 +100,7 @@ a deadline cannot present an epoch for a wait that never happened.
 
 | Policy | Host `Runtime::send` | Bytecode `Send` / `Ask` |
 |--------|----------------------|-------------------------|
-| **Reject** (default) | `SendError::MailboxFull { flow, reason }` | hop logged (with reason) and discarded; sender flow is **not** failed (worker must not stall) |
+| **Reject** (default) | `SendError::MailboxFull { flow, reason }` | sender flow parks (`WAITING_SEND`); each pop admits **one** waiter (worker must not stall) |
 | **DropNewest** | `Ok` (incoming hop gone) | same |
 | **DropOldest** | `Ok` (oldest queued hops gone) | same |
 
