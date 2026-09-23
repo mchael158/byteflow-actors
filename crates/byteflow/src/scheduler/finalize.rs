@@ -301,6 +301,9 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
     if let Err(e) = shared.ask_waits.remove_asker(id) {
         report_fault(e);
     }
+    if let Err(e) = shared.host_awaits.forget_flow(id) {
+        report_fault(e);
+    }
 
     if let Ok(Some(mailbox)) = shared.directory.lookup(id) {
         match mailbox.close() {
@@ -497,9 +500,9 @@ fn wake_orphaned_asks(shared: &Shared, target: FlowId, reason: FlowExitReason) {
     }
 }
 
-/// Set a kill signal and pull the flow out if it is parked (receive or
-/// `WAITING_SEND`). A running flow stays on its worker and dies at the
-/// next quantum (cooperative preemption).
+/// Set a kill signal and pull the flow out if it is parked (receive,
+/// `WAITING_SEND`, or `HostAwait`). A running flow stays on its worker and
+/// dies at the next quantum (cooperative preemption).
 pub(crate) fn extract_for_kill(
     shared: &Shared,
     id: FlowId,
@@ -524,30 +527,37 @@ pub(crate) fn extract_for_kill(
         Err(e) => report_fault(e),
     }
 
-    let target = match shared.waiting_send_at.get(id) {
-        Ok(Some(t)) => t,
-        Ok(None) => return None,
-        Err(e) => {
-            report_fault(e);
-            return None;
-        }
-    };
-    let mb = match shared.directory.lookup(target) {
-        Ok(Some(m)) => m,
-        Ok(None) => return None,
-        Err(e) => {
-            report_fault(e);
-            return None;
-        }
-    };
-    match mb.take_waiting_sender(id) {
-        Ok(Some(sender)) => {
-            if let Err(e) = shared.waiting_send_at.remove(id) {
-                report_fault(e);
+    match shared.waiting_send_at.get(id) {
+        Ok(Some(target)) => {
+            let mb = match shared.directory.lookup(target) {
+                Ok(Some(m)) => m,
+                Ok(None) => return try_take_host_await(shared, id),
+                Err(e) => {
+                    report_fault(e);
+                    return try_take_host_await(shared, id);
+                }
+            };
+            match mb.take_waiting_sender(id) {
+                Ok(Some(sender)) => {
+                    if let Err(e) = shared.waiting_send_at.remove(id) {
+                        report_fault(e);
+                    }
+                    return Some(*sender);
+                }
+                Ok(None) => {}
+                Err(e) => report_fault(e),
             }
-            Some(*sender)
         }
-        Ok(None) => None,
+        Ok(None) => {}
+        Err(e) => report_fault(e),
+    }
+
+    try_take_host_await(shared, id)
+}
+
+fn try_take_host_await(shared: &Shared, id: FlowId) -> Option<Flow> {
+    match shared.host_awaits.take_flow(id) {
+        Ok(flow) => flow.map(|f| *f),
         Err(e) => {
             report_fault(e);
             None

@@ -273,6 +273,19 @@ impl ChunkBuilder {
         ));
     }
 
+    /// Park for a host-side async completion into `dst`.
+    ///
+    /// Encoding: `HostAwait ra, rb, imm` → `a=dest`, `b=args`, `imm=op`.
+    pub fn emit_host_await(&mut self, dst: u8, args_reg: u8, op: u32) {
+        self.emit(Instruction::new(
+            Opcode::HostAwait,
+            dst,
+            args_reg,
+            0,
+            op as i32,
+        ));
+    }
+
     pub fn emit_register_name(&mut self, name_reg: u8) {
         self.emit(Instruction::abc(Opcode::RegisterName, name_reg, 0, 0));
     }

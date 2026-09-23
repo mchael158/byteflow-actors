@@ -116,6 +116,11 @@ impl fmt::Display for Instruction {
                 self.op, self.a, self.b, self.imm as u32, self.c
             ),
             Opcode::SetRestartPolicy => write!(f, "{} {}", self.op, self.imm),
+            Opcode::HostAwait => write!(
+                f,
+                "{} r{}, r{}, op={}",
+                self.op, self.a, self.b, self.imm
+            ),
             Opcode::Trap => write!(f, "{} {}", self.op, self.imm),
         }
     }

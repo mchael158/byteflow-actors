@@ -70,6 +70,12 @@ pub enum VmResult {
     SetTrapExit { enabled: bool },
     /// `SetRestartPolicy imm` — update this flow's restart policy (`0..=2`).
     SetRestartPolicy { policy: u8 },
+    /// `HostAwait` — park for a host-side async completion into `dest_reg`.
+    HostAwait {
+        dest_reg: u8,
+        op: u32,
+        args: Value,
+    },
     /// `RegisterName ra` — publish `r[a]` (`Str`) as this flow's name.
     RegisterName { name: Arc<str> },
     /// `Whereis ra, rb` — resolve `r[b]` (`Str`) to a SEND Cap or Unit.

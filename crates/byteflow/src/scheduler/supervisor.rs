@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -13,10 +15,14 @@ use super::process::{FlowId, FlowOutcome};
 use super::runtime::RuntimeSpawner;
 use super::sync_lock;
 
-/// How many restarts OTP-style supervisors allow inside a sliding window
-/// before giving up (design notes §15). Three-in-five-seconds is the
+/// How many **restart waves** OTP-style supervisors allow inside a sliding
+/// window before giving up (design notes §15). Three-in-five-seconds is the
 /// classic default: enough to absorb a flaky child, tight enough that a
 /// crash loop cannot spin the runtime forever.
+///
+/// A wave is one decision to restart after an unexpected exit — not the
+/// number of individual `spawn_child` calls. `OneForAll` that rebuilds
+/// three children still counts as **one** wave.
 const DEFAULT_MAX_RESTARTS: u32 = 3;
 const DEFAULT_MAX_PERIOD: Duration = Duration::from_secs(5);
 
@@ -78,9 +84,13 @@ pub enum RestartStrategy {
 /// Tunables for [`Supervisor::with_config`].
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
-    /// Restarts allowed inside [`Self::max_period`]. The initial start does
-    /// not count; only respawns do. Hitting this cap sets
-    /// [`Supervisor::intensity_exceeded`] and further restarts are refused.
+    /// Restart **waves** allowed inside [`Self::max_period`]. The initial
+    /// start does not count. Hitting this cap sets
+    /// [`Supervisor::intensity_exceeded`] and further waves are refused.
+    ///
+    /// One unexpected exit → one wave, even if the strategy respawns several
+    /// siblings (`OneForAll` / `RestForOne`). This matches OTP intensity
+    /// (restart decisions), not a raw spawn counter.
     pub max_restarts: u32,
     pub max_period: Duration,
     pub strategy: RestartStrategy,
@@ -154,6 +164,11 @@ struct Inner {
     restart_times: Mutex<VecDeque<Instant>>,
     intensity_exceeded: AtomicBool,
     shutdown: AtomicBool,
+    /// Test-only: next N `spawn_child` calls fail before OS spawn.
+    #[cfg(test)]
+    fail_next_spawns: AtomicU32,
+    #[cfg(test)]
+    respawn_fail_count: AtomicU64,
 }
 
 /// Cheap, `Clone` handle the worker uses to hand a terminal outcome back
@@ -165,6 +180,12 @@ pub(crate) struct SupervisorLink {
 }
 
 impl SupervisorLink {
+    /// Enqueue a terminal outcome for the drive loop.
+    ///
+    /// If the event mutex is poisoned the exit is **dropped** after
+    /// [`report_fault`] — the child is already dead; supervision of that
+    /// incarnation is abandoned (fail-stop). Prefer restarting the host
+    /// process over continuing with a corrupted event queue.
     pub(crate) fn notify(&self, id: FlowId, outcome: FlowOutcome, restart: RestartPolicy) {
         match sync_lock::lock(&self.inner.events, "SupervisorLink::notify") {
             Ok(mut events) => {
@@ -221,6 +242,10 @@ impl Supervisor {
             restart_times: Mutex::new(VecDeque::new()),
             intensity_exceeded: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_spawns: AtomicU32::new(0),
+            #[cfg(test)]
+            respawn_fail_count: AtomicU64::new(0),
         });
         let drive_inner = inner.clone();
         let thread = std::thread::Builder::new()
@@ -250,7 +275,7 @@ impl Supervisor {
         }
     }
 
-    /// `true` once more than [`SupervisorConfig::max_restarts`] respawns
+    /// `true` once more than [`SupervisorConfig::max_restarts`] **waves**
     /// landed inside the intensity window. Remaining children keep
     /// running; we just stop bringing them back (no safe abort of a
     /// mid-quantum flow).
@@ -267,9 +292,28 @@ impl Supervisor {
             let _ = t.join();
         }
     }
+
+    #[cfg(test)]
+    fn fail_next_spawns(&self, n: u32) {
+        self.inner.fail_next_spawns.store(n, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn respawn_fail_count(&self) -> u64 {
+        self.inner.respawn_fail_count.load(Ordering::Relaxed)
+    }
 }
 
 fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnError> {
+    #[cfg(test)]
+    if inner
+        .fail_next_spawns
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return Err(SpawnError::VmInit("test: forced spawn failure".into()));
+    }
+
     let link = SupervisorLink {
         inner: inner.clone(),
     };
@@ -286,22 +330,46 @@ fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnE
     let handle = inner
         .spawner
         .spawn_linked(spec.function, &spec.args, spec.restart, link)?;
-    if !spec.name.is_empty() {
-        if let Err(e) = register_child_name(inner, handle.id(), &spec.name) {
-            inner
-                .spawner
-                .request_kill(handle.id(), FlowExitReason::Supervisor);
-            return Err(e);
-        }
-    }
+    let id = handle.id();
+    // Insert *before* name registration so a failed register still leaves a
+    // row for the kill exit (expected_shutdown → no restart wave).
     children.insert(
-        handle.id(),
+        id,
         LiveChild {
-            spec,
+            spec: spec.clone(),
             expected_shutdown: false,
         },
     );
+    if !spec.name.is_empty() {
+        if let Err(e) = register_child_name(inner, id, &spec.name) {
+            if let Some(live) = children.by_id.get_mut(&id) {
+                live.expected_shutdown = true;
+            }
+            inner
+                .spawner
+                .request_kill(id, FlowExitReason::Supervisor);
+            return Err(e);
+        }
+    }
     Ok(handle)
+}
+
+fn note_respawn_failed(inner: &Inner, err: &SpawnError) {
+    #[cfg(test)]
+    {
+        inner.respawn_fail_count.fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = inner;
+    }
+    eprintln!("byteflow: supervisor respawn failed: {err} — child slot abandoned");
+}
+
+fn respawn_child(inner: &Arc<Inner>, spec: ChildSpec) {
+    if let Err(e) = spawn_child(inner, spec) {
+        note_respawn_failed(inner, &e);
+    }
 }
 
 fn register_child_name(inner: &Inner, id: FlowId, name: &str) -> Result<(), SpawnError> {
@@ -392,13 +460,12 @@ fn drive(inner: Arc<Inner>) {
                 if let Some(exit) = events.pop_front() {
                     break exit;
                 }
-                match sync_lock::wait_timeout(
+                match sync_lock::wait(
                     &inner.cvar,
                     events,
-                    Duration::from_millis(100),
                     "supervisor::wait",
                 ) {
-                    Ok((guard, _)) => events = guard,
+                    Ok(guard) => events = guard,
                     Err(e) => {
                         report_fault(e);
                         return;
@@ -446,20 +513,24 @@ fn handle_exit(inner: &Arc<Inner>, exit: ChildExit) {
 
     match inner.config.strategy {
         RestartStrategy::OneForOne => {
-            let _ = spawn_child(inner, spec);
+            respawn_child(inner, spec);
         }
         RestartStrategy::OneForAll | RestartStrategy::RestForOne => {
+            let Some(failed_idx) = failed_idx else {
+                // Row was in by_id but missing from order — refuse to guess
+                // a start position (OneForAll order is part of the contract).
+                eprintln!(
+                    "byteflow: supervisor cascade abort — exit {} missing from child order",
+                    exit.id
+                );
+                return;
+            };
             start_cascade(inner, spec, failed_idx, later);
         }
     }
 }
 
-fn start_cascade(
-    inner: &Arc<Inner>,
-    failed: ChildSpec,
-    failed_idx: Option<usize>,
-    later: Vec<FlowId>,
-) {
+fn start_cascade(inner: &Arc<Inner>, failed: ChildSpec, failed_idx: usize, later: Vec<FlowId>) {
     let specs = {
         let mut children = match sync_lock::lock(&inner.children, "start_cascade") {
             Ok(c) => c,
@@ -480,7 +551,14 @@ fn start_cascade(
         match inner.config.strategy {
             RestartStrategy::OneForAll => {
                 let mut specs = later_specs;
-                specs.insert(failed_idx.unwrap_or(specs.len()), failed);
+                if failed_idx > specs.len() {
+                    eprintln!(
+                        "byteflow: supervisor OneForAll abort — failed_idx {failed_idx} > {}",
+                        specs.len()
+                    );
+                    return;
+                }
+                specs.insert(failed_idx, failed);
                 specs
             }
             RestartStrategy::RestForOne => {
@@ -562,7 +640,7 @@ fn finish_cascade(inner: &Arc<Inner>) {
         if inner.intensity_exceeded.load(Ordering::Acquire) {
             return;
         }
-        let _ = spawn_child(inner, spec);
+        respawn_child(inner, spec);
     }
 }
 
@@ -796,17 +874,137 @@ mod tests {
     fn child_name_registers_and_rejects_duplicate() -> Result<(), Box<dyn std::error::Error>> {
         let rt = tiny_runtime(wait_and_trap_chunk())?;
         let sup = Supervisor::new(rt.spawner())?;
-        let _parked = sup.start_child(ChildSpec::new("svc", 0))?;
+        let parked = sup.start_child(ChildSpec::new("svc", 0))?;
         wait_until(|| matches!(rt.whereis("svc"), Ok(Some(_))));
         assert!(rt.whereis("svc")?.is_some());
+        let failed_before = rt.metrics().processes_failed;
         let dup = sup.start_child(ChildSpec::new("svc", 1));
-        sup.shutdown();
-        rt.shutdown();
-        match dup {
+        match &dup {
             Err(SpawnError::NameTaken { name }) if name == "svc" => {}
             Ok(_) => return Err("expected NameTaken, got Ok(handle)".into()),
             Err(e) => return Err(format!("expected NameTaken, got Err({e})").into()),
         }
+        // Failed register must kill the orphan spawn and leave only `parked`.
+        wait_until(|| {
+            rt.metrics().processes_failed > failed_before && sup.live_children() == 1
+        });
+        assert_eq!(sup.live_children(), 1);
+        assert_eq!(
+            registry_target(&rt, "svc")?,
+            parked.id(),
+            "svc must still address the original child"
+        );
+        sup.shutdown();
+        rt.shutdown();
+        Ok(())
+    }
+
+    fn registry_target(
+        rt: &Runtime,
+        name: &str,
+    ) -> Result<FlowId, Box<dyn std::error::Error>> {
+        rt.spawner()
+            .shared
+            .registry
+            .target(name)?
+            .ok_or_else(|| format!("whereis({name}) empty").into())
+    }
+
+    #[test]
+    fn restart_rebinds_registry_name() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tiny_runtime(wait_and_trap_chunk())?;
+        let sup = Supervisor::with_config(
+            rt.spawner(),
+            SupervisorConfig {
+                max_restarts: 8,
+                max_period: Duration::from_secs(5),
+                strategy: RestartStrategy::OneForOne,
+            },
+        )?;
+        // Delayed trap so we can observe the first binding before restart.
+        let first = sup.start_child(
+            ChildSpec::new("svc", 2).restart(RestartPolicy::OnFailure),
+        )?;
+        let first_id = first.id();
+        wait_until(|| registry_target(&rt, "svc").ok() == Some(first_id));
+        wait_until(|| {
+            registry_target(&rt, "svc")
+                .map(|id| id != first_id)
+                .unwrap_or(false)
+        });
+        let rebound = registry_target(&rt, "svc")?;
+        assert_ne!(rebound, first_id);
+        assert_eq!(sup.live_children(), 1);
+        sup.shutdown();
+        rt.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn one_for_all_rebinds_all_registry_names() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tiny_runtime(wait_and_trap_chunk())?;
+        let sup = Supervisor::with_config(
+            rt.spawner(),
+            SupervisorConfig {
+                max_restarts: 8,
+                max_period: Duration::from_secs(5),
+                strategy: RestartStrategy::OneForAll,
+            },
+        )?;
+        let a = registry_spawn(&sup, "a", 0)?; // wait
+        let b = registry_spawn(&sup, "b", 0)?; // wait
+        // Delayed trap so the post-cascade registry rebind is observable.
+        let boom = sup.start_child(
+            ChildSpec::new("c", 2).restart(RestartPolicy::OnFailure),
+        )?;
+        let old_a = a;
+        let old_b = b;
+        let old_c = boom.id();
+        wait_until(|| {
+            let ok_a = registry_target(&rt, "a").map(|id| id != old_a).unwrap_or(false);
+            let ok_b = registry_target(&rt, "b").map(|id| id != old_b).unwrap_or(false);
+            let ok_c = registry_target(&rt, "c").map(|id| id != old_c).unwrap_or(false);
+            ok_a && ok_b && ok_c && sup.live_children() == 3
+        });
+        assert_ne!(registry_target(&rt, "a")?, old_a);
+        assert_ne!(registry_target(&rt, "b")?, old_b);
+        assert_ne!(registry_target(&rt, "c")?, old_c);
+        sup.shutdown();
+        rt.shutdown();
+        Ok(())
+    }
+
+    fn registry_spawn(
+        sup: &Supervisor,
+        name: &str,
+        function: u32,
+    ) -> Result<FlowId, Box<dyn std::error::Error>> {
+        Ok(sup.start_child(ChildSpec::new(name, function))?.id())
+    }
+
+    #[test]
+    fn respawn_failure_is_reported_and_abandons_slot() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tiny_runtime(wait_and_trap_chunk())?;
+        let sup = Supervisor::with_config(
+            rt.spawner(),
+            SupervisorConfig {
+                max_restarts: 8,
+                max_period: Duration::from_secs(5),
+                strategy: RestartStrategy::OneForOne,
+            },
+        )?;
+        // Delayed trap: arm the failpoint before the first exit is handled.
+        let _ = sup.start_child(ChildSpec::new("boom", 2).restart(RestartPolicy::OnFailure))?;
+        assert_eq!(sup.live_children(), 1);
+        sup.fail_next_spawns(1);
+        wait_until(|| sup.respawn_fail_count() >= 1 && sup.live_children() == 0);
+        assert_eq!(sup.respawn_fail_count(), 1);
+        assert_eq!(sup.live_children(), 0);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(sup.respawn_fail_count(), 1);
+        assert_eq!(sup.live_children(), 0);
+        sup.shutdown();
+        rt.shutdown();
         Ok(())
     }
 

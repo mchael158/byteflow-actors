@@ -585,6 +585,7 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::Unlink
             | Opcode::SetTrapExit
             | Opcode::SetRestartPolicy
+            | Opcode::HostAwait
             | Opcode::Delegate
             | Opcode::FreshRequestId
             | Opcode::ReceiveMatchCorr

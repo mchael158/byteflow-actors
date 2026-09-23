@@ -71,6 +71,11 @@ impl Registry {
         Ok(())
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
     pub fn whereis(&self, name: &str) -> Option<CapId> {
         self.by_name.get(&RegistryName::from(name)).map(|e| e.cap)
     }
@@ -113,12 +118,15 @@ impl Default for Registry {
 
 pub struct RegistryStore {
     inner: std::sync::Mutex<Registry>,
+    max_names: u32,
 }
 
 impl RegistryStore {
-    pub fn new() -> Self {
+    /// `max_registry_names == 0` → unlimited.
+    pub fn new(max_registry_names: u32) -> Self {
         Self {
             inner: std::sync::Mutex::new(Registry::new()),
+            max_names: max_registry_names,
         }
     }
 
@@ -128,7 +136,19 @@ impl RegistryStore {
         cap: CapId,
         flow: FlowId,
     ) -> Result<Result<(), LifecycleError>, RuntimeError> {
-        Ok(sync_lock::lock(&self.inner, "RegistryStore::register")?.register(name, cap, flow))
+        let mut table = sync_lock::lock(&self.inner, "RegistryStore::register")?;
+        if name.as_str().is_empty() {
+            return Ok(Err(LifecycleError::EmptyName));
+        }
+        if table.by_name.contains_key(&name) {
+            return Ok(Err(LifecycleError::AlreadyRegistered));
+        }
+        if self.max_names != 0 && table.len() as u32 >= self.max_names {
+            return Ok(Err(LifecycleError::RegistryLimitReached {
+                limit: self.max_names,
+            }));
+        }
+        Ok(table.register(name, cap, flow))
     }
 
     pub fn whereis(&self, name: &str) -> Result<Option<CapId>, RuntimeError> {
@@ -151,7 +171,7 @@ impl RegistryStore {
 
 impl Default for RegistryStore {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
@@ -193,5 +213,24 @@ mod tests {
             reg.register(RegistryName::from(""), CapId::from_raw(1), flow),
             Err(LifecycleError::EmptyName)
         );
+    }
+
+    #[test]
+    fn registry_limit_distinct_from_already_registered() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let store = RegistryStore::new(1);
+        let a = next_flow_id();
+        let b = next_flow_id();
+        store.register(RegistryName::from("a"), CapId::from_raw(1), a)??;
+        let dup = store.register(RegistryName::from("a"), CapId::from_raw(2), b)?;
+        assert!(matches!(dup, Err(LifecycleError::AlreadyRegistered)));
+        let limited = store.register(RegistryName::from("b"), CapId::from_raw(3), b)?;
+        assert!(matches!(
+            limited,
+            Err(LifecycleError::RegistryLimitReached { limit: 1 })
+        ));
+        store.unregister("a")?;
+        store.register(RegistryName::from("b"), CapId::from_raw(3), b)??;
+        Ok(())
     }
 }

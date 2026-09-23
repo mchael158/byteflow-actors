@@ -52,6 +52,25 @@ pub struct RuntimeConfig {
     /// total index size when many flows park against a silent target.
     /// See [`crate::docs::security`] (DoS) and [`Self::sandbox`].
     pub max_ask_waits: u32,
+    /// Hard cap on outstanding `HostAwait` parkers process-wide
+    /// (`0` = unlimited). Each flow holds at most one await.
+    pub max_host_awaits: u32,
+    /// Hard cap on live process-wide links (`0` = unlimited).
+    ///
+    /// Accounting is performed by [`super::link::LinkStore`] itself, under
+    /// the same synchronization that protects the link table.
+    pub max_links: u32,
+    /// Hard cap on live process-wide monitors (`0` = unlimited).
+    ///
+    /// Accounting is performed by [`super::monitor::MonitorStore`] itself.
+    pub max_monitors: u32,
+    /// Hard cap on live process-wide registry names (`0` = unlimited).
+    ///
+    /// [`super::registry::RegistryStore`] counts only successfully registered names.
+    pub max_registry_names: u32,
+    /// Host async bridge for [`crate::Opcode::HostAwait`]. `None` fails
+    /// any `HostAwait` closed. Not a `CallNative` / std-native slot.
+    pub host_await: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
     /// Process-wide memory ceiling for heap charges (`Str` / `Bytes`
     /// register stores and shared [`crate::HeapStr`] / [`crate::HeapBytes`]).
     /// Independent of per-flow [`crate::QuotaConfig::mem_limit`] and mailbox
@@ -60,6 +79,11 @@ pub struct RuntimeConfig {
     /// Constant-pool trust for [`crate::verify_with`] at runtime construction.
     /// Default is [`crate::TrustLevel::Untrusted`] (fail closed).
     pub trust: crate::bytecode::TrustLevel,
+    /// Enables defensive jump validation for every VM.
+    ///
+    /// When [`Self::trust`] is [`crate::TrustLevel::Untrusted`], paranoid
+    /// jump checking is always enabled regardless of this flag.
+    pub paranoid_jumps: bool,
     /// Where bytecode `print` (native index 0) writes when using
     /// [`crate::std_native_table_with`]. Ignored if you supply your own table.
     pub output: Arc<dyn crate::OutputSink>,
@@ -106,8 +130,14 @@ impl Default for RuntimeConfig {
             mailbox: MailboxConfig::DEFAULT,
             max_flows: 0,
             max_ask_waits: 0,
+            max_host_awaits: 0,
+            max_links: 0,
+            max_monitors: 0,
+            max_registry_names: 0,
+            host_await: None,
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
+            paranoid_jumps: false,
             output: Arc::new(crate::output::NullSink),
             quota: super::quota::QuotaConfig::default(),
             #[cfg(feature = "jit")]
@@ -118,14 +148,20 @@ impl Default for RuntimeConfig {
 
 impl RuntimeConfig {
     /// Starting point for untrusted modules: tight per-flow quotas plus
-    /// process-wide caps on live flows and outstanding Ask waits.
-    /// Tune under real load before using as a production default.
+    /// process-wide caps on live flows, Ask waits, HostAwaits, links,
+    /// monitors, and registry names. Tune under real load before using as
+    /// a production default.
     pub fn sandbox() -> Self {
         RuntimeConfig {
             quota: super::quota::QuotaConfig::sandbox(),
             max_flows: 256,
             max_ask_waits: 128,
+            max_host_awaits: 128,
+            max_links: 1024,
+            max_monitors: 1024,
+            max_registry_names: 256,
             max_runtime_bytes: 64 * 1024 * 1024,
+            paranoid_jumps: true,
             ..Default::default()
         }
     }
@@ -162,9 +198,15 @@ pub struct Shared {
     pub(crate) trap_exits: super::finalize::TrapExitFlags,
     pub(crate) waiting_send_at: super::finalize::WaitingSendIndex,
     pub(crate) ask_waits: super::finalize::AskWaitIndex,
+    /// Flows parked on `Opcode::HostAwait` awaiting host completion.
+    pub(crate) host_awaits: super::host_await::HostAwaitIndex,
+    /// Host async bridge (`None` ⇒ HostAwait fails closed).
+    pub(crate) host_await_bridge: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
     /// Correlation ids for host `Runtime::send` when `request_id == 0`.
     /// Starts at 1; `0` stays the unset sentinel.
     pub(crate) host_next_request_id: AtomicU64,
+    /// Defensive VM jump validation. Always true for `TrustLevel::Untrusted`.
+    pub(crate) paranoid_jumps: bool,
     /// Shared trace JIT state (`feature = "jit"`).
     #[cfg(feature = "jit")]
     pub(crate) jit: Option<std::sync::Arc<crate::jit::JitRuntime>>,
@@ -211,6 +253,22 @@ impl Runtime {
         Self::with_natives_and_config(chunk, NativeTable::empty(), config)
     }
 
+    /// Decode a `.bf` buffer only if its integrity fingerprint matches
+    /// `expected_digest`, then verify and start the runtime.
+    ///
+    /// Digest mismatch / decode failure → [`SpawnError::Attestation`].
+    /// Semantic verify failure → [`SpawnError::VerifyFailed`].
+    pub fn with_attested(
+        bytes: &[u8],
+        expected_digest: [u8; 32],
+        natives: Arc<NativeTable>,
+        config: RuntimeConfig,
+    ) -> Result<Self, SpawnError> {
+        let chunk = crate::decode_attested(bytes, &expected_digest)
+            .map_err(SpawnError::Attestation)?;
+        Self::with_natives_and_config(chunk, natives, config)
+    }
+
     /// Like [`Runtime::with_config`] but wires [`crate::std_native_table_with`]
     /// using [`RuntimeConfig::output`] for the `print` native.
     pub fn with_std_natives_and_config(
@@ -230,7 +288,9 @@ impl Runtime {
     /// Failures here mean the runtime was **never** started (no orphan
     /// threads): either the bytecode is invalid
     /// ([`SpawnError::VerifyFailed`]) or the OS refused a thread
-    /// ([`SpawnError::ThreadSpawnFailed`]).
+    /// ([`SpawnError::ThreadSpawnFailed`]). Partial spawn failure rolls
+    /// back: already-started workers/timer are shut down and joined before
+    /// the error is returned.
     pub fn with_natives_and_config(
         chunk: Chunk,
         natives: Arc<NativeTable>,
@@ -260,6 +320,12 @@ impl Runtime {
             None
         };
 
+        let paranoid_jumps = config.paranoid_jumps
+            || matches!(
+                config.trust,
+                crate::bytecode::TrustLevel::Untrusted
+            );
+
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             stealers,
@@ -275,33 +341,47 @@ impl Runtime {
             memory: Arc::new(crate::MemoryBudget::new(config.max_runtime_bytes)),
             quota: config.quota,
             quotas: super::quota::QuotaTable::new(),
-            monitors: super::monitor::MonitorStore::new(),
-            links: super::link::LinkStore::new(),
-            registry: super::registry::RegistryStore::new(),
+            monitors: super::monitor::MonitorStore::new(config.max_monitors),
+            links: super::link::LinkStore::new(config.max_links),
+            registry: super::registry::RegistryStore::new(config.max_registry_names),
             kill_signals: super::finalize::KillSignals::new(),
             trap_exits: super::finalize::TrapExitFlags::new(),
             waiting_send_at: super::finalize::WaitingSendIndex::new(),
             ask_waits: super::finalize::AskWaitIndex::new(config.max_ask_waits),
+            host_awaits: super::host_await::HostAwaitIndex::new(config.max_host_awaits),
+            host_await_bridge: config.host_await.clone(),
             host_next_request_id: AtomicU64::new(1),
+            paranoid_jumps,
             #[cfg(feature = "jit")]
             jit,
         });
 
         let mut workers = Vec::with_capacity(workers_n);
         for local in locals {
-            let shared = shared.clone();
-            let handle = std::thread::Builder::new()
+            let shared_w = shared.clone();
+            match std::thread::Builder::new()
                 .name("byteflow-worker".into())
-                .spawn(move || worker::run_worker(shared, local))
-                .map_err(|e| SpawnError::ThreadSpawnFailed(e.to_string()))?;
-            workers.push(handle);
+                .spawn(move || worker::run_worker(shared_w, local))
+            {
+                Ok(handle) => workers.push(handle),
+                Err(e) => {
+                    abort_startup(&shared, workers, None);
+                    return Err(SpawnError::ThreadSpawnFailed(e.to_string()));
+                }
+            }
         }
 
         let shared_timer = shared.clone();
-        let timer_thread = std::thread::Builder::new()
+        let timer_thread = match std::thread::Builder::new()
             .name("byteflow-timer".into())
             .spawn(move || shared_timer.timer.clone().drive(&shared_timer))
-            .map_err(|e| SpawnError::ThreadSpawnFailed(e.to_string()))?;
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                abort_startup(&shared, workers, None);
+                return Err(SpawnError::ThreadSpawnFailed(e.to_string()));
+            }
+        };
 
         Ok(Runtime {
             shared,
@@ -519,7 +599,7 @@ impl Runtime {
             .shared
             .monitors
             .create(owner, target)
-            .map_err(|e| self.unavailable(e))?;
+            .map_err(|e| self.unavailable(e))??;
         // Target may have finalized between the live check and insert.
         // Synthesize DOWN and drop the now-useless relation (owner still live).
         if self.require_live(target).is_err() {
@@ -767,6 +847,21 @@ impl Runtime {
     /// use [`Self::shutdown`] for a deterministic join. [`Drop`] only signals.
     fn request_shutdown(&self) {
         self.shared.shutdown.store(true, Ordering::Release);
+        // Settle parked HostAwaits before joining workers: otherwise a bridge
+        // holding Completers could leave joiners blocked after OS threads exit.
+        match self.shared.host_awaits.drain_all() {
+            Ok(parked) => {
+                for p in parked {
+                    finalize_flow(
+                        &self.shared,
+                        *p.flow,
+                        FlowOutcome::Failed("runtime shutdown".into()),
+                        FlowExitReason::Shutdown,
+                    );
+                }
+            }
+            Err(e) => super::error::report_fault(e),
+        }
         self.shared.timer.shutdown();
         let (lock, cvar) = &self.shared.notify;
         match super::sync_lock::lock(lock, "Runtime::request_shutdown") {
@@ -949,6 +1044,7 @@ pub(crate) fn spawn_on(
             return Err(e.into());
         }
     };
+    vm.set_paranoid_jumps(shared.paranoid_jumps);
     vm.set_memory_budget(Arc::clone(&shared.memory));
     if let Err(e) = vm.set_quota(Arc::clone(&quota)) {
         shared.flow_limit.release();
@@ -1011,6 +1107,29 @@ pub(crate) fn wake_workers(shared: &Shared) {
     match super::sync_lock::lock(lock, "wake_workers") {
         Ok(_g) => cvar.notify_one(),
         Err(e) => super::error::report_fault(e),
+    }
+}
+
+/// Signal shutdown and join any threads already started during construction
+/// failure — keeps the "no orphan threads" contract of
+/// [`Runtime::with_natives_and_config`].
+fn abort_startup(
+    shared: &Arc<Shared>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    timer: Option<std::thread::JoinHandle<()>>,
+) {
+    shared.shutdown.store(true, Ordering::Release);
+    shared.timer.shutdown();
+    let (lock, cvar) = &shared.notify;
+    match super::sync_lock::lock(lock, "abort_startup") {
+        Ok(_g) => cvar.notify_all(),
+        Err(e) => super::error::report_fault(e),
+    }
+    for w in workers {
+        let _ = w.join();
+    }
+    if let Some(t) = timer {
+        let _ = t.join();
     }
 }
 
@@ -1342,6 +1461,8 @@ mod tests {
         }
     }
 
+    // HostAwait E2E coverage lives in `host_await::runtime_tests`.
+
     #[cfg(feature = "jit")]
     #[test]
     fn runtime_with_jit_enabled_completes_add() -> Result<(), Box<dyn std::error::Error>> {
@@ -1366,5 +1487,89 @@ mod tests {
             FlowOutcome::Completed(Value::Int(42)) => Ok(()),
             other => Err(format!("unexpected outcome: {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn sandbox_enables_process_wide_relation_caps() {
+        let config = RuntimeConfig::sandbox();
+        assert_eq!(config.max_flows, 256);
+        assert_eq!(config.max_ask_waits, 128);
+        assert_eq!(config.max_host_awaits, 128);
+        assert_eq!(config.max_links, 1024);
+        assert_eq!(config.max_monitors, 1024);
+        assert_eq!(config.max_registry_names, 256);
+        assert!(config.paranoid_jumps);
+        assert_eq!(config.max_runtime_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn default_remains_unlimited_for_relation_caps() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.max_links, 0);
+        assert_eq!(config.max_monitors, 0);
+        assert_eq!(config.max_registry_names, 0);
+        assert!(!config.paranoid_jumps);
+    }
+
+    #[test]
+    fn with_attested_mismatch_is_attestation_error() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::encode;
+        use crate::{fingerprint_bf, AttestError};
+
+        let bytes = encode(&add_chunk());
+        let mut bad = fingerprint_bf(&bytes);
+        bad[0] ^= 0xff;
+        match Runtime::with_attested(&bytes, bad, NativeTable::empty(), RuntimeConfig::default()) {
+            Err(SpawnError::Attestation(AttestError::DigestMismatch { .. })) => Ok(()),
+            Ok(_) => Err("expected Attestation error, got Ok(Runtime)".into()),
+            Err(e) => Err(format!("expected Attestation(DigestMismatch), got Err({e})").into()),
+        }
+    }
+
+    #[test]
+    fn with_attested_match_runs() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::encode;
+        use crate::fingerprint_bf;
+
+        let chunk = add_chunk();
+        let bytes = encode(&chunk);
+        let digest = fingerprint_bf(&bytes);
+        let rt = Runtime::with_attested(
+            &bytes,
+            digest,
+            NativeTable::empty(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                ..Default::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Completed(Value::Int(42)) => Ok(()),
+            other => Err(format!("expected 42, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn untrusted_enables_paranoid_jumps_on_shared() -> Result<(), Box<dyn std::error::Error>> {
+        // Default trust is Untrusted → Shared.paranoid_jumps must be true
+        // even when the explicit config flag is false.
+        let rt = Runtime::with_config(
+            add_chunk(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                trust: crate::bytecode::TrustLevel::Untrusted,
+                paranoid_jumps: false,
+                ..Default::default()
+            },
+        )?;
+        assert!(rt.shared.paranoid_jumps);
+        rt.shutdown();
+        Ok(())
     }
 }

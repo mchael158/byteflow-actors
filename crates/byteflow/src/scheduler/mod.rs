@@ -25,6 +25,7 @@ mod error;
 mod finalize;
 mod flow_limit;
 mod handle;
+mod host_await;
 #[cfg(feature = "jit")]
 mod jit;
 mod link;
@@ -49,6 +50,9 @@ pub use capability::{CapError, CapRights, Capability};
 pub use delegate::{exec_delegate, DelegateError};
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};
+pub use host_await::{
+    HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest,
+};
 pub use link::LinkId;
 pub use link_admin::{check_admin, check_link, check_monitor, AdminError, LinkError};
 pub use mailbox::{

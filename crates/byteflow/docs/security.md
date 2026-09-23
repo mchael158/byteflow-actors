@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.6)
+## 7. FlowCap — Current Version (0.9.7)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -393,6 +393,12 @@ The following remain known limitations:
   process-wide count is capped by
   [`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs) (`0` =
   unlimited; [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs) sets 128);
+- live links / monitors / registry names are capped by
+  [`RuntimeConfig::max_links`](../src/scheduler/runtime.rs) /
+  [`max_monitors`](../src/scheduler/runtime.rs) /
+  [`max_registry_names`](../src/scheduler/runtime.rs) (`0` = unlimited;
+  `sandbox()` sets 1024 / 1024 / 256). Accounting lives inside each store
+  under the same mutex as the table (`len()` is the source of truth);
 - native functions that consume arbitrary host resources.
 
 Per-flow [`QuotaConfig`](crate::QuotaConfig) (CPU, heap, spawn/send rate)
@@ -440,7 +446,7 @@ because it originated outside bytecode.
 
 ---
 
-## 16. Capability Model (0.9.6 — implemented)
+## 16. Capability Model (0.9.7 — implemented)
 
 The security architecture is object-capability based:
 
@@ -551,6 +557,22 @@ Host-side bytecode **integrity fingerprint**: [`fingerprint_bf`](crate::fingerpr
 `.bf` buffer so an embedder can refuse a module whose bytes do not match a
 known fingerprint. This is **not** cryptographic module attestation (no
 signatures, MACs, or trust roots inside Byteflow).
+
+### Phase 5 (done — 0.9.7: relation caps + paranoid + attested boot)
+
+- Process-wide caps on links / monitors / registry names
+  (`max_links` / `max_monitors` / `max_registry_names`), enforced inside
+  each store under the same lock as the table.
+- [`RuntimeConfig::paranoid_jumps`](../src/scheduler/runtime.rs): always ON
+  when `trust == Untrusted` (OR with the explicit flag). Applied in
+  `spawn_on` for every VM.
+- [`Runtime::with_attested`](../src/scheduler/runtime.rs): fingerprint gate
+  before verify/start; [`SpawnError::Attestation`](crate::SpawnError) distinct
+  from [`SpawnError::VerifyFailed`](crate::SpawnError).
+- [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs) expands to include
+  the new caps + `paranoid_jumps: true`. **`Default` stays permissive** (DX);
+  production untrusted workloads should use `sandbox()` + `with_attested`
+  + a minimal native table.
 
 ---
 

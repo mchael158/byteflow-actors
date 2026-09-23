@@ -496,6 +496,17 @@ impl<'a> Fn<'a> {
         self.b.emit_set_restart_policy(policy.as_u8());
     }
 
+    /// Park until the host [`crate::HostAwaitBridge`] completes.
+    ///
+    /// `op` is an opaque host discriminator (`imm`). `args` is a single
+    /// [`crate::Value`] handed to the bridge. On success the result is
+    /// written into the returned register (Receive-style writeback).
+    pub fn host_await(&mut self, op: u32, args: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_host_await(dst.0, args.0, op);
+        dst
+    }
+
     /// Load a UTF-8 constant into a new local.
     pub fn load_str(&mut self, s: impl AsRef<str>) -> Reg {
         let konst = self.b.const_(Value::str(s));

@@ -51,7 +51,7 @@ impl std::fmt::Display for MonitorRef {
 #[repr(u8)]
 pub enum FlowExitReason {
     Normal = 0,
-    /// Reserved: host-wide runtime teardown (not produced today).
+    /// Host-wide runtime teardown (parked HostAwait drain, etc.).
     Shutdown = 1,
     Killed = 2,
     Fault = 3,
@@ -133,6 +133,11 @@ impl MonitorTable {
         }
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.monitors.len()
+    }
+
     pub fn create(&mut self, owner: FlowId, target: FlowId) -> MonitorRef {
         let monitor = MonitorRef(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
         self.monitors
@@ -188,19 +193,34 @@ impl Default for MonitorTable {
 }
 
 /// Fail-closed wrapper around [`MonitorTable`].
+///
+/// Process-wide monitor quota lives here (`table.len()` under the same lock).
 pub struct MonitorStore {
     inner: std::sync::Mutex<MonitorTable>,
+    max_monitors: u32,
 }
 
 impl MonitorStore {
-    pub fn new() -> Self {
+    /// `max_monitors == 0` → unlimited.
+    pub fn new(max_monitors: u32) -> Self {
         Self {
             inner: std::sync::Mutex::new(MonitorTable::new()),
+            max_monitors,
         }
     }
 
-    pub fn create(&self, owner: FlowId, target: FlowId) -> Result<MonitorRef, RuntimeError> {
-        Ok(sync_lock::lock(&self.inner, "MonitorStore::create")?.create(owner, target))
+    pub fn create(
+        &self,
+        owner: FlowId,
+        target: FlowId,
+    ) -> Result<Result<MonitorRef, LifecycleError>, RuntimeError> {
+        let mut table = sync_lock::lock(&self.inner, "MonitorStore::create")?;
+        if self.max_monitors != 0 && table.len() as u32 >= self.max_monitors {
+            return Ok(Err(LifecycleError::MonitorLimitReached {
+                limit: self.max_monitors,
+            }));
+        }
+        Ok(Ok(table.create(owner, target)))
     }
 
     pub fn remove_owned(
@@ -233,7 +253,7 @@ impl MonitorStore {
 
 impl Default for MonitorStore {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
@@ -270,5 +290,27 @@ mod tests {
             Err(LifecycleError::NotOwner)
         );
         assert!(table.remove_owned(owner, mon).is_ok());
+    }
+
+    #[test]
+    fn monitor_limit_is_process_wide_and_released() -> Result<(), Box<dyn std::error::Error>> {
+        let store = MonitorStore::new(1);
+        let owner = next_flow_id();
+        let t1 = next_flow_id();
+        let t2 = next_flow_id();
+        let first = match store.create(owner, t1)? {
+            Ok(id) => id,
+            Err(e) => return Err(e.into()),
+        };
+        let second = store.create(owner, t2)?;
+        assert!(matches!(
+            second,
+            Err(LifecycleError::MonitorLimitReached { limit: 1 })
+        ));
+        store.remove_owned(owner, first)??;
+        match store.create(owner, t2)? {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }

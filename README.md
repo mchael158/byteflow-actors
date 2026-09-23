@@ -10,7 +10,7 @@ Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**,
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.6"
+byteflow-actors = "0.9.7"
 ```
 
 ```rust
@@ -38,6 +38,7 @@ Atomic Hop (`Value::Message`): see `crates/byteflow/docs/atomic-hop.md`. Set `BY
 [vm-safety](crates/byteflow/docs/vm-safety.md) ·
 [error-model](crates/byteflow/docs/error-model.md) ·
 [properties](crates/byteflow/docs/properties.md) ·
+[host-await](crates/byteflow/docs/host-await.md) ·
 [security](crates/byteflow/docs/security.md)
 
 License: MIT OR Apache-2.0 · [github.com/mchael158/bytecode-vm](https://github.com/mchael158/bytecode-vm)

@@ -29,7 +29,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.6"
+byteflow-actors = "0.9.7"
 ```
 
 ```rust
@@ -217,13 +217,15 @@ byteflow run    <file.bf> [function]
 - **Quotas:** per-flow CPU / heap / spawn-send buckets via [`QuotaConfig`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html) (`RuntimeConfig::quota`). Default is [`permissive`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.permissive); [`sandbox`](https://docs.rs/byteflow-actors/latest/byteflow/struct.QuotaConfig.html#method.sandbox) is the isolation starting point. `Str`/`Bytes` register stores charge heap with release-on-overwrite (delta accounting). Process-wide ceiling: [`RuntimeConfig::max_runtime_bytes`](https://docs.rs/byteflow-actors/latest/byteflow/struct.RuntimeConfig.html) + [`MemoryBudget`](https://docs.rs/byteflow-actors/latest/byteflow/struct.MemoryBudget.html) / [`HeapStr`](https://docs.rs/byteflow-actors/latest/byteflow/struct.HeapStr.html). Distinct from the scheduler quantum.
 - **Registry:** bytecode `register_name` / `whereis` — lookup returns a SEND Cap, never a FlowId.
 - **`make_msg`:** 3-arg (`request_id`, `tag`, `payload`); `sender` is stamped only on `Send` / `Ask`.
-- **Security:** authenticated hop sender + FlowCap + Phase 3 gates + Phase 4 integrity fingerprint (`fingerprint_bf` / `decode_attested`) — see [`docs/security.md`](docs/security.md).
+- **Security:** authenticated hop sender + FlowCap + Phase 3–5 gates
+  (quotas, integrity fingerprint, relation caps, `with_attested`,
+  `paranoid_jumps`) — see [`docs/security.md`](docs/security.md).
 
 ---
 
-## Status (v0.9.6)
+## Status (v0.9.7)
 
-**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (safe growable ring; `MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, `trap_exit` (`Opcode::SetTrapExit` / `Runtime::set_trap_exit`), `ReceiveMatchKind` (payload wire-tag selective receive), `SetRestartPolicy` (flow-local restart at exit), host-side bytecode integrity fingerprint (`fingerprint_bf` / `decode_attested`), 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable), Criterion benches, hermetic CI (`cargo fetch` then `--locked --offline`).
+**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (safe growable ring; `MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, `trap_exit` (`Opcode::SetTrapExit` / `Runtime::set_trap_exit`), `ReceiveMatchKind` (payload wire-tag selective receive), `SetRestartPolicy` (flow-local restart at exit), **`HostAwait`** (std-only host async bridge + `max_host_awaits`), host-side bytecode integrity fingerprint (`fingerprint_bf` / `decode_attested` / `Runtime::with_attested`), Phase 5 relation caps (`max_links` / `max_monitors` / `max_registry_names`) + `paranoid_jumps`, 3-arg `make_msg`, monitors / links / registry, `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows` / `max_ask_waits`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable), Criterion benches, hermetic CI (`cargo fetch` then `--locked --offline`).
 
 **Not yet:** distribution + full pattern-match receive + full bytecode supervisor trees.
 
@@ -232,6 +234,7 @@ Design guides: [`docs/atomic-hop.md`](docs/atomic-hop.md) ·
 [`docs/lifecycle.md`](docs/lifecycle.md) ·
 [`docs/mailbox.md`](docs/mailbox.md) ·
 [`docs/properties.md`](docs/properties.md) ·
+[`docs/host-await.md`](docs/host-await.md) ·
 [`docs/vm-safety.md`](docs/vm-safety.md) ·
 [`docs/error-model.md`](docs/error-model.md) ·
 [`docs/security.md`](docs/security.md)

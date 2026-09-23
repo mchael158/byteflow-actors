@@ -107,6 +107,18 @@ pub enum LifecycleError {
     EmptyName,
     SelfRelation,
     Unavailable,
+    /// Process-wide [`crate::RuntimeConfig::max_links`] reached.
+    LinkLimitReached {
+        limit: u32,
+    },
+    /// Process-wide [`crate::RuntimeConfig::max_monitors`] reached.
+    MonitorLimitReached {
+        limit: u32,
+    },
+    /// Process-wide [`crate::RuntimeConfig::max_registry_names`] reached.
+    RegistryLimitReached {
+        limit: u32,
+    },
 }
 
 impl fmt::Display for LifecycleError {
@@ -122,6 +134,15 @@ impl fmt::Display for LifecycleError {
             Self::EmptyName => write!(f, "registry name must be non-empty"),
             Self::SelfRelation => write!(f, "cannot link or monitor a flow to itself"),
             Self::Unavailable => write!(f, "runtime table unavailable (poisoned lock)"),
+            Self::LinkLimitReached { limit } => {
+                write!(f, "link limit reached ({limit})")
+            }
+            Self::MonitorLimitReached { limit } => {
+                write!(f, "monitor limit reached ({limit})")
+            }
+            Self::RegistryLimitReached { limit } => {
+                write!(f, "registry name limit reached ({limit})")
+            }
         }
     }
 }
@@ -177,6 +198,8 @@ pub enum SpawnError {
     },
     /// OS refused to create a worker / timer / supervisor thread.
     ThreadSpawnFailed(String),
+    /// Integrity fingerprint / attested decode failed.
+    Attestation(crate::AttestError),
     /// `Vm::new` failed for a reason other than a bad function index
     /// (mapped from [`crate::Fault`] via `From`).
     VmInit(String),
@@ -212,6 +235,7 @@ impl fmt::Display for SpawnError {
             SpawnError::ThreadSpawnFailed(msg) => {
                 write!(f, "failed to spawn runtime thread: {msg}")
             }
+            SpawnError::Attestation(err) => write!(f, "attestation failed: {err}"),
             SpawnError::VmInit(msg) => write!(f, "vm init failed: {msg}"),
         }
     }

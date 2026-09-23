@@ -32,6 +32,7 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` | Tag **or** payload wire-tag — still not full pattern match |
 | `gen_server:call` | `Fn::ask(cap, hop)` / `Fn::ask_timeout` | `Ask` / `AskTimeout` |
 | `gen_server:cast` | `Fn::send(cap, hop)` | fire-and-forget |
+| host async I/O (no BEAM equiv.) | `Fn::host_await(op, args)` + [`HostAwaitBridge`](../src/scheduler/host_await.rs) | `HostAwait` — see [`host-await.md`](host-await.md) |
 | reply to caller | `Fn::send_reply(req, tag, payload)` | uses `msg_reply_cap` |
 | build message | `Fn::hop(req_id, tag, payload)` | scheduler stamps sender |
 | unpack message | `Fn::hop_payload(msg)` etc. | std natives |

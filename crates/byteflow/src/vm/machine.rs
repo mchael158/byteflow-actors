@@ -780,6 +780,22 @@ impl Vm {
                     };
                     return VmResult::SetRestartPolicy { policy };
                 }
+                Opcode::HostAwait => {
+                    let args = trap!(self.get_reg(instr.b));
+                    let op = if instr.imm < 0 {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "HostAwait op >= 0",
+                            got: "imm-negative",
+                        });
+                    } else {
+                        instr.imm as u32
+                    };
+                    return VmResult::HostAwait {
+                        dest_reg: instr.a,
+                        op,
+                        args,
+                    };
+                }
                 Opcode::RegisterName => {
                     return VmResult::RegisterName {
                         name: trap!(self.expect_str_reg(instr.a)),

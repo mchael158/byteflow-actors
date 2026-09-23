@@ -186,6 +186,12 @@ pub enum Opcode {
     /// `0` = Always, `1` = OnFailure, `2` = Never. Invalid `imm` → Trap.
     /// Append-only (`0x65`); `Trap` stays `0x60`.
     SetRestartPolicy = 0x65,
+    /// `HostAwait ra, rb, imm` → park this flow and hand `(op=imm, args=r[b])`
+    /// to the host [`crate::HostAwaitBridge`]. On completion the host writes
+    /// a [`crate::Value`] into `r[a]` (register writeback, like `Receive`).
+    /// Requires a bridge on [`crate::RuntimeConfig`]; otherwise the flow fails.
+    /// Append-only (`0x66`); not a `CallNative` / std-native slot.
+    HostAwait = 0x66,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -249,6 +255,7 @@ impl Opcode {
             0x63 => Whereis,
             0x64 => ReceiveMatchKind,
             0x65 => SetRestartPolicy,
+            0x66 => HostAwait,
             0x61 => Nop,
             _ => return None,
         })
@@ -306,6 +313,7 @@ impl std::fmt::Display for Opcode {
             Opcode::Whereis => "Whereis",
             Opcode::ReceiveMatchKind => "ReceiveMatchKind",
             Opcode::SetRestartPolicy => "SetRestartPolicy",
+            Opcode::HostAwait => "HostAwait",
             Opcode::Trap => "Trap",
             Opcode::Nop => "Nop",
         };

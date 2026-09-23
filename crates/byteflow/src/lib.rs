@@ -184,10 +184,11 @@
 //! - [`docs::security`] — threat model, invariants S1–S7, Phase 3 (0.9.2+)
 //! - [`docs::error_model`] — fail-closed errors (no `unwrap`), bounded joins
 //! - [`docs::vm_safety`] — trust boundary: `verify` vs per-step `Fault`
+//! - [`docs::host_await`] — HostAwait async bridge (host ↔ flow, std-only)
 //!
 //! # What this is *not*
 //!
-//! - Not a replacement for Tokio / async Rust (no `.await` IO loop)
+//! - Not a replacement for Tokio / async Rust (no `.await` IO loop; use [`HostAwaitBridge`])
 //! - Not a distributed cluster runtime (single process, in-memory mailboxes)
 //! - Not a full object-capability OS (no distributed revocation / Cap persistence)
 //!
@@ -248,6 +249,10 @@ pub mod docs {
     /// Property / stress tests (in-house PRNG) for mailbox, decode/verify, Caps.
     #[doc = include_str!("../docs/properties.md")]
     pub mod properties {}
+
+    /// HostAwait: park a flow, complete from host threads (std-only bridge).
+    #[doc = include_str!("../docs/host-await.md")]
+    pub mod host_await {}
 }
 
 pub use attest::{decode_attested, fingerprint_bf, AttestError};
@@ -273,7 +278,8 @@ pub use scheduler::{
     MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef,
     OverflowPolicy, QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime, RuntimeConfig,
     RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
-    Supervisor, SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM,
+    Supervisor, SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM, HostAwaitBridge, HostAwaitCompleter,
+    HostAwaitError, HostAwaitOp, HostAwaitRequest,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

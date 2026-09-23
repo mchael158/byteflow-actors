@@ -2,6 +2,30 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.7] — 2026-09-23
+
+### Added
+
+- **`HostAwait` (`0x66`):** std-only async bridge — park a flow, host
+  completes with register writeback via [`HostAwaitBridge`] /
+  [`HostAwaitCompleter`]. Not a `std_native` slot; Tokio stays outside.
+  [`RuntimeConfig::max_host_awaits`] + `sandbox()` = 128. Completer uses
+  `Weak<Shared>`; unused Drop fails closed; runtime shutdown drains parked
+  awaits (`FlowExitReason::Shutdown`). Docs: [`docs/host-await.md`](docs/host-await.md).
+- **Phase 5 security:** process-wide caps `max_links` / `max_monitors` /
+  `max_registry_names` (accounting inside each store under the same mutex);
+  distinct `LifecycleError::*LimitReached`; `RuntimeConfig::paranoid_jumps`
+  (always ON when `trust == Untrusted`); [`Runtime::with_attested`] +
+  [`SpawnError::Attestation`]. `sandbox()` expands to include the new caps.
+- Supervisor lifecycle hardening: ChildTable insert before name register
+  (rollback with `expected_shutdown`); respawn failures reported (not
+  silently dropped); intensity documented as restart **waves**; cascade
+  aborts on missing `failed_idx`; drive loop uses causal `wait`.
+
+### Changed
+
+- Docs synced: HostAwait, Phase 5, relation caps, attested boot.
+
 ## [0.9.6] — 2026-09-18
 
 ### Added

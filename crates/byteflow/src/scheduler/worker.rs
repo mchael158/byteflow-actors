@@ -714,7 +714,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     return;
                 }
                 match shared.monitors.create(flow.id, target) {
-                    Ok(mon) => {
+                    Ok(Ok(mon)) => {
                         let ref_i = match i64::try_from(mon.as_u64()) {
                             Ok(n) => n,
                             Err(_) => i64::MAX,
@@ -724,6 +724,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                             return;
                         };
                         flow = f;
+                    }
+                    Ok(Err(e)) => {
+                        finish_failed(shared, *flow, e.to_string());
+                        return;
                     }
                     Err(e) => {
                         finish_failed(shared, *flow, e.to_string());
@@ -835,6 +839,41 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                             *flow,
                             "SetRestartPolicy: invalid policy immediate".into(),
                         );
+                        return;
+                    }
+                }
+            }
+            VmResult::HostAwait {
+                dest_reg,
+                op,
+                args,
+            } => {
+                let Some(bridge) = shared.host_await_bridge.as_ref() else {
+                    finish_failed(shared, *flow, "HostAwait: no bridge".into());
+                    return;
+                };
+                let flow_id = flow.id;
+                match shared.host_awaits.park(flow, dest_reg) {
+                    Ok(Ok((ticket, _))) => {
+                        let done = super::host_await::HostAwaitCompleter::new(
+                            Arc::clone(shared),
+                            ticket,
+                        );
+                        let req = super::host_await::HostAwaitRequest {
+                            flow: flow_id,
+                            op,
+                            args,
+                        };
+                        bridge.submit(req, done);
+                        return;
+                    }
+                    Ok(Err((e, flow))) => {
+                        finish_failed(shared, *flow, e.to_string());
+                        return;
+                    }
+                    Err((e, flow)) => {
+                        report_fault(e);
+                        finish_failed(shared, *flow, "HostAwait index".into());
                         return;
                     }
                 }
