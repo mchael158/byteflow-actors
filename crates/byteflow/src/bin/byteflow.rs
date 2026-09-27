@@ -67,7 +67,7 @@ fn print_help() {
 byteflow — verify, disassemble and run .bf modules (assembled via Program)
 
 USAGE:
-    byteflow demo [ping-pong|atomic|selective|ask|ask-timeout|server-loop|monitor|add]
+    byteflow demo [ping-pong|atomic|selective|selective-after|match-eq|exit|dict|ask|ask-timeout|server-loop|monitor|alive|add]
     byteflow pack  <ping-pong|atomic|ask|add> <out.bf>
     byteflow verify <file.bf>
     byteflow disasm <file.bf>
@@ -149,6 +149,14 @@ fn cmd_demo(name: &str) -> Result<(), ()> {
         | "atomic-request-reply"
         | "selective"
         | "selective-receive"
+        | "selective-after"
+        | "selective-timeout"
+        | "alive"
+        | "process-alive"
+        | "match-eq"
+        | "receive-eq"
+        | "exit"
+        | "exit-signal"
         | "ask"
         | "ask-reply"
         | "ask-timeout"
@@ -169,6 +177,12 @@ fn demo_chunk(name: &str) -> Result<byteflow::Chunk, ()> {
         "atomic" | "atomic-actors" => Ok(samples::atomic_actors()),
         "atomic-request-reply" => Ok(samples::atomic_request_reply()),
         "selective" | "selective-receive" => Ok(samples::selective_receive()),
+        "selective-after" => Ok(samples::selective_receive_after()),
+        "selective-timeout" => Ok(samples::selective_receive_timeout()),
+        "alive" | "process-alive" => Ok(samples::process_alive()),
+        "match-eq" | "receive-eq" => Ok(samples::receive_match_eq()),
+        "exit" | "exit-signal" => Ok(samples::exit_signal()),
+        "dict" | "process-dict" => Ok(samples::process_dict()),
         "ask" | "ask-reply" => Ok(samples::ask_reply()),
         "ask-timeout" => Ok(samples::ask_timeout_expires()),
         "ask-exit" | "ask-target-exits" => Ok(samples::ask_target_exits()),
@@ -177,7 +191,7 @@ fn demo_chunk(name: &str) -> Result<byteflow::Chunk, ()> {
         "add" | "add-forty-two" | "42" => Ok(add_forty_two()),
         "boom" => Ok(samples::boom()),
         other => {
-            eprintln!("unknown demo {other:?} (try ping-pong, atomic, selective, ask, ask-timeout, server-loop, monitor, add)");
+            eprintln!("unknown demo {other:?} (try ping-pong, atomic, selective, selective-after, match-eq, exit, dict, ask, server-loop, monitor, alive, add)");
             Err(())
         }
     }

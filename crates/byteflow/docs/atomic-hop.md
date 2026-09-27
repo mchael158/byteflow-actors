@@ -63,14 +63,22 @@ by a matching hop; junk is queued behind the same lock.
 | `ReceiveMatchCorr` `0x5D` | `ra, rb, rc` — `tag == r[b]` and `request_id == r[c]` |
 | `ReceiveMatchCorrImm` `0x5E` | `ra, rb, imm` — immediate tag + `request_id` from `r[b]` |
 | `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=8`) |
+| `ReceiveMatchTimeout` `0x67` | `ra, rb, rc` — tag from `r[b]`, `after r[c]` ms → `Unit` |
+| `ReceiveMatchImmTimeout` `0x68` | `ra, rb, imm` — immediate tag, timeout `r[b]` |
+| `IsAlive` `0x69` | `ra, rb` — `Bool`: held Cap `r[b]` still names a live flow |
+| `ReceiveMatchEq` `0x6E` | `ra, rb, rc` — `tag == r[b]` and payload `Int == r[c]` |
 | `SetTrapExit` `0x5F` | `ra` — BEAM `trap_exit` from truthy `r[a]` (see [`lifecycle.md`](lifecycle.md)) |
 | `SetRestartPolicy` `0x65` | `imm` — `0` Always / `1` OnFailure / `2` Never (supervisor exit decision) |
 | `HostAwait` `0x66` | `ra, rb, imm` — park; host bridge completes into `r[a]` (see [`host-await.md`](host-await.md)) |
 
 Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_REQ`);
-[`samples::receive_match_kind`](../src/samples.rs) (Str decoy then Int payload).
+[`samples::receive_match_kind`](../src/samples.rs) (Str decoy then Int payload);
+[`samples::receive_match_eq`](../src/samples.rs) (same tag, payload `0` then `41`);
+[`samples::selective_receive_timeout`](../src/samples.rs) (`after` → `Unit`).
 
-Tag + payload-kind filters are still **not** full BEAM pattern matching.
+Tag, kind, and `Int` equality are still **not** arbitrary BEAM term patterns.
+`exit/2`, the process dictionary, and `StartChild` are lifecycle opcodes —
+see [`lifecycle.md`](lifecycle.md) and [`beam-mapping.md`](beam-mapping.md).
 
 ### HostAwait — async bridge (`0x66`)
 

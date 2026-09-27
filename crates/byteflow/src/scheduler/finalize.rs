@@ -565,6 +565,32 @@ fn try_take_host_await(shared: &Shared, id: FlowId) -> Option<Flow> {
     }
 }
 
+/// BEAM `exit/2`. `Normal` is a no-op. `Killed` cannot be trapped.
+/// Any other reason becomes a [`crate::TAG_SYS_EXIT`] hop when the target
+/// has `trap_exit`; otherwise it is a cooperative kill.
+pub(crate) fn signal_exit(
+    shared: &Shared,
+    from: FlowId,
+    target: FlowId,
+    reason: FlowExitReason,
+) {
+    if !reason.is_abnormal() {
+        return;
+    }
+    let trapping = match shared.trap_exits.is_enabled(target) {
+        Ok(v) => v,
+        Err(e) => {
+            report_fault(e);
+            false
+        }
+    };
+    if trapping && reason != FlowExitReason::Killed {
+        deliver_exit(shared, target, from, reason);
+    } else {
+        request_kill(shared, target, reason);
+    }
+}
+
 /// Host / supervisor abort: finalize immediately when parked, otherwise
 /// the next worker quantum consumes the signal.
 pub(crate) fn request_kill(shared: &Shared, id: FlowId, reason: FlowExitReason) {

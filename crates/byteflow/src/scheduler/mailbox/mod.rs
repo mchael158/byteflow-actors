@@ -61,6 +61,8 @@ pub(crate) enum WaitFilter {
     Tag(u16),
     /// `ReceiveMatchKind`: oldest `Message` whose `payload.wire_tag()` matches.
     PayloadKind(u8),
+    /// `ReceiveMatchEq`: oldest hop with this tag and `Int` payload.
+    TagPayload { tag: u16, payload: i64 },
     /// `Ask`: reply belonging to one specific request.
     ///
     /// `expect_request_id` is the RPC correlation key.
@@ -87,6 +89,10 @@ impl WaitFilter {
             },
             Self::PayloadKind(kind) => match value.as_message() {
                 Some(m) => m.payload.wire_tag() == kind,
+                None => false,
+            },
+            Self::TagPayload { tag, payload } => match value.as_message() {
+                Some(m) => m.tag == tag && matches!(m.payload.as_ref(), Value::Int(n) if *n == payload),
                 None => false,
             },
             Self::Correlation {

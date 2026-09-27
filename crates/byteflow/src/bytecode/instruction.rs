@@ -84,6 +84,34 @@ impl fmt::Display for Instruction {
                 write!(f, "{} r{}, r{}", self.op, self.a, self.b)
             }
             Opcode::ReceiveMatchImm => write!(f, "{} r{}, tag={}", self.op, self.a, self.imm),
+            Opcode::ReceiveMatchTimeout => write!(
+                f,
+                "{} r{}, tag=r{}, timeout=r{}",
+                self.op, self.a, self.b, self.c
+            ),
+            Opcode::ReceiveMatchImmTimeout => write!(
+                f,
+                "{} r{}, tag={}, timeout=r{}",
+                self.op, self.a, self.imm, self.b
+            ),
+            Opcode::IsAlive => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::ExitSignal => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::DictPut => {
+                write!(f, "{} r{}, key=r{}, val=r{}", self.op, self.a, self.b, self.c)
+            }
+            Opcode::DictGet | Opcode::DictErase => {
+                write!(f, "{} r{}, key=r{}", self.op, self.a, self.b)
+            }
+            Opcode::ReceiveMatchEq => write!(
+                f,
+                "{} r{}, tag=r{}, payload=r{}",
+                self.op, self.a, self.b, self.c
+            ),
+            Opcode::StartChild => write!(
+                f,
+                "{} r{}, fn[{}], policy={}",
+                self.op, self.a, self.imm, self.b
+            ),
             Opcode::ReceiveMatchKind => {
                 write!(f, "{} r{}, kind={}", self.op, self.a, self.imm)
             }

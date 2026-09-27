@@ -10,7 +10,7 @@
 //! here. Caps are revoked on exit; FlowIds are never reused.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::error::{LifecycleError, RuntimeError};
 use super::process::FlowId;
@@ -23,7 +23,23 @@ use super::sync_lock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MonitorRef(pub(crate) u64);
 
+/// Bytecode stores [`MonitorRef`] as [`crate::Value::Int`]; never mint past this.
+const MAX_MONITOR_ID: u64 = i64::MAX as u64;
+
 static NEXT_MONITOR: AtomicU64 = AtomicU64::new(1);
+static MONITOR_IDS_EXHAUSTED: AtomicBool = AtomicBool::new(false);
+
+fn try_next_monitor_id() -> Result<MonitorRef, RuntimeError> {
+    if MONITOR_IDS_EXHAUSTED.load(Ordering::Relaxed) {
+        return Err(RuntimeError::MonitorIdExhausted);
+    }
+    let id = NEXT_MONITOR.fetch_add(1, Ordering::Relaxed);
+    if id == 0 || id > MAX_MONITOR_ID {
+        MONITOR_IDS_EXHAUSTED.store(true, Ordering::Relaxed);
+        return Err(RuntimeError::MonitorIdExhausted);
+    }
+    Ok(MonitorRef(id))
+}
 
 impl MonitorRef {
     #[inline]
@@ -122,14 +138,21 @@ struct MonitorEntry {
 }
 
 /// `MonitorRef → { owner, target }`. Lives on [`super::runtime::Shared`].
+///
+/// `by_owner` / `by_target` are adjacency indexes so owner-exit and
+/// `DOWN` delivery are O(degree), not a full-table scan.
 pub struct MonitorTable {
     monitors: HashMap<MonitorRef, MonitorEntry>,
+    by_owner: HashMap<FlowId, Vec<MonitorRef>>,
+    by_target: HashMap<FlowId, Vec<MonitorRef>>,
 }
 
 impl MonitorTable {
     pub fn new() -> Self {
         Self {
             monitors: HashMap::new(),
+            by_owner: HashMap::new(),
+            by_target: HashMap::new(),
         }
     }
 
@@ -138,11 +161,38 @@ impl MonitorTable {
         self.monitors.len()
     }
 
-    pub fn create(&mut self, owner: FlowId, target: FlowId) -> MonitorRef {
-        let monitor = MonitorRef(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
+    fn index_add(map: &mut HashMap<FlowId, Vec<MonitorRef>>, flow: FlowId, id: MonitorRef) {
+        map.entry(flow).or_default().push(id);
+    }
+
+    fn index_remove(map: &mut HashMap<FlowId, Vec<MonitorRef>>, flow: FlowId, id: MonitorRef) {
+        if let Some(ids) = map.get_mut(&flow) {
+            ids.retain(|existing| *existing != id);
+            if ids.is_empty() {
+                map.remove(&flow);
+            }
+        }
+    }
+
+    fn insert(&mut self, monitor: MonitorRef, owner: FlowId, target: FlowId) {
         self.monitors
             .insert(monitor, MonitorEntry { owner, target });
-        monitor
+        Self::index_add(&mut self.by_owner, owner, monitor);
+        Self::index_add(&mut self.by_target, target, monitor);
+    }
+
+    fn take(&mut self, monitor: MonitorRef) -> Option<MonitorEntry> {
+        let entry = self.monitors.remove(&monitor)?;
+        Self::index_remove(&mut self.by_owner, entry.owner, monitor);
+        Self::index_remove(&mut self.by_target, entry.target, monitor);
+        Some(entry)
+    }
+
+    #[cfg(test)]
+    pub fn create(&mut self, owner: FlowId, target: FlowId) -> Result<MonitorRef, RuntimeError> {
+        let monitor = try_next_monitor_id()?;
+        self.insert(monitor, owner, target);
+        Ok(monitor)
     }
 
     /// Remove `monitor` only if `owner` still owns it.
@@ -153,7 +203,7 @@ impl MonitorTable {
     ) -> Result<(), LifecycleError> {
         match self.monitors.get(&monitor) {
             Some(entry) if entry.owner == owner => {
-                self.monitors.remove(&monitor);
+                let _ = self.take(monitor);
                 Ok(())
             }
             Some(_) => Err(LifecycleError::NotOwner),
@@ -163,24 +213,34 @@ impl MonitorTable {
 
     /// Drop every monitor whose **owner** is `flow` (owner exited).
     pub fn remove_owned_by(&mut self, owner: FlowId) {
-        self.monitors.retain(|_, entry| entry.owner != owner);
+        let Some(ids) = self.by_owner.remove(&owner) else {
+            return;
+        };
+        for id in ids {
+            if let Some(entry) = self.monitors.remove(&id) {
+                Self::index_remove(&mut self.by_target, entry.target, id);
+            }
+        }
     }
 
     /// Collect `DOWN` events for monitors watching `target`, then drop them.
     pub fn notify_target_exit(&mut self, target: FlowId, reason: FlowExitReason) -> Vec<DownEvent> {
-        let mut events = Vec::new();
-        self.monitors.retain(|monitor, entry| {
-            if entry.target != target {
-                return true;
-            }
+        let Some(ids) = self.by_target.remove(&target) else {
+            return Vec::new();
+        };
+        let mut events = Vec::with_capacity(ids.len());
+        for monitor in ids {
+            let Some(entry) = self.monitors.remove(&monitor) else {
+                continue;
+            };
+            Self::index_remove(&mut self.by_owner, entry.owner, monitor);
             events.push(DownEvent {
-                monitor: *monitor,
+                monitor,
                 owner: entry.owner,
                 target,
                 reason,
             });
-            false
-        });
+        }
         events.sort_unstable_by_key(|event| event.monitor.0);
         events
     }
@@ -215,12 +275,14 @@ impl MonitorStore {
         target: FlowId,
     ) -> Result<Result<MonitorRef, LifecycleError>, RuntimeError> {
         let mut table = sync_lock::lock(&self.inner, "MonitorStore::create")?;
-        if self.max_monitors != 0 && table.len() as u32 >= self.max_monitors {
+        if self.max_monitors != 0 && table.len() >= self.max_monitors as usize {
             return Ok(Err(LifecycleError::MonitorLimitReached {
                 limit: self.max_monitors,
             }));
         }
-        Ok(Ok(table.create(owner, target)))
+        let monitor = try_next_monitor_id()?;
+        table.insert(monitor, owner, target);
+        Ok(Ok(monitor))
     }
 
     pub fn remove_owned(
@@ -263,12 +325,12 @@ mod tests {
     use crate::scheduler::process::next_flow_id;
 
     #[test]
-    fn notify_removes_and_sorts() {
+    fn notify_removes_and_sorts() -> Result<(), RuntimeError> {
         let mut table = MonitorTable::new();
         let owner = next_flow_id();
         let target = next_flow_id();
-        let a = table.create(owner, target);
-        let b = table.create(owner, target);
+        let a = table.create(owner, target)?;
+        let b = table.create(owner, target)?;
         let events = table.notify_target_exit(target, FlowExitReason::Fault);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].monitor, a);
@@ -276,20 +338,22 @@ mod tests {
         assert!(table
             .notify_target_exit(target, FlowExitReason::Fault)
             .is_empty());
+        Ok(())
     }
 
     #[test]
-    fn remove_owned_rejects_other_flow() {
+    fn remove_owned_rejects_other_flow() -> Result<(), RuntimeError> {
         let mut table = MonitorTable::new();
         let owner = next_flow_id();
         let other = next_flow_id();
         let target = next_flow_id();
-        let mon = table.create(owner, target);
+        let mon = table.create(owner, target)?;
         assert_eq!(
             table.remove_owned(other, mon),
             Err(LifecycleError::NotOwner)
         );
         assert!(table.remove_owned(owner, mon).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -298,10 +362,7 @@ mod tests {
         let owner = next_flow_id();
         let t1 = next_flow_id();
         let t2 = next_flow_id();
-        let first = match store.create(owner, t1)? {
-            Ok(id) => id,
-            Err(e) => return Err(e.into()),
-        };
+        let first = store.create(owner, t1)??;
         let second = store.create(owner, t2)?;
         assert!(matches!(
             second,

@@ -25,7 +25,7 @@ cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
-**Não** substitui Tokio / **não** é OTP distribuído. O Rust hospedeiro fica com o I/O.
+**Não** substitui Tokio / **não** é OTP distribuído. O Rust hospedeiro fica com o I/O. OTP local no bytecode: `exit/2`, dicionário de processo, `after`, `is_alive` e `start_child` num supervisor do host — ver `crates/byteflow/docs/beam-mapping.md`.
 
 Atomic Hop (`Value::Message`): ver `crates/byteflow/docs/atomic-hop.md`. Use `BYTEFLOW_LOG=info` para logs do scheduler no stderr.
 

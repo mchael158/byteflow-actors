@@ -199,6 +199,14 @@ impl SupervisorLink {
             Err(e) => report_fault(e),
         }
     }
+
+    /// Spawn another child on the same supervisor (bytecode `StartChild`).
+    pub(crate) fn start_child(
+        &self,
+        spec: ChildSpec,
+    ) -> Result<FlowHandle, SpawnError> {
+        spawn_child(&self.inner, spec)
+    }
 }
 
 /// Host-side child restarter (design notes §15-16).

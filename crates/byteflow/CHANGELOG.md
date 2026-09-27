@@ -2,6 +2,33 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **BEAM `receive … after`:** `Opcode::ReceiveMatchTimeout` (`0x67`) and
+  `ReceiveMatchImmTimeout` (`0x68`) — selective receive with a millisecond
+  timeout; expiry writes `Unit`, non-matching hops stay queued. `Fn`
+  helpers: `receive_match_timeout` / `receive_match_imm_timeout`.
+- **BEAM `is_process_alive/1`:** `Opcode::IsAlive` (`0x69`) / `Fn::is_alive`
+  — `true` only if the caller holds the Cap and the target flow is still
+  in the directory. Unknown / not-held / revoked → `false`.
+- **Actor helpers:** `Fn::actor_loop` (receive → handle → jump) and
+  `Fn::cast` (alias of `send`). Server samples use `actor_loop`.
+
+- **OTP local:** `ExitSignal` (`0x6A`, BEAM `exit/2`), process dictionary
+  `DictPut` / `DictGet` / `DictErase` (`0x6B`–`0x6D`), term-equality receive
+  `ReceiveMatchEq` (`0x6E`), bytecode `StartChild` (`0x6F`) onto the host
+  supervisor that started the caller. Distribution stays out (single node).
+
+### Changed
+
+- **Links:** pair index is O(1); `remove_links_of` is O(degree) and ordered
+  by `LinkId`. `link_if_live` confirms both endpoints after releasing the
+  link mutex (no `LinkStore` → `Directory` nesting). `LinkId` /
+  `MonitorRef` stop at `i64::MAX` (`LinkIdExhausted` / `MonitorIdExhausted`).
+- Monitors use the same adjacency indexes (`by_owner` / `by_target`).
+
 ## [0.9.7] — 2026-09-23
 
 ### Added

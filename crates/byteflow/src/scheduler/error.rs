@@ -52,6 +52,10 @@ pub enum RuntimeError {
     FlowIdExhausted,
     /// Directory register saw a live id twice (wrap or double-spawn).
     DuplicateFlowId,
+    /// Link-id counter wrapped or exceeded `i64::MAX` (bytecode `Int` bound).
+    LinkIdExhausted,
+    /// Monitor-id counter wrapped or exceeded `i64::MAX` (bytecode `Int` bound).
+    MonitorIdExhausted,
 }
 
 impl fmt::Display for RuntimeError {
@@ -83,6 +87,12 @@ impl fmt::Display for RuntimeError {
             }
             RuntimeError::DuplicateFlowId => {
                 write!(f, "directory already has this flow id")
+            }
+            RuntimeError::LinkIdExhausted => {
+                write!(f, "link id space exhausted (counter wrapped)")
+            }
+            RuntimeError::MonitorIdExhausted => {
+                write!(f, "monitor id space exhausted (counter wrapped)")
             }
         }
     }

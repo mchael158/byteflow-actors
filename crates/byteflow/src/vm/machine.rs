@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,13 @@ use super::fault::{Fault, NativeCallError};
 use super::frame::Frame;
 use super::native::{check_native_gate, NativeGate, NativeTable};
 use super::result::VmResult;
+
+fn dict_scalar(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    )
+}
 
 /// Hard limit on call nesting. Frames are heap-allocated, so
 /// unbounded recursion would grow the Flow's memory instead of crashing
@@ -42,6 +50,9 @@ pub struct Vm {
     /// [`Self::set_paranoid_jumps`]). Default off: verified chunks trust
     /// `verify`; unverified corrupt jumps fail-open as implicit `return Unit`.
     paranoid_jumps: bool,
+    /// BEAM process dictionary. Keys are `Int`. Values are scalars only so
+    /// a dict entry cannot outlive a register heap charge.
+    dict: HashMap<i64, Value>,
 }
 
 impl Vm {
@@ -86,6 +97,7 @@ impl Vm {
             quota: None,
             memory: None,
             paranoid_jumps: false,
+            dict: HashMap::new(),
         })
     }
 
@@ -386,6 +398,17 @@ impl Vm {
     }
 
     #[inline]
+    fn int_from_reg(&self, reg: u8) -> Result<i64, Fault> {
+        match self.get_reg(reg)? {
+            Value::Int(n) => Ok(n),
+            other => Err(Fault::TypeMismatch {
+                expected: "int",
+                got: other.type_name(),
+            }),
+        }
+    }
+
+    #[inline]
     fn tag_from_reg(&self, reg: u8) -> Result<u16, Fault> {
         tag_from_value(&self.get_reg(reg)?)
     }
@@ -632,6 +655,7 @@ impl Vm {
                         match_tag: None,
                         match_request_id: None,
                         match_payload_kind: None,
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::ReceiveTimeout => {
@@ -642,6 +666,7 @@ impl Vm {
                         match_tag: None,
                         match_request_id: None,
                         match_payload_kind: None,
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::ReceiveMatch => {
@@ -652,6 +677,7 @@ impl Vm {
                         match_tag: Some(tag),
                         match_request_id: None,
                         match_payload_kind: None,
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::ReceiveMatchImm => {
@@ -662,6 +688,112 @@ impl Vm {
                         match_tag: Some(tag),
                         match_request_id: None,
                         match_payload_kind: None,
+                        match_payload_eq: None,
+                    };
+                }
+                Opcode::ReceiveMatchTimeout => {
+                    let tag = trap!(self.tag_from_reg(instr.b));
+                    let timeout = trap!(self.duration_millis_from_reg(instr.c));
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: Some(timeout),
+                        match_tag: Some(tag),
+                        match_request_id: None,
+                        match_payload_kind: None,
+                        match_payload_eq: None,
+                    };
+                }
+                Opcode::ReceiveMatchImmTimeout => {
+                    let tag = trap!(tag_from_imm(instr.imm));
+                    let timeout = trap!(self.duration_millis_from_reg(instr.b));
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: Some(timeout),
+                        match_tag: Some(tag),
+                        match_request_id: None,
+                        match_payload_kind: None,
+                        match_payload_eq: None,
+                    };
+                }
+                Opcode::IsAlive => {
+                    let target_cap = trap!(self.expect_cap_reg(instr.b));
+                    return VmResult::IsAlive {
+                        dest_reg: instr.a,
+                        target_cap,
+                    };
+                }
+                Opcode::ExitSignal => {
+                    let target_cap = trap!(self.expect_cap_reg(instr.a));
+                    let reason = trap!(self.int_from_reg(instr.b));
+                    let Ok(reason_u) = u64::try_from(reason) else {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "FlowExitReason 0..=6",
+                            got: "imm-out-of-range",
+                        });
+                    };
+                    if crate::FlowExitReason::from_u64(reason_u).is_none() {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "FlowExitReason 0..=6",
+                            got: "imm-out-of-range",
+                        });
+                    }
+                    return VmResult::ExitSignal {
+                        target_cap,
+                        reason: reason_u,
+                    };
+                }
+                Opcode::DictPut => {
+                    let key = trap!(self.int_from_reg(instr.b));
+                    let value = trap!(self.get_reg(instr.c));
+                    if !dict_scalar(&value) {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "dict scalar (unit/bool/int/float)",
+                            got: "heap-or-cap",
+                        });
+                    }
+                    let old = self.dict.insert(key, value).unwrap_or(Value::Unit);
+                    trap!(self.set_reg(instr.a, old));
+                }
+                Opcode::DictGet => {
+                    let key = trap!(self.int_from_reg(instr.b));
+                    let value = self.dict.get(&key).cloned().unwrap_or(Value::Unit);
+                    trap!(self.set_reg(instr.a, value));
+                }
+                Opcode::DictErase => {
+                    let key = trap!(self.int_from_reg(instr.b));
+                    let old = self.dict.remove(&key).unwrap_or(Value::Unit);
+                    trap!(self.set_reg(instr.a, old));
+                }
+                Opcode::ReceiveMatchEq => {
+                    let tag = trap!(self.tag_from_reg(instr.b));
+                    let payload = trap!(self.int_from_reg(instr.c));
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: None,
+                        match_tag: Some(tag),
+                        match_request_id: None,
+                        match_payload_kind: None,
+                        match_payload_eq: Some(payload),
+                    };
+                }
+                Opcode::StartChild => {
+                    let function = u32::try_from(instr.imm).unwrap_or(u32::MAX);
+                    if self.chunk.function(function).is_none() {
+                        return VmResult::Trap(Fault::BadFunction {
+                            index: function,
+                            table_size: self.chunk.functions.len() as u32,
+                        });
+                    }
+                    if crate::RestartPolicy::from_u8(instr.b).is_none() {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "restart policy 0..=2",
+                            got: "imm-out-of-range",
+                        });
+                    }
+                    return VmResult::StartChild {
+                        dest_reg: instr.a,
+                        function,
+                        policy: instr.b,
                     };
                 }
                 Opcode::ReceiveMatchKind => {
@@ -682,6 +814,7 @@ impl Vm {
                         match_tag: None,
                         match_request_id: None,
                         match_payload_kind: Some(kind),
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::FreshRequestId => {
@@ -697,6 +830,7 @@ impl Vm {
                         match_tag: Some(tag),
                         match_request_id: Some(rid),
                         match_payload_kind: None,
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::ReceiveMatchCorrImm => {
@@ -708,6 +842,7 @@ impl Vm {
                         match_tag: Some(tag),
                         match_request_id: Some(rid),
                         match_payload_kind: None,
+                        match_payload_eq: None,
                     };
                 }
                 Opcode::Ask => {

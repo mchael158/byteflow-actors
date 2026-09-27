@@ -161,9 +161,13 @@ fn receive_filter(
     match_tag: Option<u16>,
     match_request_id: Option<u64>,
     match_payload_kind: Option<u8>,
+    match_payload_eq: Option<i64>,
 ) -> WaitFilter {
     if let Some(kind) = match_payload_kind {
         return WaitFilter::PayloadKind(kind);
+    }
+    if let (Some(tag), Some(payload)) = (match_tag, match_payload_eq) {
+        return WaitFilter::TagPayload { tag, payload };
     }
     match (match_tag, match_request_id) {
         (Some(tag), Some(rid)) => WaitFilter::TaggedCorrelation {
@@ -523,6 +527,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 match_tag,
                 match_request_id,
                 match_payload_kind,
+                match_payload_eq,
             } => {
                 if !flow.authority.rights.contains(CapRights::RECV) {
                     finish_failed(
@@ -533,7 +538,12 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     return;
                 }
                 flow.last_receive_dest = Some(dest_reg);
-                let filter = receive_filter(match_tag, match_request_id, match_payload_kind);
+                let filter = receive_filter(
+                    match_tag,
+                    match_request_id,
+                    match_payload_kind,
+                    match_payload_eq,
+                );
                 match flow.mailbox.try_pop_filter(filter) {
                     Ok(Some(msg)) => {
                         flow.metrics
@@ -715,9 +725,9 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 }
                 match shared.monitors.create(flow.id, target) {
                     Ok(Ok(mon)) => {
-                        let ref_i = match i64::try_from(mon.as_u64()) {
-                            Ok(n) => n,
-                            Err(_) => i64::MAX,
+                        let Ok(ref_i) = i64::try_from(mon.as_u64()) else {
+                            finish_failed(shared, *flow, "monitor id exceeds Int".into());
+                            return;
                         };
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
                         else {
@@ -778,11 +788,13 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     finish_failed(shared, *flow, "cannot link self".into());
                     return;
                 }
-                match shared.links.link(flow.id, target) {
+                match shared.links.link_if_live(flow.id, target, |id| {
+                    shared.directory.lookup(id).map(|m| m.is_some())
+                }) {
                     Ok(Ok(id)) => {
-                        let ref_i = match i64::try_from(id.as_u64()) {
-                            Ok(n) => n,
-                            Err(_) => i64::MAX,
+                        let Ok(ref_i) = i64::try_from(id.as_u64()) else {
+                            finish_failed(shared, *flow, "link id exceeds Int".into());
+                            return;
                         };
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
                         else {
@@ -947,6 +959,117 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     }
                 }
                 match shared.caps.mint_or_reuse(flow.id, target, CapRights::SEND) {
+                    Ok(cap) => {
+                        let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
+                        else {
+                            return;
+                        };
+                        flow = f;
+                    }
+                    Err(e) => {
+                        finish_failed(shared, *flow, e.to_string());
+                        return;
+                    }
+                }
+            }
+            VmResult::IsAlive {
+                dest_reg,
+                target_cap,
+            } => {
+                let live = match shared.caps.resolve(target_cap, flow.id, CapRights::empty()) {
+                    Ok(entry) => match entry.target() {
+                        Some(id) => match shared.directory.lookup(id) {
+                            Ok(m) => m.is_some(),
+                            Err(e) => {
+                                finish_failed(shared, *flow, e.to_string());
+                                return;
+                            }
+                        },
+                        None => false,
+                    },
+                    Err(
+                        CapError::Unknown
+                        | CapError::NotHolder
+                        | CapError::WrongTarget
+                        | CapError::InsufficientRights,
+                    ) => false,
+                    Err(e) => {
+                        finish_failed(shared, *flow, e.to_string());
+                        return;
+                    }
+                };
+                let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Bool(live)) else {
+                    return;
+                };
+                flow = f;
+            }
+            VmResult::ExitSignal { target_cap, reason } => {
+                let Some(reason) = FlowExitReason::from_u64(reason) else {
+                    finish_failed(shared, *flow, "exit: bad reason".into());
+                    return;
+                };
+                let target =
+                    match resolve_relation_cap(shared, target_cap, flow.id, CapRights::LINK) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
+                if reason.is_abnormal() && target == flow.id {
+                    let trapping = match shared.trap_exits.is_enabled(flow.id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
+                    if trapping && reason != FlowExitReason::Killed {
+                        super::finalize::signal_exit(shared, flow.id, target, reason);
+                    } else {
+                        finalize_flow(
+                            shared,
+                            *flow,
+                            FlowOutcome::Failed(kill_outcome_message(reason)),
+                            reason,
+                        );
+                        return;
+                    }
+                } else if reason.is_abnormal() {
+                    super::finalize::signal_exit(shared, flow.id, target, reason);
+                }
+            }
+            VmResult::StartChild {
+                dest_reg,
+                function,
+                policy,
+            } => {
+                let Some(policy) = crate::RestartPolicy::from_u8(policy) else {
+                    finish_failed(shared, *flow, "start_child: bad restart policy".into());
+                    return;
+                };
+                let Some(link) = flow.supervisor.clone() else {
+                    finish_failed(
+                        shared,
+                        *flow,
+                        "start_child: flow was not started by a supervisor".into(),
+                    );
+                    return;
+                };
+                let handle = match link.start_child(
+                    crate::ChildSpec::new("", function).restart(policy),
+                ) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        finish_failed(shared, *flow, e.to_string());
+                        return;
+                    }
+                };
+                let child = handle.id();
+                match shared
+                    .caps
+                    .mint(flow.id, child, CapRights::ADDRESSING)
+                {
                     Ok(cap) => {
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
                         else {

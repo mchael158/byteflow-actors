@@ -192,6 +192,42 @@ pub enum Opcode {
     /// Requires a bridge on [`crate::RuntimeConfig`]; otherwise the flow fails.
     /// Append-only (`0x66`); not a `CallNative` / std-native slot.
     HostAwait = 0x66,
+    /// `ReceiveMatchTimeout ra, rb, rc` → like [`Self::ReceiveMatch`] but
+    /// give up after `r[c]` milliseconds and write `Value::Unit` (BEAM
+    /// `receive … after`). Non-matching hops stay queued. Append-only (`0x67`).
+    ReceiveMatchTimeout = 0x67,
+    /// `ReceiveMatchImmTimeout ra, rb, imm` → like [`Self::ReceiveMatchImm`]
+    /// with timeout register `r[b]` (imm = tag). Writes `Unit` on expiry.
+    /// Append-only (`0x68`).
+    ReceiveMatchImmTimeout = 0x68,
+    /// `IsAlive ra, rb` → `r[a] = Bool`: the Cap in `r[b]` is held by this
+    /// flow and still names a live flow (BEAM `is_process_alive/1`).
+    /// Unknown / not-held / revoked / non-flow target → `false` (no trap).
+    /// Append-only (`0x69`).
+    IsAlive = 0x69,
+    /// `ExitSignal ra, rb` → BEAM `exit/2`: signal the flow addressed by
+    /// Cap `r[a]` (needs `LINK`) with reason `r[b]` (`FlowExitReason` as `Int`).
+    /// `Normal` is ignored. `Killed` cannot be trapped. Other reasons become
+    /// a [`crate::TAG_SYS_EXIT`] hop when the target has `trap_exit`.
+    /// Append-only (`0x6A`).
+    ExitSignal = 0x6A,
+    /// `DictPut ra, rb, rc` → process dictionary: `r[a] = old`, key `r[b]`
+    /// (`Int`), value `r[c]` (scalar: Unit/Bool/Int/Float). Missing old → `Unit`.
+    /// Append-only (`0x6B`).
+    DictPut = 0x6B,
+    /// `DictGet ra, rb` → `r[a] = dict[r[b]]` or `Unit`. Append-only (`0x6C`).
+    DictGet = 0x6C,
+    /// `DictErase ra, rb` → remove key `r[b]`, write the old value or `Unit`
+    /// into `r[a]`. Append-only (`0x6D`).
+    DictErase = 0x6D,
+    /// `ReceiveMatchEq ra, rb, rc` → selective receive: `tag == r[b]` and
+    /// payload `Int == r[c]`. Non-matching hops stay queued. Append-only (`0x6E`).
+    ReceiveMatchEq = 0x6E,
+    /// `StartChild ra, policy, fn` → spawn function `imm` as a supervised
+    /// child of **this** flow's supervisor (`b` = restart policy `0..=2`).
+    /// Writes an addressing Cap into `r[a]`. The caller must itself have
+    /// been started by a host [`crate::Supervisor`]. Append-only (`0x6F`).
+    StartChild = 0x6F,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -256,6 +292,15 @@ impl Opcode {
             0x64 => ReceiveMatchKind,
             0x65 => SetRestartPolicy,
             0x66 => HostAwait,
+            0x67 => ReceiveMatchTimeout,
+            0x68 => ReceiveMatchImmTimeout,
+            0x69 => IsAlive,
+            0x6A => ExitSignal,
+            0x6B => DictPut,
+            0x6C => DictGet,
+            0x6D => DictErase,
+            0x6E => ReceiveMatchEq,
+            0x6F => StartChild,
             0x61 => Nop,
             _ => return None,
         })
@@ -314,6 +359,15 @@ impl std::fmt::Display for Opcode {
             Opcode::ReceiveMatchKind => "ReceiveMatchKind",
             Opcode::SetRestartPolicy => "SetRestartPolicy",
             Opcode::HostAwait => "HostAwait",
+            Opcode::ReceiveMatchTimeout => "ReceiveMatchTimeout",
+            Opcode::ReceiveMatchImmTimeout => "ReceiveMatchImmTimeout",
+            Opcode::IsAlive => "IsAlive",
+            Opcode::ExitSignal => "ExitSignal",
+            Opcode::DictPut => "DictPut",
+            Opcode::DictGet => "DictGet",
+            Opcode::DictErase => "DictErase",
+            Opcode::ReceiveMatchEq => "ReceiveMatchEq",
+            Opcode::StartChild => "StartChild",
             Opcode::Trap => "Trap",
             Opcode::Nop => "Nop",
         };

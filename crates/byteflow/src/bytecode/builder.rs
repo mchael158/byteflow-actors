@@ -214,6 +214,70 @@ impl ChunkBuilder {
         ));
     }
 
+    /// Selective receive + `after`: `tag == r[tag_reg]`, timeout `r[millis_reg]`.
+    pub fn emit_receive_match_timeout(&mut self, dst: u8, tag_reg: u8, millis_reg: u8) {
+        self.emit(Instruction::abc(
+            Opcode::ReceiveMatchTimeout,
+            dst,
+            tag_reg,
+            millis_reg,
+        ));
+    }
+
+    /// Selective receive + `after` with an immediate `u16` tag.
+    pub fn emit_receive_match_imm_timeout(&mut self, dst: u8, tag: u16, millis_reg: u8) {
+        self.emit(Instruction::new(
+            Opcode::ReceiveMatchImmTimeout,
+            dst,
+            millis_reg,
+            0,
+            i32::from(tag),
+        ));
+    }
+
+    /// BEAM `is_process_alive/1` for a held Cap.
+    pub fn emit_is_alive(&mut self, dst: u8, cap_reg: u8) {
+        self.emit(Instruction::abc(Opcode::IsAlive, dst, cap_reg, 0));
+    }
+
+    /// BEAM `exit/2`. `reason_reg` is a [`crate::FlowExitReason`] code.
+    pub fn emit_exit_signal(&mut self, cap_reg: u8, reason_reg: u8) {
+        self.emit(Instruction::abc(Opcode::ExitSignal, cap_reg, reason_reg, 0));
+    }
+
+    pub fn emit_dict_put(&mut self, dst: u8, key_reg: u8, value_reg: u8) {
+        self.emit(Instruction::abc(Opcode::DictPut, dst, key_reg, value_reg));
+    }
+
+    pub fn emit_dict_get(&mut self, dst: u8, key_reg: u8) {
+        self.emit(Instruction::abc(Opcode::DictGet, dst, key_reg, 0));
+    }
+
+    pub fn emit_dict_erase(&mut self, dst: u8, key_reg: u8) {
+        self.emit(Instruction::abc(Opcode::DictErase, dst, key_reg, 0));
+    }
+
+    /// Selective receive: tag register + `Int` payload equality.
+    pub fn emit_receive_match_eq(&mut self, dst: u8, tag_reg: u8, payload_reg: u8) {
+        self.emit(Instruction::abc(
+            Opcode::ReceiveMatchEq,
+            dst,
+            tag_reg,
+            payload_reg,
+        ));
+    }
+
+    /// Spawn `function` under this flow's supervisor. `policy` is `0..=2`.
+    pub fn emit_start_child(&mut self, dst: u8, function: u32, policy: u8) {
+        self.emit(Instruction::new(
+            Opcode::StartChild,
+            dst,
+            policy,
+            0,
+            i32::try_from(function).unwrap_or(i32::MAX),
+        ));
+    }
+
     /// Selective receive: wait for a hop whose payload wire-tag equals `kind`.
     pub fn emit_receive_match_kind(&mut self, dst: u8, kind: u8) {
         self.emit(Instruction::a_imm(

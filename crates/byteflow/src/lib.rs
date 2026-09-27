@@ -38,7 +38,10 @@
 //!   (`Pid` is identity, not an address)
 //!
 //! Also: selective receive (`ReceiveMatch` / `ReceiveMatchCorr` /
-//! `ReceiveMatchKind`), `Ask` / `AskTimeout` for correlated RPC,
+//! `ReceiveMatchKind` / `ReceiveMatchEq` / `ReceiveMatch*Timeout` for BEAM
+//! `after`), `IsAlive`, `ExitSignal` (`exit/2`), process dictionary
+//! (`DictPut` / `DictGet` / `DictErase`), `StartChild` (extends the host
+//! supervisor that started this flow), `Ask` / `AskTimeout`,
 //! [`Fn::fresh_request_id`].
 //!
 //! # FlowCap (addressing)

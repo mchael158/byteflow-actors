@@ -48,6 +48,53 @@ With [`Fn::set_trap_exit`](../src/bytecode/program.rs) /
 including `Normal` — delivers a [`TAG_SYS_EXIT`](../src/bytecode/value.rs)
 (`0xFF02`) hop (`Message::linked_exit`) instead of killing that peer.
 
+`Link` / `Unlink` ids fit in `i64` (bytecode `Int`). The counter fails
+closed (`RuntimeError::LinkIdExhausted`) instead of wrapping. Insert
+confirms both endpoints are still in the directory **after** the link
+mutex is released (`link_if_live`), so a peer that already finalized does
+not leave a zombie row. Lookup is O(1) on the pair; teardown is O(degree).
+
+## `exit/2` (`ExitSignal`, `0x6A`)
+
+[`Fn::exit_signal`](../src/bytecode/program.rs)`(cap, reason)` sends an exit
+signal to the flow named by `cap`. The Cap must carry `LINK` (a spawn Cap
+does: `ADDRESSING` includes it). `reason` is [`FlowExitReason`](../src/scheduler/monitor.rs)
+as `Int` (`0..=6`); anything else traps the caller.
+
+| Reason | Effect |
+|--------|--------|
+| `Normal` (`0`) | No-op |
+| `Killed` (`2`) | Cooperative kill. `trap_exit` does not catch it |
+| any other abnormal | `trap_exit` → `TAG_SYS_EXIT` hop; otherwise kill with that reason |
+
+Host [`Runtime::kill`](../src/scheduler/runtime.rs) / `admin_kill` stay the
+untrappable `Killed` path and do not need a Cap. Sample:
+[`samples::exit_signal`](../src/samples.rs).
+
+## Process dictionary (`0x6B`–`0x6D`)
+
+Per-flow, on the VM (not the scheduler). Keys are `Int`. Values are
+scalars only (`Unit`, `Bool`, `Int`, `Float`) so a dict entry cannot
+outlive a register heap charge. Missing key → `Unit`.
+
+| Opcode | `Fn` | BEAM |
+|--------|------|------|
+| `DictPut` | `dict_put(key, value)` → previous or `Unit` | `put/2` |
+| `DictGet` | `dict_get(key)` | `get/1` |
+| `DictErase` | `dict_erase(key)` → removed or `Unit` | `erase/1` |
+
+Sample: [`samples::process_dict`](../src/samples.rs) (no natives).
+
+## Bytecode `StartChild` (`0x6F`)
+
+[`Fn::start_child`](../src/bytecode/program.rs)`(function, RestartPolicy)`
+spawns a child on the **same** host [`Supervisor`](../src/scheduler/supervisor.rs)
+that started the caller, and writes an addressing Cap. The restart
+strategy (`OneForOne` / `OneForAll` / `RestForOne`) is the supervisor's,
+not an opcode. A flow from `Runtime::spawn` has no supervisor link, so
+`StartChild` fails that flow. Sample: [`samples::supervised_tree`](../src/samples.rs)
+(host `Supervisor::start_child` on `root`, then bytecode `start_child`).
+
 ## Registry
 
 `register_name(name, CapId)` stores a **Cap**, never a FlowId.
@@ -80,9 +127,12 @@ the Full/park race cannot park on a dead inbox (that would leak the flow).
 
 ## Kill
 
-`Runtime::kill(id)` is cooperative: a parked receiver / `WAITING_SEND`
-finalizes immediately (`FlowExitReason::Killed`); a running flow dies at
-the next quantum.
+`Runtime::kill(id)` and bytecode `ExitSignal` with reason `Killed` are
+cooperative: a parked receiver / `WAITING_SEND` finalizes immediately
+(`FlowExitReason::Killed`); a running flow dies at the next quantum.
+`ExitSignal` aimed at **self** while the flow is on a worker finalizes
+that flow immediately (the worker already holds it, so the parked-extract
+path cannot see it).
 
 ## Supervisor strategies
 

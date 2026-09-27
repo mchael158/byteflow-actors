@@ -12,6 +12,13 @@
 //! | [`atomic_actors`] | Server loop + two `Ask` clients + minted `request_id` |
 //! | [`cap_in_payload`] | Cap in hop payload is reissued to the recipient |
 //! | [`selective_receive`] | `ReceiveMatch` FIFO skip |
+//! | [`selective_receive_timeout`] | BEAM `after`: `ReceiveMatchImmTimeout` → `Unit` |
+//! | [`selective_receive_after`] | `after` still skips junk and hits the tag |
+//! | [`process_alive`] | `IsAlive` (BEAM `is_process_alive/1`) |
+//! | [`process_dict`] | process dictionary `put` / `get` / `erase` |
+//! | [`receive_match_eq`] | term equality: tag + `Int` payload |
+//! | [`exit_signal`] | BEAM `exit/2` → `DOWN` with `Fault` |
+//! | [`supervised_tree`] | bytecode `StartChild` under a host supervisor |
 //! | [`receive_match_kind`] | `ReceiveMatchKind` by payload wire-tag |
 //! | [`ask_reply`] | `Ask` RPC hop |
 //! | [`ask_timeout_expires`] | `AskTimeout` writes `Unit` when the server stays silent |
@@ -144,6 +151,186 @@ pub fn selective_receive() -> Chunk {
     p.build()
 }
 
+/// BEAM `receive … after`: nobody sends `TAG_REQ`, so the wait writes `Unit`.
+pub fn selective_receive_timeout() -> Chunk {
+    let mut p = Program::new("selective-receive-timeout");
+    p.function("main", 0, |f| {
+        let ms = f.load_i32(40);
+        let msg = f.receive_match_imm_timeout(TAG_REQ as u16, ms);
+        f.return_(msg);
+    });
+    p.build()
+}
+
+/// Selective receive + `after`: junk stays queued, `TAG_REQ` arrives in time.
+pub fn selective_receive_after() -> Chunk {
+    let mut p = Program::new("selective-receive-after");
+    let server = p.function("server", 0, |f| {
+        let ms = f.load_i32(5_000);
+        let msg = f.receive_match_imm_timeout(TAG_REQ as u16, ms);
+        let payload = f.hop_payload(msg);
+        f.add_imm(payload, 1);
+        f.send_reply(msg, TAG_REP, payload);
+        let junk = f.receive();
+        let tag = f.hop_tag(junk);
+        let is_junk = f.eq_imm(tag, TAG_JUNK);
+        let trap_lbl = f.label();
+        f.branch_if_falsy(is_junk, trap_lbl);
+        f.exit(payload);
+        f.bind(trap_lbl);
+        f.trap(2);
+    });
+    p.function("main", 0, |f| {
+        let server_cap = f.spawn(server, 0);
+        let req_id = f.load_i32(1);
+        let zero = f.load_i32(0);
+        let junk = f.hop(req_id, TAG_JUNK, zero);
+        f.cast(server_cap, junk);
+        let payload = f.load_i32(41);
+        let req = f.hop(req_id, TAG_REQ, payload);
+        f.cast(server_cap, req);
+        let reply = f.receive_match_imm(TAG_REP as u16);
+        let out = f.hop_payload(reply);
+        f.return_(out);
+    });
+    p.build()
+}
+
+/// BEAM `is_process_alive/1`: a parked child is live; after `DOWN`, its Cap is not.
+pub fn process_alive() -> Chunk {
+    let mut p = Program::new("process-alive");
+    let parked = p.function("parked", 0, |f| {
+        let _msg = f.receive();
+        let z = f.load_i32(0);
+        f.return_(z);
+    });
+    p.function("main", 0, |f| {
+        let live_cap = f.spawn(parked, 0);
+        let was_live = f.is_alive(live_cap);
+        let _mon = f.monitor(live_cap);
+        let rid = f.load_i32(1);
+        let z = f.load_i32(0);
+        let hop = f.hop(rid, TAG_REQ, z);
+        f.cast(live_cap, hop);
+        let _down = f.receive_match_imm(crate::TAG_SYS_DOWN);
+        let now_dead = f.is_alive(live_cap);
+        let bad = f.label();
+        let ok = f.label();
+        f.branch_if_falsy(was_live, bad);
+        f.branch_if_falsy(now_dead, ok);
+        f.bind(bad);
+        f.trap(1);
+        f.bind(ok);
+        let one = f.load_i32(1);
+        f.return_(one);
+    });
+    p.build()
+}
+
+/// Process dictionary (`put` / `get` / `erase`): store 41, add 1 in a
+/// register, erase still yields the stored 41. Returns `42 + 41 = 83`.
+pub fn process_dict() -> Chunk {
+    let mut p = Program::new("process-dict");
+    p.function("main", 0, |f| {
+        let key = f.load_i32(1);
+        let value = f.load_i32(41);
+        let _prev = f.dict_put(key, value);
+        let got = f.dict_get(key);
+        f.add_imm(got, 1);
+        let erased = f.dict_erase(key);
+        let sum = f.add(got, erased);
+        f.return_(sum);
+    });
+    p.build()
+}
+
+/// Term equality receive: skip a `TAG_REQ` whose payload is `0`, take `41`.
+pub fn receive_match_eq() -> Chunk {
+    let mut p = Program::new("receive-match-eq");
+    let server = p.function("server", 0, |f| {
+        let tag = f.load_i32(TAG_REQ);
+        let want = f.load_i32(41);
+        let msg = f.receive_match_eq(tag, want);
+        let payload = f.hop_payload(msg);
+        f.add_imm(payload, 1);
+        f.send_reply(msg, TAG_REP, payload);
+        let junk = f.receive();
+        let got = f.hop_payload(junk);
+        let zero = f.eq_imm(got, 0);
+        let trap_lbl = f.label();
+        f.branch_if_falsy(zero, trap_lbl);
+        f.exit(payload);
+        f.bind(trap_lbl);
+        f.trap(2);
+    });
+    p.function("main", 0, |f| {
+        let server_cap = f.spawn(server, 0);
+        let req_id = f.load_i32(1);
+        let zero = f.load_i32(0);
+        let junk = f.hop(req_id, TAG_REQ, zero);
+        f.cast(server_cap, junk);
+        let payload = f.load_i32(41);
+        let req = f.hop(req_id, TAG_REQ, payload);
+        f.cast(server_cap, req);
+        let reply = f.receive_match_imm(TAG_REP as u16);
+        let out = f.hop_payload(reply);
+        f.return_(out);
+    });
+    p.build()
+}
+
+/// BEAM `exit/2`: child parked on receive dies with `Fault`; monitor payload is `3`.
+pub fn exit_signal() -> Chunk {
+    let mut p = Program::new("exit-signal");
+    let parked = p.function("parked", 0, |f| {
+        let _msg = f.receive();
+        let z = f.load_i32(0);
+        f.return_(z);
+    });
+    p.function("main", 0, |f| {
+        let cap = f.spawn(parked, 0);
+        let _mon = f.monitor(cap);
+        let reason = f.load_i32(crate::FlowExitReason::Fault as i32);
+        f.exit_signal(cap, reason);
+        let down = f.receive_match_imm(crate::TAG_SYS_DOWN);
+        let payload = f.hop_payload(down);
+        f.return_(payload);
+    });
+    p.build()
+}
+
+/// Root (started by a host [`crate::Supervisor`]) starts a parked worker,
+/// then `exit/2`s it. Returns `1` when the worker was alive and `DOWN` is `Fault`.
+pub fn supervised_tree() -> Chunk {
+    let mut p = Program::new("supervised-tree");
+    let worker = p.function("worker", 0, |f| {
+        let _msg = f.receive();
+        let z = f.load_i32(0);
+        f.return_(z);
+    });
+    p.function("root", 0, |f| {
+        let cap = f.start_child(worker, crate::RestartPolicy::Never);
+        let alive = f.is_alive(cap);
+        let _mon = f.monitor(cap);
+        let reason = f.load_i32(crate::FlowExitReason::Fault as i32);
+        f.exit_signal(cap, reason);
+        let down = f.receive_match_imm(crate::TAG_SYS_DOWN);
+        let payload = f.hop_payload(down);
+        let fault = f.eq_imm(payload, crate::FlowExitReason::Fault as i32);
+        let bad = f.label();
+        let ok = f.label();
+        f.branch_if_falsy(alive, bad);
+        f.branch_if_falsy(fault, bad);
+        f.jump(ok);
+        f.bind(bad);
+        f.trap(1);
+        f.bind(ok);
+        let one = f.load_i32(1);
+        f.return_(one);
+    });
+    p.build()
+}
+
 /// Selective receive by payload wire-tag (`ReceiveMatchKind`): skip hops
 /// whose payload is not `Int` (tag 2), then reply with that payload.
 pub fn receive_match_kind() -> Chunk {
@@ -239,13 +426,11 @@ pub fn ask_target_exits() -> Chunk {
 pub fn server_loop() -> Chunk {
     let mut p = Program::new("server-loop");
     let server = p.function("server", 0, |f| {
-        let loop_lbl = f.label();
-        f.bind(loop_lbl);
-        let req = f.receive_match_imm(TAG_REQ as u16);
-        let payload = f.hop_payload(req);
-        f.add_imm(payload, 1);
-        f.send_reply(req, TAG_REP, payload);
-        f.jump(loop_lbl);
+        f.actor_loop(TAG_REQ as u16, |f, req| {
+            let payload = f.hop_payload(req);
+            f.add_imm(payload, 1);
+            f.send_reply(req, TAG_REP, payload);
+        });
     });
     p.function("main", 0, |f| {
         let server_cap = f.spawn(server, 0);
@@ -267,13 +452,11 @@ pub fn named_service() -> Chunk {
     let server = p.function("server", 0, |f| {
         let name = f.load_str("svc");
         f.register_name(name);
-        let loop_lbl = f.label();
-        f.bind(loop_lbl);
-        let req = f.receive_match_imm(TAG_REQ as u16);
-        let payload = f.hop_payload(req);
-        f.add_imm(payload, 1);
-        f.send_reply(req, TAG_REP, payload);
-        f.jump(loop_lbl);
+        f.actor_loop(TAG_REQ as u16, |f, req| {
+            let payload = f.hop_payload(req);
+            f.add_imm(payload, 1);
+            f.send_reply(req, TAG_REP, payload);
+        });
     });
     p.function("main", 0, |f| {
         let _server = f.spawn(server, 0);
@@ -307,13 +490,11 @@ pub fn atomic_actors() -> Chunk {
     const N: i32 = 8;
     let mut p = Program::new("atomic-actors");
     let server = p.function("server", 0, |f| {
-        let loop_lbl = f.label();
-        f.bind(loop_lbl);
-        let req = f.receive_match_imm(TAG_REQ as u16);
-        let payload = f.hop_payload(req);
-        f.add_imm(payload, 1);
-        f.send_reply(req, TAG_REP, payload);
-        f.jump(loop_lbl);
+        f.actor_loop(TAG_REQ as u16, |f, req| {
+            let payload = f.hop_payload(req);
+            f.add_imm(payload, 1);
+            f.send_reply(req, TAG_REP, payload);
+        });
     });
     let client = p.function("client", 2, |f| {
         let server_cap = f.reg(0);
@@ -599,6 +780,120 @@ mod tests {
         rt.shutdown();
         assert!(
             matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selective_receive_timeout_writes_unit() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = selective_receive_timeout();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Unit)),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selective_receive_after_hits_tag() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = selective_receive_after();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn process_alive_tracks_live_then_down() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = process_alive();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(1))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn process_dict_put_get_erase() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = process_dict();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny(chunk)?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(83))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receive_match_eq_skips_other_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = receive_match_eq();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exit_signal_down_is_fault() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = exit_signal();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(
+                outcome,
+                FlowOutcome::Completed(Value::Int(n))
+                    if n == i64::from(crate::FlowExitReason::Fault as u8)
+            ),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn supervised_tree_start_child_then_exit() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = supervised_tree();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let root = rt.function_index("root").ok_or("root")?;
+        let sup = rt.supervisor()?;
+        let outcome = sup
+            .start_child(
+                crate::ChildSpec::new("root", root).restart(crate::RestartPolicy::Never),
+            )?
+            .join();
+        sup.shutdown();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(1))),
             "got {outcome:?}"
         );
         Ok(())

@@ -39,8 +39,7 @@ pub enum VmResult {
     SelfPid { dest_reg: u8 },
     /// `Send` — Atomic Hop to a **capability** target (requires SEND).
     Send { target_cap: CapId, message: Value },
-    /// `Receive` / `ReceiveTimeout` / `ReceiveMatch` / `ReceiveMatchImm` /
-    /// `ReceiveMatchCorr` / `ReceiveMatchCorrImm` / `ReceiveMatchKind`.
+    /// `Receive` / `ReceiveTimeout` / `ReceiveMatch*` (including `*Timeout`).
     Receive {
         dest_reg: u8,
         timeout: Option<Duration>,
@@ -49,6 +48,9 @@ pub enum VmResult {
         /// When set, wait for a hop whose `payload.wire_tag()` equals this
         /// BFV0 tag (`0..=8`). Independent of [`Self::Receive::match_tag`].
         match_payload_kind: Option<u8>,
+        /// When set together with [`Self::Receive::match_tag`], the hop's
+        /// payload must be that `Int` (term equality, not a full pattern).
+        match_payload_eq: Option<i64>,
     },
     /// `Ask` / `AskTimeout` — RPC hop to a **capability** target (requires ASK).
     Ask {
@@ -80,6 +82,16 @@ pub enum VmResult {
     RegisterName { name: Arc<str> },
     /// `Whereis ra, rb` — resolve `r[b]` (`Str`) to a SEND Cap or Unit.
     Whereis { dest_reg: u8, name: Arc<str> },
+    /// `IsAlive ra, rb` — write `Bool` into `r[a]` for Cap `target_cap`.
+    IsAlive { dest_reg: u8, target_cap: CapId },
+    /// `ExitSignal` — BEAM `exit/2`. `reason` is a [`crate::FlowExitReason`] code.
+    ExitSignal { target_cap: CapId, reason: u64 },
+    /// `StartChild` — spawn `function` under this flow's supervisor.
+    StartChild {
+        dest_reg: u8,
+        function: u32,
+        policy: u8,
+    },
     /// `Delegate ra, rb` — attenuate Cap `r[b]` into `r[a]`.
     Delegate {
         dest_reg: u8,

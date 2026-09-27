@@ -381,6 +381,11 @@ impl<'a> Fn<'a> {
         self.b.emit_send(target_cap.0, msg.0);
     }
 
+    /// Fire-and-forget hop (BEAM `!` / `gen_server:cast`).
+    pub fn cast(&mut self, target_cap: Reg, msg: Reg) {
+        self.send(target_cap, msg);
+    }
+
     pub fn receive(&mut self) -> Reg {
         let msg = self.local();
         self.b.emit_receive(msg.0);
@@ -403,6 +408,82 @@ impl<'a> Fn<'a> {
         let msg = self.local();
         self.b.emit_receive_match_imm(msg.0, tag);
         msg
+    }
+
+    /// Selective receive with BEAM `after`: `Unit` if `millis` elapses first.
+    pub fn receive_match_timeout(&mut self, tag: Reg, millis: Reg) -> Reg {
+        let msg = self.local();
+        self.b
+            .emit_receive_match_timeout(msg.0, tag.0, millis.0);
+        msg
+    }
+
+    /// Immediate-tag selective receive with BEAM `after`.
+    pub fn receive_match_imm_timeout(&mut self, tag: u16, millis: Reg) -> Reg {
+        let msg = self.local();
+        self.b
+            .emit_receive_match_imm_timeout(msg.0, tag, millis.0);
+        msg
+    }
+
+    /// BEAM `is_process_alive/1` for a Cap this flow holds.
+    pub fn is_alive(&mut self, cap: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_is_alive(dst.0, cap.0);
+        dst
+    }
+
+    /// BEAM `exit/2`. `reason` is a [`crate::FlowExitReason`] as `Int` (`0..=6`).
+    /// Needs `LINK` on `cap`. `Normal` does nothing. `Killed` ignores `trap_exit`.
+    pub fn exit_signal(&mut self, cap: Reg, reason: Reg) {
+        self.b.emit_exit_signal(cap.0, reason.0);
+    }
+
+    /// Process dictionary `put/2`. Returns the previous value or `Unit`.
+    /// Value must be a scalar (Unit, Bool, Int, Float).
+    pub fn dict_put(&mut self, key: Reg, value: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_dict_put(dst.0, key.0, value.0);
+        dst
+    }
+
+    /// Process dictionary `get/1`. Missing key → `Unit`.
+    pub fn dict_get(&mut self, key: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_dict_get(dst.0, key.0);
+        dst
+    }
+
+    /// Process dictionary `erase/1`. Returns the removed value or `Unit`.
+    pub fn dict_erase(&mut self, key: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_dict_erase(dst.0, key.0);
+        dst
+    }
+
+    /// Selective receive: application tag **and** `Int` payload equality.
+    pub fn receive_match_eq(&mut self, tag: Reg, payload: Reg) -> Reg {
+        let msg = self.local();
+        self.b.emit_receive_match_eq(msg.0, tag.0, payload.0);
+        msg
+    }
+
+    /// OTP child of this flow's supervisor. Caller must have been started
+    /// by [`crate::Supervisor`]. `policy` is Always / OnFailure / Never.
+    pub fn start_child(&mut self, function: FuncId, policy: crate::RestartPolicy) -> Reg {
+        let dst = self.local();
+        self.b
+            .emit_start_child(dst.0, function, policy.as_u8());
+        dst
+    }
+
+    /// Server loop: `receive_match_imm(tag)` → `body` → jump back.
+    pub fn actor_loop(&mut self, tag: u16, mut body: impl FnMut(&mut Self, Reg)) {
+        let loop_lbl = self.label();
+        self.bind(loop_lbl);
+        let req = self.receive_match_imm(tag);
+        body(self, req);
+        self.jump(loop_lbl);
     }
 
     /// Next per-flow correlation id (`Int`, starts at 1).

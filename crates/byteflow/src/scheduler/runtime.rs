@@ -644,7 +644,9 @@ impl Runtime {
         }
         self.require_live(a)?;
         self.require_live(b)?;
-        match self.shared.links.link(a, b) {
+        match self.shared.links.link_if_live(a, b, |id| {
+            self.shared.directory.lookup(id).map(|m| m.is_some())
+        }) {
             Ok(inner) => inner,
             Err(e) => Err(self.unavailable(e)),
         }

@@ -25,30 +25,30 @@ impl std::fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
-pub fn check_link(cap: &Cap, cell: &RevocationCell, target: u64) -> Result<(), LinkError> {
+fn check_flow_right(
+    cap: &Cap,
+    cell: &RevocationCell,
+    target: u64,
+    right: CapRights,
+) -> Result<(), LinkError> {
     if !cap.is_valid(cell) {
         return Err(LinkError::CapRevoked);
     }
     if cap.target != CapTarget::Flow(target) {
         return Err(LinkError::WrongTarget);
     }
-    if !cap.rights.contains(CapRights::LINK) {
+    if !cap.rights.contains(right) {
         return Err(LinkError::MissingRight);
     }
     Ok(())
 }
 
+pub fn check_link(cap: &Cap, cell: &RevocationCell, target: u64) -> Result<(), LinkError> {
+    check_flow_right(cap, cell, target, CapRights::LINK)
+}
+
 pub fn check_monitor(cap: &Cap, cell: &RevocationCell, target: u64) -> Result<(), LinkError> {
-    if !cap.is_valid(cell) {
-        return Err(LinkError::CapRevoked);
-    }
-    if cap.target != CapTarget::Flow(target) {
-        return Err(LinkError::WrongTarget);
-    }
-    if !cap.rights.contains(CapRights::MONITOR) {
-        return Err(LinkError::MissingRight);
-    }
-    Ok(())
+    check_flow_right(cap, cell, target, CapRights::MONITOR)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

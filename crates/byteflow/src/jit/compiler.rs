@@ -577,6 +577,15 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::ReceiveTimeout
             | Opcode::ReceiveMatch
             | Opcode::ReceiveMatchImm
+            | Opcode::ReceiveMatchTimeout
+            | Opcode::ReceiveMatchImmTimeout
+            | Opcode::IsAlive
+            | Opcode::ExitSignal
+            | Opcode::DictPut
+            | Opcode::DictGet
+            | Opcode::DictErase
+            | Opcode::ReceiveMatchEq
+            | Opcode::StartChild
             | Opcode::Ask
             | Opcode::AskTimeout
             | Opcode::Monitor
