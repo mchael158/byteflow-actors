@@ -25,7 +25,7 @@ fn ping_pong_chunk() -> Chunk {
         f.exit(payload);
     });
     program.function("main", 0, |f| {
-        let child = f.spawn(pong, 0);
+        let child = f.spawn(pong, &[]);
         let payload = f.load_i32(1);
         let req = f.hop_fresh(TAG_PING, payload);
         let rid = f.hop_request_id(req);

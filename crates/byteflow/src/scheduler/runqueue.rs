@@ -50,6 +50,13 @@ impl<T> Injector<T> {
             Err(_) => Steal::Empty,
         }
     }
+
+    pub(crate) fn drain(&self) -> Vec<T> {
+        match sync_lock::lock(&self.inner, "Injector::drain") {
+            Ok(mut q) => q.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 impl<T> Default for Injector<T> {
@@ -103,6 +110,13 @@ impl<T> Stealer<T> {
                 None => Steal::Empty,
             },
             Err(_) => Steal::Empty,
+        }
+    }
+
+    pub(crate) fn drain(&self) -> Vec<T> {
+        match sync_lock::lock(&self.queue, "Stealer::drain") {
+            Ok(mut q) => q.drain(..).collect(),
+            Err(_) => Vec::new(),
         }
     }
 }

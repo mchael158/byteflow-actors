@@ -49,11 +49,10 @@ impl FlowHandle {
     /// than deadlocking the pool.
     ///
     /// Returns [`FlowOutcome::Failed`] rather than blocking forever if the
-    /// flow was destroyed without producing an outcome — most commonly
-    /// `Runtime::shutdown` while the flow was suspended, since shutdown does
-    /// not drain flows out of the timer or the worker deques. The message
-    /// comes from [`super::error::RuntimeError::Abandoned`], so it is
-    /// distinguishable from a flow that genuinely faulted.
+    /// flow was destroyed without producing an outcome.
+    /// [`super::runtime::Runtime::shutdown`] finalizes remaining flows
+    /// (`runtime shutdown`); a dropped sender without finalize is
+    /// [`super::error::RuntimeError::Abandoned`].
     pub fn join(self) -> FlowOutcome {
         if is_on_worker() {
             return FlowOutcome::Failed(JoinError::CalledFromWorker.to_string());

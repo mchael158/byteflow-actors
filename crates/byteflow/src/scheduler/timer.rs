@@ -141,6 +141,23 @@ impl TimerWheel {
         self.cvar.notify_all();
     }
 
+    /// Take every sleeper out of the heap. Receive-timeout entries are
+    /// dropped: those flows live in the mailbox and are drained there.
+    pub(crate) fn drain(&self) -> Vec<Box<Flow>> {
+        let mut flows = Vec::new();
+        match sync_lock::lock(&self.heap, "TimerWheel::drain") {
+            Ok(mut heap) => {
+                while let Some(Reverse(entry)) = heap.pop() {
+                    if let TimerPayload::WakeSleeper(flow) = entry.payload {
+                        flows.push(flow);
+                    }
+                }
+            }
+            Err(e) => report_fault(e),
+        }
+        flows
+    }
+
     /// Runs on a single dedicated OS thread (spawned by
     /// [`super::runtime::Runtime`]) for the life of the runtime.
     /// Pops every entry whose deadline has passed, resolves it into a

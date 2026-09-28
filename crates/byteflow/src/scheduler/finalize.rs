@@ -86,6 +86,127 @@ impl KillSignals {
     }
 }
 
+pub(crate) fn kill_outcome_message(reason: FlowExitReason) -> String {
+    match reason {
+        FlowExitReason::Link => format!("linked exit ({reason})"),
+        FlowExitReason::Killed => format!("killed ({reason})"),
+        FlowExitReason::Shutdown => "runtime shutdown".into(),
+        other => format!("exit ({other})"),
+    }
+}
+
+/// After a park, consume a pending kill and finalize if we still own the
+/// waiter. If a concurrent `extract_for_kill` already took the flow, put
+/// the signal back so the worker quantum / extractor still sees it.
+fn take_kill_reason(shared: &Shared, id: FlowId) -> Option<FlowExitReason> {
+    match shared.kill_signals.take(id) {
+        Ok(reason) => reason,
+        Err(e) => {
+            report_fault(e);
+            None
+        }
+    }
+}
+
+fn restore_kill_reason(shared: &Shared, id: FlowId, reason: FlowExitReason) {
+    if let Err(e) = shared.kill_signals.set(id, reason) {
+        report_fault(e);
+    }
+}
+
+/// Receive / Ask park just installed `id` on `mailbox`. Close the window
+/// where `request_kill` set the signal before `take_parked` could see it.
+pub(crate) fn finalize_if_killed(
+    shared: &Shared,
+    mailbox: &super::mailbox::Mailbox,
+    id: FlowId,
+) -> bool {
+    let Some(reason) = take_kill_reason(shared, id) else {
+        return false;
+    };
+    match mailbox.take_parked() {
+        Ok(Some(flow)) => {
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed(kill_outcome_message(reason)),
+                reason,
+            );
+            true
+        }
+        Ok(None) => {
+            restore_kill_reason(shared, id, reason);
+            false
+        }
+        Err(e) => {
+            report_fault(e);
+            restore_kill_reason(shared, id, reason);
+            false
+        }
+    }
+}
+
+/// Same window for a sender just parked in the *target* inbox.
+pub(crate) fn finalize_if_killed_waiting_send(
+    shared: &Shared,
+    target_mailbox: &super::mailbox::Mailbox,
+    sender: FlowId,
+) -> bool {
+    let Some(reason) = take_kill_reason(shared, sender) else {
+        return false;
+    };
+    match target_mailbox.take_waiting_sender(sender) {
+        Ok(Some(flow)) => {
+            if let Err(e) = shared.waiting_send_at.remove(sender) {
+                report_fault(e);
+            }
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed(kill_outcome_message(reason)),
+                reason,
+            );
+            true
+        }
+        Ok(None) => {
+            restore_kill_reason(shared, sender, reason);
+            false
+        }
+        Err(e) => {
+            report_fault(e);
+            restore_kill_reason(shared, sender, reason);
+            false
+        }
+    }
+}
+
+/// Same window after `HostAwaitIndex::park`.
+pub(crate) fn finalize_if_killed_host_await(shared: &Shared, id: FlowId) -> bool {
+    let Some(reason) = take_kill_reason(shared, id) else {
+        return false;
+    };
+    match shared.host_awaits.take_flow(id) {
+        Ok(Some(flow)) => {
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed(kill_outcome_message(reason)),
+                reason,
+            );
+            true
+        }
+        Ok(None) => {
+            restore_kill_reason(shared, id, reason);
+            false
+        }
+        Err(e) => {
+            report_fault(e);
+            restore_kill_reason(shared, id, reason);
+            false
+        }
+    }
+}
+
 /// sender FlowId → target FlowId whose mailbox holds a `WAITING_SEND`.
 pub struct WaitingSendIndex {
     inner: Mutex<HashMap<FlowId, FlowId>>,
@@ -598,7 +719,7 @@ pub(crate) fn request_kill(shared: &Shared, id: FlowId, reason: FlowExitReason) 
         finalize_flow(
             shared,
             flow,
-            FlowOutcome::Failed(format!("killed ({reason})")),
+            FlowOutcome::Failed(kill_outcome_message(reason)),
             reason,
         );
     }

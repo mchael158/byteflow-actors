@@ -78,7 +78,8 @@ impl Program {
 
     /// Define a function and run `body` against a fresh [`Fn`] context.
     ///
-    /// Returns the function index for [`Fn::spawn`] / [`Fn::call`].
+    /// Returns the function index for [`Fn::spawn`] / [`Fn::call`]
+    /// (pass argument registers as `&[Reg]`, not a bare argc).
     pub fn function(
         &mut self,
         name: impl Into<String>,
@@ -178,6 +179,43 @@ impl<'a> Fn<'a> {
             base: Reg(base_idx),
             len: count,
         }
+    }
+
+    /// Fresh contiguous locals `r[start .. start+count]`, or `None` if that
+    /// window would leave the `u8` register space.
+    fn alloc_contig(&mut self, count: u8) -> Option<Reg> {
+        if count == 0 {
+            return None;
+        }
+        let start = self.next_reg;
+        if u16::from(start) + u16::from(count) > 256 {
+            return None;
+        }
+        for i in 0..count {
+            let r = self.local();
+            if r.0 != start.saturating_add(i) {
+                return None;
+            }
+        }
+        Some(Reg(start))
+    }
+
+    fn copy_window(&mut self, base: Reg, args: &[Reg]) {
+        for (i, &src) in args.iter().enumerate() {
+            let slot = match u8::try_from(i) {
+                Ok(off) => Reg(base.0.saturating_add(off)),
+                Err(_) => continue,
+            };
+            if slot != src {
+                self.b.emit_move(slot.0, src.0);
+            }
+        }
+    }
+
+    /// Fail-closed pack: Trap so the VM never runs a half-built Call/Spawn.
+    fn fail_pack(&mut self) -> Reg {
+        self.b.emit_trap(0);
+        self.local()
     }
 
     /// Load a small immediate into a new local.
@@ -304,8 +342,26 @@ impl<'a> Fn<'a> {
         self.b.emit_return(value.0);
     }
 
-    pub fn call(&mut self, function: FuncId, argc: u8) -> Reg {
-        let dst = self.local();
+    /// Call `function` with `args` packed into a fresh `Call` window.
+    ///
+    /// The ISA reads `r[dst .. dst+argc]` and writes the result to `r[dst]`.
+    /// This copies `args` into that window so `call(fn, &[a, b])` after
+    /// `load_i32` actually passes those values — a bare argc does not.
+    pub fn call(&mut self, function: FuncId, args: &[Reg]) -> Reg {
+        let Some(argc) = u8::try_from(args.len()).ok() else {
+            return self.fail_pack();
+        };
+        let dst = if argc == 0 {
+            self.local()
+        } else {
+            match self.alloc_contig(argc) {
+                Some(base) => {
+                    self.copy_window(base, args);
+                    base
+                }
+                None => return self.fail_pack(),
+            }
+        };
         self.b.emit_call(dst.0, function, argc);
         dst
     }
@@ -344,36 +400,80 @@ impl<'a> Fn<'a> {
         self.self_cap()
     }
 
-    pub fn spawn(&mut self, function: FuncId, argc: u8) -> Reg {
-        self.spawn_with_rights(function, argc, crate::bytecode::CapRights::FLOW)
+    /// Spawn `function` with `args` packed into `r[cap+1 .. cap+1+argc]`.
+    ///
+    /// The ISA writes the child Cap into `r[cap]` and reads arguments from
+    /// the following slots — not from the registers you just `load_*`'d.
+    /// This allocates that window and copies `args` into it.
+    pub fn spawn(&mut self, function: FuncId, args: &[Reg]) -> Reg {
+        self.spawn_with_rights(function, args, crate::bytecode::CapRights::FLOW)
     }
 
     /// Spawn a child that receives only `rights` ⊆ parent authority.
     pub fn spawn_with_rights(
         &mut self,
         function: FuncId,
-        argc: u8,
+        args: &[Reg],
         rights: crate::bytecode::CapRights,
     ) -> Reg {
-        let cap = self.local();
+        let Some(argc) = u8::try_from(args.len()).ok() else {
+            return self.fail_pack();
+        };
+        let Some(window) = argc.checked_add(1) else {
+            return self.fail_pack();
+        };
+        let Some(cap) = self.alloc_contig(window) else {
+            return self.fail_pack();
+        };
+        self.copy_window(Reg(cap.0.saturating_add(1)), args);
         self.b.emit_spawn_with_rights(cap.0, function, argc, rights);
         cap
     }
 
     /// Spawn with `rights = NONE` (confined by default).
-    pub fn spawn_confined(&mut self, function: FuncId, argc: u8) -> Reg {
-        self.spawn_with_rights(function, argc, crate::bytecode::CapRights::NONE)
+    pub fn spawn_confined(&mut self, function: FuncId, args: &[Reg]) -> Reg {
+        self.spawn_with_rights(function, args, crate::bytecode::CapRights::NONE)
     }
 
-    /// Spawn into an explicit destination register (e.g. `reg(255)`).
+    /// Spawn into an explicit destination. Args must already sit in
+    /// `r[dst+1 .. dst+1+argc]` (see [`Self::window`]). Prefer [`Self::spawn`].
     pub fn spawn_at(&mut self, dst: Reg, function: FuncId, argc: u8) {
         self.b.emit_spawn(dst.0, function, argc);
     }
 
+    /// Spawn into `dst` with an explicit rights mask. Same packing contract
+    /// as [`Self::spawn_at`].
+    pub fn spawn_at_with_rights(
+        &mut self,
+        dst: Reg,
+        function: FuncId,
+        argc: u8,
+        rights: crate::bytecode::CapRights,
+    ) {
+        self.b
+            .emit_spawn_with_rights(dst.0, function, argc, rights);
+    }
+
     /// Attenuate `src` into a new Cap (rights mask is an immediate).
+    /// Native mask is unchanged (`Delegate.c = 255`).
     pub fn delegate(&mut self, src: Reg, rights: crate::bytecode::CapRights) -> Reg {
         let dst = self.local();
         self.b.emit_delegate(dst.0, src.0, rights);
+        dst
+    }
+
+    /// Like [`Self::delegate`], but AND the native mask from `native_cap`
+    /// (`Delegate.c` is that register, not 255). `native_cap` must carry
+    /// [`crate::CapRights::NATIVE`].
+    pub fn delegate_with_native(
+        &mut self,
+        src: Reg,
+        rights: crate::bytecode::CapRights,
+        native_cap: Reg,
+    ) -> Reg {
+        let dst = self.local();
+        self.b
+            .emit_delegate_with_native(dst.0, src.0, rights, Some(native_cap.0));
         dst
     }
 
@@ -799,6 +899,84 @@ mod tests {
         crate::verify(&chunk)?;
         assert!(chunk.functions.iter().any(|f| f.name == "main"));
         assert!(chunk.functions.iter().any(|f| f.name == "pong"));
+        Ok(())
+    }
+
+    #[test]
+    fn call_passes_loaded_ints() -> TestResult {
+        let mut program = Program::new("call-args");
+        let add = program.function("add", 2, |f| {
+            let a = f.reg(0);
+            let b = f.reg(1);
+            let sum = f.add(a, b);
+            f.return_(sum);
+        });
+        let main = program.function("main", 0, |f| {
+            let a = f.load_i32(10);
+            let b = f.load_i32(32);
+            let out = f.call(add, &[a, b]);
+            f.return_(out);
+        });
+        let chunk = program.build();
+        crate::verify(&chunk)?;
+        let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), main, &[])?;
+        assert!(matches!(
+            vm.run(10_000),
+            VmResult::Complete(Value::Int(42))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_gathers_loaded_ints() -> TestResult {
+        let mut program = Program::new("spawn-args");
+        let child = program.function("child", 2, |f| {
+            let a = f.reg(0);
+            f.return_(a);
+        });
+        let main = program.function("main", 0, |f| {
+            let a = f.load_i32(10);
+            let b = f.load_i32(32);
+            let _cap = f.spawn(child, &[a, b]);
+            f.halt();
+        });
+        let chunk = program.build();
+        crate::verify(&chunk)?;
+        let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), main, &[])?;
+        match vm.run(10_000) {
+            VmResult::Spawn {
+                function,
+                args,
+                ..
+            } => {
+                assert_eq!(function, child);
+                assert_eq!(args, vec![Value::Int(10), Value::Int(32)]);
+            }
+            other => return Err(format!("expected Spawn, got {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delegate_with_native_sets_c() -> TestResult {
+        let mut program = Program::new("delegate-native");
+        program.function("main", 0, |f| {
+            let src = f.self_cap();
+            let native = f.self_cap();
+            let _rights_only = f.delegate(src, crate::bytecode::CapRights::SEND);
+            let _narrowed =
+                f.delegate_with_native(src, crate::bytecode::CapRights::SEND, native);
+            f.return_(src);
+        });
+        let chunk = program.build();
+        let delegates: Vec<_> = chunk
+            .code
+            .iter()
+            .filter(|i| i.op == Opcode::Delegate)
+            .collect();
+        assert_eq!(delegates.len(), 2);
+        assert_eq!(delegates[0].c, 255);
+        assert_ne!(delegates[1].c, 255);
         Ok(())
     }
 }

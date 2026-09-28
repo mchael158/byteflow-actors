@@ -4,6 +4,34 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Kill vs park:** after `park_filter` / `park_sender` / `HostAwait` park,
+  the worker re-reads `kill_signals` and finalizes if the flow is still
+  owned. Closes the window where `request_kill` set the signal before the
+  waiter was parked (receive without timeout stayed a zombie).
+- **`Runtime::shutdown`:** after joining workers and the timer, drain
+  HostAwait, timer sleepers, injector, worker deques and directory
+  mailboxes through `finalize_flow(..., Shutdown)`. Joiners get
+  `runtime shutdown` instead of `Abandoned`; links and monitors fire.
+
+### Changed
+
+- **`Fn::call` / `Fn::spawn`:** take `&[Reg]` and pack the ISA window
+  (`Call` → `r[dst..]`, `Spawn` → `r[dst+1..]`). A bare argc after
+  `load_i32` did not pass those values. `spawn_confined` /
+  `spawn_with_rights` follow the same contract. `spawn_at` stays the
+  pre-packed form.
+
+### Added
+
+- **`Fn::delegate_with_native`:** emits `Delegate.c` as the native-mask
+  Cap (`c ≠ 255`). `Fn::delegate` remains rights-only (`c = 255`).
+- **`Fn::spawn_at_with_rights`:** packed-window spawn with an explicit
+  rights mask.
+
+## [0.9.8] — 2026-09-27
+
 ### Added
 
 - **BEAM `receive … after`:** `Opcode::ReceiveMatchTimeout` (`0x67`) and

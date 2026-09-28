@@ -79,7 +79,7 @@ pub fn ping_pong() -> Chunk {
         f.exit(payload);
     });
     p.function("main", 0, |f| {
-        let child = f.spawn(pong, 0);
+        let child = f.spawn(pong, &[]);
         let payload = f.load_i32(1);
         let req = f.hop_fresh(TAG_PING, payload);
         let rid = f.hop_request_id(req);
@@ -103,7 +103,7 @@ pub fn atomic_request_reply() -> Chunk {
         f.exit(payload);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let payload = f.load_i32(41);
         let req = f.hop_fresh(TAG_REQ, payload);
         let rid = f.hop_request_id(req);
@@ -136,7 +136,7 @@ pub fn selective_receive() -> Chunk {
         f.trap(2);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let zero = f.load_i32(0);
         let junk = f.hop(req_id, TAG_JUNK, zero);
@@ -181,7 +181,7 @@ pub fn selective_receive_after() -> Chunk {
         f.trap(2);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let zero = f.load_i32(0);
         let junk = f.hop(req_id, TAG_JUNK, zero);
@@ -205,7 +205,7 @@ pub fn process_alive() -> Chunk {
         f.return_(z);
     });
     p.function("main", 0, |f| {
-        let live_cap = f.spawn(parked, 0);
+        let live_cap = f.spawn(parked, &[]);
         let was_live = f.is_alive(live_cap);
         let _mon = f.monitor(live_cap);
         let rid = f.load_i32(1);
@@ -264,7 +264,7 @@ pub fn receive_match_eq() -> Chunk {
         f.trap(2);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let zero = f.load_i32(0);
         let junk = f.hop(req_id, TAG_REQ, zero);
@@ -288,7 +288,7 @@ pub fn exit_signal() -> Chunk {
         f.return_(z);
     });
     p.function("main", 0, |f| {
-        let cap = f.spawn(parked, 0);
+        let cap = f.spawn(parked, &[]);
         let _mon = f.monitor(cap);
         let reason = f.load_i32(crate::FlowExitReason::Fault as i32);
         f.exit_signal(cap, reason);
@@ -344,7 +344,7 @@ pub fn receive_match_kind() -> Chunk {
         f.exit(payload);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let decoy = f.load_str("skip-me");
         let junk = f.hop(req_id, TAG_JUNK, decoy);
@@ -370,7 +370,7 @@ pub fn ask_reply() -> Chunk {
         f.exit(payload);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let payload = f.load_i32(41);
         let req = f.hop_fresh(TAG_REQ, payload);
         let reply = f.ask(server_cap, req);
@@ -391,7 +391,7 @@ pub fn ask_timeout_expires() -> Chunk {
         f.return_(zero);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let payload = f.load_i32(0);
         let req = f.hop(req_id, TAG_REQ, payload);
@@ -411,7 +411,7 @@ pub fn ask_target_exits() -> Chunk {
         f.return_(z);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let req_id = f.load_i32(1);
         let payload = f.load_i32(0);
         let req = f.hop(req_id, TAG_REQ, payload);
@@ -433,7 +433,7 @@ pub fn server_loop() -> Chunk {
         });
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let payload = f.load_i32(41);
         let req = f.hop_fresh(TAG_REQ, payload);
         f.send(server_cap, req);
@@ -459,7 +459,7 @@ pub fn named_service() -> Chunk {
         });
     });
     p.function("main", 0, |f| {
-        let _server = f.spawn(server, 0);
+        let _server = f.spawn(server, &[]);
         let name = f.load_str("svc");
         let retry = f.label();
         let miss = f.label();
@@ -525,7 +525,7 @@ pub fn atomic_actors() -> Chunk {
         f.return_(acc);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let me = f.self_cap();
         let w1 = f.window(3);
         f.mov(w1.at(1), server_cap);
@@ -558,7 +558,7 @@ pub fn cap_in_payload() -> Chunk {
         f.exit(payload);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let me = f.self_cap();
         let req = f.hop_fresh(TAG_REQ, me);
         f.send(server_cap, req);
@@ -579,7 +579,7 @@ pub fn forged_sender_send() -> Chunk {
         f.exit(sender);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let forged = f.load_i32(999);
         let req_id = f.load_i32(1);
         let zero = f.load_i32(0);
@@ -602,7 +602,7 @@ pub fn forged_sender_ask() -> Chunk {
         f.exit(sender);
     });
     p.function("main", 0, |f| {
-        let server_cap = f.spawn(server, 0);
+        let server_cap = f.spawn(server, &[]);
         let forged = f.load_i32(999);
         let req_id = f.load_i32(1);
         let zero = f.load_i32(0);
@@ -624,7 +624,7 @@ pub fn monitor_down() -> Chunk {
         f.return_(z);
     });
     p.function("main", 0, |f| {
-        let cap = f.spawn(child, 0);
+        let cap = f.spawn(child, &[]);
         let mon = f.monitor(cap);
         let msg = f.receive_match_imm(crate::TAG_SYS_DOWN);
         let id = f.hop_request_id(msg);
@@ -1375,7 +1375,7 @@ mod tests {
             f.return_(z);
         });
         p.function("main", 0, |f| {
-            let _c = f.spawn_confined(child, 0);
+            let _c = f.spawn_confined(child, &[]);
             let ms = f.load_i32(80);
             f.sleep(ms);
             let name = f.load_str("stolen");
@@ -1540,7 +1540,7 @@ mod tests {
             f.exit(payload);
         });
         p.function("main", 0, |f| {
-            let server_cap = f.spawn(server, 0);
+            let server_cap = f.spawn(server, &[]);
             let payload = f.load_i32(41);
             let req = f.hop_fresh(TAG_REQ, payload);
             let expect = f.hop_request_id(req);

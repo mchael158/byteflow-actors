@@ -134,11 +134,28 @@ impl ChunkBuilder {
     }
 
     pub fn emit_delegate(&mut self, dst: u8, src_cap: u8, rights: crate::bytecode::CapRights) {
+        self.emit_delegate_with_native(dst, src_cap, rights, None);
+    }
+
+    /// `c = 255` means no extra native-mask narrowing (VM keeps the source
+    /// mask). Any other `c` is a Cap register whose `NATIVE` mask is AND-ed
+    /// in — the only assembler path that emits `c ≠ 255`.
+    pub fn emit_delegate_with_native(
+        &mut self,
+        dst: u8,
+        src_cap: u8,
+        rights: crate::bytecode::CapRights,
+        native_cap: Option<u8>,
+    ) {
+        let native_reg = match native_cap {
+            Some(reg) => reg,
+            None => 255,
+        };
         self.emit(Instruction::new(
             Opcode::Delegate,
             dst,
             src_cap,
-            255,
+            native_reg,
             rights.bits() as i32,
         ));
     }

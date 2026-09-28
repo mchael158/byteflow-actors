@@ -26,7 +26,7 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 
 | BEAM | Byteflow API | Opcode / host |
 |------|--------------|---------------|
-| `spawn(fun)` | `Fn::spawn(fn, argc)` | `Spawn` → Cap |
+| `spawn(fun)` | `Fn::spawn(fn, &[args])` | `Spawn` → Cap |
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
 | selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` | Tag, payload wire-tag, or tag + `Int` payload — not arbitrary term patterns |
@@ -75,7 +75,7 @@ let server = program.function("server", 0, |f| {
     f.exit(payload);
 });
 program.function("main", 0, |f| {
-    let cap = f.spawn(server, 0);
+    let cap = f.spawn(server, &[]);
     let n = f.load_i32(41);
     let req = f.hop_fresh(TAG_REQ, n);
     let reply = f.ask(cap, req);
@@ -161,10 +161,10 @@ actor loop          →  actor_loop(TAG, \|f, req\| { … })
 cast                →  cast(cap, hop(...))   // alias of send
 call                →  ask(cap, hop(...)) / ask_timeout(cap, hop, ms)
 reply               →  send_reply(req, TAG_REP, payload)
-spawn               →  spawn(fn) → Cap; spawn_confined(fn) → Cap with rights NONE
+spawn               →  spawn(fn, &[args]) → Cap; spawn_confined(fn, &[args]) → Cap with rights NONE
 register/whereis    →  Fn::register_name / whereis (Cap reminted for caller); host Runtime::*; ChildSpec.name also registers
 link/monitor        →  Fn::link / Fn::monitor (need LINK / MONITOR on the addressing Cap)
-delegate            →  Fn::delegate(cap, rights) → weaker Cap
+delegate            →  Fn::delegate(cap, rights) / delegate_with_native(cap, rights, native_cap)
 trap_exit           →  Fn::set_trap_exit / Runtime::set_trap_exit
 restart policy      →  Fn::set_restart_policy / ChildSpec.restart
 ```

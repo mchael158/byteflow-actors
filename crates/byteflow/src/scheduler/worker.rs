@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
-use super::finalize::{finalize_flow, request_kill, resume_or_fail};
+use super::finalize::{
+    finalize_flow, finalize_if_killed, finalize_if_killed_host_await,
+    finalize_if_killed_waiting_send, kill_outcome_message, request_kill, resume_or_fail,
+};
 use super::link::LinkId;
 use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitFilter};
 use super::metrics::RuntimeMetrics;
@@ -318,7 +321,12 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
 
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
-            local.push(flow);
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed("runtime shutdown".into()),
+                FlowExitReason::Shutdown,
+            );
             return;
         }
 
@@ -867,6 +875,9 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 let flow_id = flow.id;
                 match shared.host_awaits.park(flow, dest_reg) {
                     Ok(Ok((ticket, _))) => {
+                        if finalize_if_killed_host_await(shared, flow_id) {
+                            return;
+                        }
                         let done = super::host_await::HostAwaitCompleter::new(
                             Arc::clone(shared),
                             ticket,
@@ -1135,13 +1146,6 @@ enum DeliverStatus {
     Unavailable,
 }
 
-fn kill_outcome_message(reason: FlowExitReason) -> String {
-    match reason {
-        FlowExitReason::Link => format!("linked exit ({reason})"),
-        FlowExitReason::Killed => format!("killed ({reason})"),
-        other => format!("exit ({other})"),
-    }
-}
 
 fn admit_waiting_on(
     mailbox: &std::sync::Arc<super::mailbox::Mailbox>,
@@ -1294,6 +1298,9 @@ fn park_ask(
     let mailbox = flow.mailbox.clone();
     match mailbox.park_filter(flow, filter) {
         Ok(Ok(epoch)) => {
+            if finalize_if_killed(shared, &mailbox, asker) {
+                return;
+            }
             // Close insert→park race with `wake_orphaned_asks`: finalize may
             // have already `take_waiters_of`'d us while `take_parked` was
             // still `None`. Membership gone ⇒ self-wake with TAG_SYS_EXIT.
@@ -1376,6 +1383,9 @@ fn park_on_mailbox(
 
     match mailbox.park_filter(flow, filter) {
         Ok(Ok(epoch)) => {
+            if finalize_if_killed(shared, &mailbox, pid) {
+                return;
+            }
             if let Some(delay) = timeout {
                 shared
                     .timer
@@ -1438,6 +1448,7 @@ fn park_waiting_send(
         );
         return;
     }
+    let sender = flow.id;
     let Some(mailbox) = (match shared.directory.lookup(target) {
         Ok(m) => m,
         Err(e) => {
@@ -1462,7 +1473,9 @@ fn park_waiting_send(
         return;
     };
     match mailbox.park_sender(flow, stamped) {
-        ParkSender::Parked => {}
+        ParkSender::Parked => {
+            let _ = finalize_if_killed_waiting_send(shared, &mailbox, sender);
+        }
         ParkSender::Closed(flow) => {
             let _ = shared.waiting_send_at.remove(flow.id);
             finalize_flow(

@@ -77,6 +77,22 @@ impl Directory {
             .cloned())
     }
 
+    /// Snapshot every live mailbox for shutdown drain. Partial on poison.
+    pub(crate) fn snapshot(&self) -> Vec<(FlowId, Arc<Mailbox>)> {
+        let mut out = Vec::new();
+        for s in &self.shards {
+            match sync_lock::lock(s, "Directory::snapshot") {
+                Ok(g) => {
+                    for (id, mb) in g.iter() {
+                        out.push((*id, Arc::clone(mb)));
+                    }
+                }
+                Err(e) => report_fault(e),
+            }
+        }
+        out
+    }
+
     /// Approximate live-flow count for metrics — not linearizable across shards.
     ///
     /// On mutex poison, reports the fault and returns the partial sum so far

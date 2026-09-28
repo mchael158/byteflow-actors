@@ -29,7 +29,7 @@ fn hop_chunk() -> Chunk {
         f.return_(payload);
     });
     program.function("client", 0, |f| {
-        let cap = f.spawn(echo, 0);
+        let cap = f.spawn(echo, &[]);
         let n = f.load_i32(1);
         let req = f.hop_fresh(1, n);
         let reply = f.ask(cap, req);

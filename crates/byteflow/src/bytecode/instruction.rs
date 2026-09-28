@@ -138,11 +138,21 @@ impl fmt::Display for Instruction {
                 write!(f, "{} r{}", self.op, self.a)
             }
             Opcode::Whereis => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
-            Opcode::Delegate => write!(
-                f,
-                "{} r{}, r{}, rights={:#x}, native=r{}",
-                self.op, self.a, self.b, self.imm as u32, self.c
-            ),
+            Opcode::Delegate => {
+                if self.c == 255 {
+                    write!(
+                        f,
+                        "{} r{}, r{}, rights={:#x}",
+                        self.op, self.a, self.b, self.imm as u32
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{} r{}, r{}, rights={:#x}, native=r{}",
+                        self.op, self.a, self.b, self.imm as u32, self.c
+                    )
+                }
+            }
             Opcode::SetRestartPolicy => write!(f, "{} {}", self.op, self.imm),
             Opcode::HostAwait => write!(
                 f,

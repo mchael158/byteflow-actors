@@ -136,7 +136,7 @@ fn confined_child_cannot_call_natives() -> Result<(), Box<dyn std::error::Error>
         f.return_(n);
     });
     p.function("main", 0, |f| {
-        let _cap = f.spawn_confined(child, 0);
+        let _cap = f.spawn_confined(child, &[]);
         let z = f.load_i32(0);
         f.return_(z);
     });

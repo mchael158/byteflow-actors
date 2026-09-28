@@ -851,19 +851,7 @@ impl Runtime {
         self.shared.shutdown.store(true, Ordering::Release);
         // Settle parked HostAwaits before joining workers: otherwise a bridge
         // holding Completers could leave joiners blocked after OS threads exit.
-        match self.shared.host_awaits.drain_all() {
-            Ok(parked) => {
-                for p in parked {
-                    finalize_flow(
-                        &self.shared,
-                        *p.flow,
-                        FlowOutcome::Failed("runtime shutdown".into()),
-                        FlowExitReason::Shutdown,
-                    );
-                }
-            }
-            Err(e) => super::error::report_fault(e),
-        }
+        finalize_host_awaits(&self.shared);
         self.shared.timer.shutdown();
         let (lock, cvar) = &self.shared.notify;
         match super::sync_lock::lock(lock, "Runtime::request_shutdown") {
@@ -872,12 +860,13 @@ impl Runtime {
         }
     }
 
-    /// Stop accepting new scheduling work and join every worker + the timer
-    /// thread. Processes that are mid-quantum are allowed to reach their
-    /// next natural suspension point; this does **not** forcibly abort
-    /// running bytecode (there is no safe way to do that to an OS thread
-    /// mid-instruction — see design notes §11 on why preemption here is
-    /// cooperative/budgeted rather than signal-based).
+    /// Stop accepting new scheduling work, join every worker + the timer
+    /// thread, then finalize any flow still parked (mailbox, timer, injector,
+    /// worker deques). Joiners see [`FlowOutcome::Failed`] (`runtime shutdown`)
+    /// instead of [`super::error::RuntimeError::Abandoned`].
+    ///
+    /// Mid-quantum bytecode is not aborted mid-instruction — the worker
+    /// finalizes at the next loop check (cooperative preemption).
     pub fn shutdown(mut self) {
         self.request_shutdown();
         for w in self.workers.drain(..) {
@@ -885,6 +874,76 @@ impl Runtime {
         }
         if let Some(t) = self.timer_thread.take() {
             let _ = t.join();
+        }
+        finalize_stranded(&self.shared);
+    }
+}
+
+fn finalize_shutdown_flow(shared: &Shared, flow: Flow) {
+    finalize_flow(
+        shared,
+        flow,
+        FlowOutcome::Failed("runtime shutdown".into()),
+        FlowExitReason::Shutdown,
+    );
+}
+
+fn finalize_host_awaits(shared: &Shared) {
+    match shared.host_awaits.drain_all() {
+        Ok(parked) => {
+            for p in parked {
+                finalize_shutdown_flow(shared, *p.flow);
+            }
+        }
+        Err(e) => super::error::report_fault(e),
+    }
+}
+
+/// After workers and the timer have stopped, take every remaining flow
+/// and run it through [`finalize_flow`] so links, monitors and joiners fire.
+///
+/// A few passes: finalize can hand off a `trap_exit` peer onto the injector.
+fn finalize_stranded(shared: &Shared) {
+    finalize_host_awaits(shared);
+    for flow in shared.timer.drain() {
+        finalize_shutdown_flow(shared, *flow);
+    }
+    for _ in 0..8 {
+        let mut n = 0usize;
+        for flow in shared.injector.drain() {
+            finalize_shutdown_flow(shared, *flow);
+            n += 1;
+        }
+        for stealer in &shared.stealers {
+            for flow in stealer.drain() {
+                finalize_shutdown_flow(shared, *flow);
+                n += 1;
+            }
+        }
+        for (_id, mailbox) in shared.directory.snapshot() {
+            match mailbox.take_parked() {
+                Ok(Some(flow)) => {
+                    finalize_shutdown_flow(shared, *flow);
+                    n += 1;
+                }
+                Ok(None) => {}
+                Err(e) => super::error::report_fault(e),
+            }
+            match mailbox.close() {
+                Ok(senders) => {
+                    for sender in senders {
+                        if let Err(e) = shared.waiting_send_at.remove(sender.id) {
+                            super::error::report_fault(e);
+                        }
+                        finalize_shutdown_flow(shared, sender);
+                        n += 1;
+                    }
+                }
+                Err(e) => super::error::report_fault(e),
+            }
+        }
+        if n == 0 {
+            break;
         }
     }
 }
@@ -1314,6 +1373,46 @@ mod tests {
             "kill must fail the joiner, got {outcome:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn shutdown_finalizes_parked_receive() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::with_config(
+            receive_forever_chunk(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                ..Default::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        std::thread::sleep(Duration::from_millis(30));
+        rt.shutdown();
+        match handle.join() {
+            FlowOutcome::Failed(msg) if msg.contains("runtime shutdown") => Ok(()),
+            other => Err(format!("expected shutdown finalize, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn shutdown_finalizes_sleeper() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::with_config(
+            sleep_then_return_chunk(60_000),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                ..Default::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        std::thread::sleep(Duration::from_millis(30));
+        rt.shutdown();
+        match handle.join() {
+            FlowOutcome::Failed(msg) if msg.contains("runtime shutdown") => Ok(()),
+            other => Err(format!("expected sleeper shutdown, got {other:?}").into()),
+        }
     }
 
     #[test]
