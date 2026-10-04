@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.8)
+## 7. FlowCap — Current Version (0.9.9)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -446,7 +446,7 @@ because it originated outside bytecode.
 
 ---
 
-## 16. Capability Model (0.9.8 — implemented)
+## 16. Capability Model (0.9.9 — implemented)
 
 The security architecture is object-capability based:
 

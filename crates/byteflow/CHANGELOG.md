@@ -6,6 +6,22 @@ All notable changes to **byteflow-actors** are documented here.
 
 ### Fixed
 
+- **VM heap accounting:** `set_reg` bounds-checks before charging; frames
+  track `heap_charge` and release it on `pop_frame`; `set_quota` charges
+  the total register heap in one transactional reservation.
+- **`FreshRequestId`:** saturates at `i64::MAX` so the id always fits
+  `Value::Int` and `request_id_from_value`.
+- **`Jump` / `Branch`:** out-of-range targets always trap with `BadJump`
+  (fail-closed). `set_paranoid_jumps` remains for API compatibility.
+
+### Changed
+
+- Process dictionary is allocated lazily on first `DictPut`.
+
+## [0.9.9] — 2026-09-27
+
+### Fixed
+
 - **Kill vs park:** after `park_filter` / `park_sender` / `HostAwait` park,
   the worker re-reads `kill_signals` and finalizes if the flow is still
   owned. Closes the window where `request_kill` set the signal before the

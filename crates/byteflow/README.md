@@ -29,7 +29,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.8"
+byteflow-actors = "0.9.9"
 ```
 
 ```rust
@@ -223,7 +223,7 @@ byteflow run    <file.bf> [function]
 
 ---
 
-## Status (v0.9.8)
+## Status (v0.9.9)
 
 **Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**: 128-bit `CapId`, nested `Message.payload`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (safe growable ring; `MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, `trap_exit` (`Opcode::SetTrapExit` / `Runtime::set_trap_exit`), `ReceiveMatchKind` (payload wire-tag selective receive), `ReceiveMatchEq` (tag + `Int` payload), `ReceiveMatch*Timeout` (BEAM `after`), `IsAlive`, `ExitSignal` (BEAM `exit/2`, needs `LINK`), process dictionary (`DictPut` / `DictGet` / `DictErase`, scalar values), `StartChild` (child of the host supervisor that started this flow), `SetRestartPolicy` (flow-local restart at exit), **`HostAwait`** (std-only host async bridge + `max_host_awaits`), host-side bytecode integrity fingerprint (`fingerprint_bf` / `decode_attested` / `Runtime::with_attested`), Phase 5 relation caps (`max_links` / `max_monitors` / `max_registry_names`) + `paranoid_jumps`, 3-arg `make_msg`, monitors / links / registry (link insert re-checks liveness; teardown is O(degree)), `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows` / `max_ask_waits`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable), Criterion benches, hermetic CI (`cargo fetch` then `--locked --offline`).
 

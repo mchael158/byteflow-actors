@@ -46,13 +46,14 @@ pub struct Vm {
     quota: Option<Arc<FlowQuota>>,
     /// Process-wide memory ceiling (optional; set by the runtime).
     memory: Option<Arc<crate::MemoryBudget>>,
-    /// When true, `Jump`/`Branch` bounds-check targets at runtime (see
-    /// [`Self::set_paranoid_jumps`]). Default off: verified chunks trust
-    /// `verify`; unverified corrupt jumps fail-open as implicit `return Unit`.
+    /// Retained for API / `RuntimeConfig` wiring. Out-of-range jumps always
+    /// trap with [`Fault::BadJump`] (fail-closed); this flag no longer gates
+    /// the check.
+    #[allow(dead_code)]
     paranoid_jumps: bool,
-    /// BEAM process dictionary. Keys are `Int`. Values are scalars only so
-    /// a dict entry cannot outlive a register heap charge.
-    dict: HashMap<i64, Value>,
+    /// BEAM process dictionary. Allocated on first `DictPut` so the common
+    /// flow that never touches the dict pays nothing.
+    dict: Option<HashMap<i64, Value>>,
 }
 
 impl Vm {
@@ -97,28 +98,34 @@ impl Vm {
             quota: None,
             memory: None,
             paranoid_jumps: false,
-            dict: HashMap::new(),
+            dict: None,
         })
     }
 
-    /// Enable runtime bounds checks on `Jump` / `Branch` targets.
-    ///
-    /// Production paths leave this off and rely on [`crate::verify`]. Turn it
-    /// on for hand-built or untrusted chunks that skip verification.
+    /// Historical API: out-of-range `Jump` / `Branch` always trap with
+    /// [`Fault::BadJump`]. The flag is retained for `RuntimeConfig` compatibility
+    /// but does not change jump semantics.
     pub fn set_paranoid_jumps(&mut self, enabled: bool) {
         self.paranoid_jumps = enabled;
     }
 
     /// Attach the flow's quota so register stores of `Str`/`Bytes` charge heap.
     ///
-    /// Overwrites use reserve(new) → release(old) → install (see
-    /// [`crate::memory`]). Same `Arc` rewritten into the same slot is not
-    /// charged twice.
+    /// Charges the **total** current register heap in one reservation, then
+    /// installs the quota. A failed reservation leaves `self.quota` unset and
+    /// does not partially inflate the budget. Same `Arc` rewritten into the
+    /// same slot is not charged twice on later stores.
     pub fn set_quota(&mut self, quota: Arc<FlowQuota>) -> Result<(), Fault> {
+        let mut per_frame: Vec<usize> = Vec::with_capacity(self.frames.len());
+        let mut total = 0usize;
         for frame in &self.frames {
-            for slot in frame.registers() {
-                charge_heap_value(&quota, self.memory.as_deref(), slot)?;
-            }
+            let bytes: usize = frame.registers().iter().map(heap_charge_of).sum();
+            total = total.saturating_add(bytes);
+            per_frame.push(bytes);
+        }
+        charge_pair(&quota, self.memory.as_deref(), total)?;
+        for (frame, bytes) in self.frames.iter_mut().zip(per_frame) {
+            frame.set_heap_charge(bytes);
         }
         self.quota = Some(quota);
         Ok(())
@@ -129,12 +136,22 @@ impl Vm {
         self.memory = Some(memory);
     }
 
-    /// Mint a per-flow correlation id. Never returns `0` (`next_request_id`
-    /// starts at 1 and saturates, so it cannot wrap to zero).
+    /// Mint a per-flow correlation id.
+    ///
+    /// Stays in the `Value::Int` (`i64`) domain so
+    /// `FreshRequestId` → `Int` → [`request_id_from_value`] never produces a
+    /// negative id. Never returns `0` (`next_request_id` starts at 1).
     pub fn fresh_request_id(&mut self) -> u64 {
         let id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
+        if self.next_request_id < i64::MAX as u64 {
+            self.next_request_id += 1;
+        }
         id
+    }
+
+    #[cfg(test)]
+    fn set_next_request_id_for_test(&mut self, id: u64) {
+        self.next_request_id = id;
     }
 
     pub fn instructions_executed(&self) -> u64 {
@@ -244,11 +261,43 @@ impl Vm {
             })
     }
 
+    /// Write a register. Bounds-check the slot **before** any heap charge so
+    /// a failed store cannot inflate FlowQuota / MemoryBudget.
     #[inline]
     fn set_reg(&mut self, reg: u8, value: Value) -> Result<(), Fault> {
-        self.charge_register_store(reg, &value)?;
+        let frame = self
+            .frames
+            .last()
+            .ok_or(Fault::Invariant("empty frame stack while running"))?;
+        let frame_size = frame.registers().len() as u8;
+        let old = frame
+            .registers()
+            .get(reg as usize)
+            .ok_or(Fault::RegisterOutOfRange { reg, frame_size })?;
+
+        match (&value, old) {
+            (Value::Str(s), Value::Str(prev)) if Arc::ptr_eq(s, prev) => return Ok(()),
+            (Value::Bytes(b), Value::Bytes(prev)) if Arc::ptr_eq(b, prev) => return Ok(()),
+            _ => {}
+        }
+
+        let old_bytes = heap_charge_of(old);
+        let new_bytes = heap_charge_of(&value);
+
+        if let Some(quota) = self.quota.as_ref() {
+            if new_bytes > old_bytes {
+                charge_pair(quota, self.memory.as_deref(), new_bytes - old_bytes)?;
+            } else if old_bytes > new_bytes {
+                release_pair(quota, self.memory.as_deref(), old_bytes - new_bytes);
+            }
+        }
+
         let frame = self.current()?;
-        let len = frame.registers().len() as u8;
+        if new_bytes > old_bytes {
+            frame.add_heap_charge(new_bytes - old_bytes);
+        } else if old_bytes > new_bytes {
+            frame.sub_heap_charge(old_bytes - new_bytes);
+        }
         match frame.registers_mut().get_mut(reg as usize) {
             Some(slot) => {
                 *slot = value;
@@ -256,42 +305,9 @@ impl Vm {
             }
             None => Err(Fault::RegisterOutOfRange {
                 reg,
-                frame_size: len,
+                frame_size: frame.registers().len() as u8,
             }),
         }
-    }
-
-    #[inline]
-    fn peek_reg(&self, reg: u8) -> Option<&Value> {
-        self.frames.last()?.registers().get(reg as usize)
-    }
-
-    /// Heap charge for `Str` / `Bytes` register stores.
-    ///
-    /// Order: reserve(new) → release(old). Failed reservation leaves the
-    /// slot and accounting untouched. Same `Arc` in the same slot is a no-op.
-    fn charge_register_store(&self, reg: u8, value: &Value) -> Result<(), Fault> {
-        let Some(quota) = self.quota.as_ref() else {
-            return Ok(());
-        };
-        match (value, self.peek_reg(reg)) {
-            (Value::Str(s), Some(Value::Str(old))) if Arc::ptr_eq(s, old) => return Ok(()),
-            (Value::Bytes(b), Some(Value::Bytes(old))) if Arc::ptr_eq(b, old) => return Ok(()),
-            _ => {}
-        }
-
-        let new_bytes = heap_charge_of(value);
-        let old_bytes = self.peek_reg(reg).map(heap_charge_of).unwrap_or(0);
-
-        // Net accounting: reserve only the growth (or release the shrink).
-        // Semantically equal to reserve(new)→release(old) without needing
-        // temporary headroom of old+new against a tight mem_limit.
-        if new_bytes > old_bytes {
-            charge_pair(quota, self.memory.as_deref(), new_bytes - old_bytes)?;
-        } else if old_bytes > new_bytes {
-            release_pair(quota, self.memory.as_deref(), old_bytes - new_bytes);
-        }
-        Ok(())
     }
 
     /// Fetch the next instruction and advance `pc`.
@@ -443,13 +459,12 @@ impl Vm {
     /// Apply a relative jump from the current (post-fetch) `pc`.
     ///
     /// Valid targets are `0..=code.len()` (one past the end = implicit return).
-    /// Paranoid mode traps; otherwise preserves the historical fail-open cast.
+    /// Out-of-range targets always trap with [`Fault::BadJump`] (fail-closed).
     fn apply_relative_jump(&mut self, imm: i32) -> Result<(), Fault> {
         let code_len = self.chunk.code.len();
-        let paranoid = self.paranoid_jumps;
         let frame = self.current()?;
         let target_i = frame.pc() as i64 + i64::from(imm);
-        if paranoid && (target_i < 0 || target_i as usize > code_len) {
+        if target_i < 0 || target_i as usize > code_len {
             let target = if target_i < 0 {
                 usize::MAX
             } else {
@@ -570,7 +585,7 @@ impl Vm {
                     let args = trap!(self.gather_regs(dst, argc, 0));
                     let mut new_frame = Frame::new(function, num_registers, Some(dst));
                     new_frame.set_pc(entry);
-                    trap!(load_frame_args(&mut new_frame, args, arity));
+                    trap!(self.load_frame_args_charged(&mut new_frame, args, arity));
                     self.frames.push(new_frame);
                 }
                 Opcode::CallNative => {
@@ -751,17 +766,26 @@ impl Vm {
                             got: "heap-or-cap",
                         });
                     }
-                    let old = self.dict.insert(key, value).unwrap_or(Value::Unit);
+                    let dict = self.dict.get_or_insert_with(HashMap::new);
+                    let old = dict.insert(key, value).unwrap_or(Value::Unit);
                     trap!(self.set_reg(instr.a, old));
                 }
                 Opcode::DictGet => {
                     let key = trap!(self.int_from_reg(instr.b));
-                    let value = self.dict.get(&key).cloned().unwrap_or(Value::Unit);
+                    let value = self
+                        .dict
+                        .as_ref()
+                        .and_then(|d| d.get(&key).cloned())
+                        .unwrap_or(Value::Unit);
                     trap!(self.set_reg(instr.a, value));
                 }
                 Opcode::DictErase => {
                     let key = trap!(self.int_from_reg(instr.b));
-                    let old = self.dict.remove(&key).unwrap_or(Value::Unit);
+                    let old = self
+                        .dict
+                        .as_mut()
+                        .and_then(|d| d.remove(&key))
+                        .unwrap_or(Value::Unit);
                     trap!(self.set_reg(instr.a, old));
                 }
                 Opcode::ReceiveMatchEq => {
@@ -965,6 +989,10 @@ impl Vm {
     /// Pop the current frame, delivering `value` to the caller (or
     /// finishing the Flow if this was the outermost frame). Returns
     /// `Ok(Some(VmResult::Complete(_)))` only in the latter case.
+    ///
+    /// Releases the finished frame's heap charge (except the escaping
+    /// return value on the outermost `Complete` path, which stays charged
+    /// until flow finalize — matching prior MemoryBudget semantics).
     fn pop_frame(&mut self, value: Value) -> Result<Option<VmResult>, Fault> {
         let finished = self
             .frames
@@ -972,11 +1000,65 @@ impl Vm {
             .ok_or(Fault::Invariant("pop_frame on empty stack"))?;
         match finished.dest_reg() {
             Some(dest) => {
+                if let Some(quota) = self.quota.as_ref() {
+                    release_pair(quota, self.memory.as_deref(), finished.heap_charge());
+                }
                 self.set_reg(dest, value)?;
                 Ok(None)
             }
-            None => Ok(Some(VmResult::Complete(value))),
+            None => {
+                if let Some(quota) = self.quota.as_ref() {
+                    let keep = heap_charge_of(&value);
+                    let release = finished.heap_charge().saturating_sub(keep);
+                    release_pair(quota, self.memory.as_deref(), release);
+                }
+                Ok(Some(VmResult::Complete(value)))
+            }
         }
+    }
+
+    /// Load call arguments into a not-yet-pushed frame, charging heap for
+    /// any `Str`/`Bytes`. Rolls back a partial charge if a later arg fails.
+    fn load_frame_args_charged(
+        &self,
+        frame: &mut Frame,
+        args: impl IntoIterator<Item = Value>,
+        arity: u8,
+    ) -> Result<(), Fault> {
+        let frame_size = frame.registers().len() as u8;
+        let mut charged = 0usize;
+        for (i, a) in args.into_iter().enumerate().take(arity as usize) {
+            let bytes = heap_charge_of(&a);
+            if bytes > 0 {
+                if let Some(quota) = self.quota.as_ref() {
+                    if let Err(e) = charge_pair(quota, self.memory.as_deref(), bytes) {
+                        if charged > 0 {
+                            release_pair(quota, self.memory.as_deref(), charged);
+                        }
+                        frame.set_heap_charge(0);
+                        return Err(e);
+                    }
+                }
+                charged = charged.saturating_add(bytes);
+                frame.add_heap_charge(bytes);
+            }
+            match frame.registers_mut().get_mut(i) {
+                Some(slot) => *slot = a,
+                None => {
+                    if charged > 0 {
+                        if let Some(quota) = self.quota.as_ref() {
+                            release_pair(quota, self.memory.as_deref(), charged);
+                        }
+                        frame.set_heap_charge(0);
+                    }
+                    return Err(Fault::RegisterOutOfRange {
+                        reg: i as u8,
+                        frame_size,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1063,15 +1145,6 @@ fn release_pair(quota: &FlowQuota, memory: Option<&crate::MemoryBudget>, bytes: 
     if let Some(mem) = memory {
         mem.release(bytes);
     }
-}
-
-/// Charge `Str` / `Bytes` length (initial attach / frame scan).
-fn charge_heap_value(
-    quota: &FlowQuota,
-    memory: Option<&crate::MemoryBudget>,
-    value: &Value,
-) -> Result<(), Fault> {
-    charge_pair(quota, memory, heap_charge_of(value))
 }
 
 fn as_f64(v: &Value) -> Result<f64, Fault> {
@@ -1333,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn returning_over_quota_keeps_quota_fault() -> TestResult {
+    fn return_releases_callee_heap_before_caller_writeback() -> TestResult {
         let mut b = ChunkBuilder::new("t");
         let k = b.const_(Value::Str("x".repeat(200).into()));
         let callee = b.begin_function("callee", 0, 1);
@@ -1343,15 +1416,85 @@ mod tests {
         b.emit_call(0, callee, 0);
         b.emit_return(0);
         let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), main, &[])?;
-        // 200 fits the callee store; writeback into the caller charges again.
+        // Old bug: callee charged 200 and return writeback charged again without
+        // release → QuotaExceeded at 250. Correct path releases then recharges.
         let quota = Arc::new(crate::scheduler::FlowQuota::new(10_000, 250, 1, 1, 1, 1));
-        vm.set_quota(quota)?;
+        vm.set_quota(Arc::clone(&quota))?;
         match vm.run(50) {
-            VmResult::Trap(Fault::QuotaExceeded(_)) => Ok(()),
-            other => {
-                Err(format!("expected QuotaExceeded from return writeback, got {other:?}").into())
+            VmResult::Complete(Value::Str(s)) if s.len() == 200 => {
+                assert_eq!(quota.mem_used(), 200);
+                Ok(())
             }
+            other => Err(format!("expected Complete(200-byte Str), got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn set_reg_out_of_range_does_not_charge() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(crate::scheduler::FlowQuota::from_config(
+            crate::QuotaConfig {
+                mem_limit: 10_000,
+                ..crate::QuotaConfig::permissive()
+            },
+        ));
+        vm.set_quota(Arc::clone(&quota))?;
+        let big = Value::Str("z".repeat(500).into());
+        match vm.set_register(255, big) {
+            Err(Fault::RegisterOutOfRange {
+                reg: 255,
+                frame_size: 1,
+            }) => {
+                assert_eq!(quota.mem_used(), 0);
+                Ok(())
+            }
+            other => Err(format!("expected RegisterOutOfRange, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn set_quota_is_transactional() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 2);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        // Two 100-byte Strs already in registers; limit 150 must refuse the
+        // whole attach without leaving a partial charge on the quota object.
+        vm.set_register(0, Value::Str("a".repeat(100).into()))?;
+        vm.set_register(1, Value::Str("b".repeat(100).into()))?;
+        let quota = Arc::new(crate::scheduler::FlowQuota::from_config(
+            crate::QuotaConfig {
+                mem_limit: 150,
+                ..crate::QuotaConfig::permissive()
+            },
+        ));
+        match vm.set_quota(Arc::clone(&quota)) {
+            Err(Fault::QuotaExceeded(_)) => {
+                assert_eq!(
+                    quota.mem_used(),
+                    0,
+                    "failed set_quota must not leave a partial charge"
+                );
+                Ok(())
+            }
+            other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn fresh_request_id_stays_in_i64_domain() {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[]).expect("vm");
+        vm.set_next_request_id_for_test(i64::MAX as u64);
+        let id = vm.fresh_request_id();
+        assert_eq!(id, i64::MAX as u64);
+        assert_eq!(vm.fresh_request_id(), i64::MAX as u64);
+        assert!((id as i64) >= 0);
     }
 
     #[test]
@@ -1369,18 +1512,23 @@ mod tests {
     }
 
     #[test]
-    fn non_paranoid_bad_jump_still_fail_opens() -> TestResult {
+    fn bad_jump_fail_closes_even_without_paranoid_flag() -> TestResult {
         let mut b = ChunkBuilder::new("t");
         b.begin_function("main", 0, 1);
         b.emit_load_imm(0, 7);
         b.emit_return(0);
         let mut chunk = b.finish();
+        let code_len = chunk.code.len();
         chunk.code[0] = Instruction::only_imm(Opcode::Jump, 100);
         let mut vm = Vm::new(Arc::new(chunk), NativeTable::empty(), 0, &[])?;
+        // Flag retained for API compat; jumps always fail closed.
+        vm.set_paranoid_jumps(false);
         match vm.run(10) {
-            // Fall off the end → implicit return Unit from outermost frame.
-            VmResult::Complete(Value::Unit) => Ok(()),
-            other => Err(format!("expected Complete(Unit), got {other:?}").into()),
+            VmResult::Trap(Fault::BadJump {
+                target: 101,
+                code_len: len,
+            }) if len == code_len => Ok(()),
+            other => Err(format!("expected BadJump(101), got {other:?}").into()),
         }
     }
 }

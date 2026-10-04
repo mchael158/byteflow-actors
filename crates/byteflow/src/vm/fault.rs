@@ -100,11 +100,11 @@ pub enum Fault {
     Invariant(&'static str),
     /// Per-flow heap quota refused a `Str` / `Bytes` register write.
     QuotaExceeded(String),
-    /// Relative `Jump` / `Branch` target outside the code (paranoid mode only).
+    /// Relative `Jump` / `Branch` target outside the code.
     ///
     /// Verified chunks never hit this — `verify` already proved every offset.
-    /// Without paranoid mode, a corrupt jump fail-opens as an implicit
-    /// `return Unit` (see `docs::vm_safety`).
+    /// Unverified / corrupted jumps fail closed here instead of completing
+    /// as an implicit `return Unit`.
     BadJump {
         target: usize,
         code_len: usize,

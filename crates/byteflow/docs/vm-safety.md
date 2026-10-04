@@ -203,17 +203,16 @@ counts widen, and a latent overflow is not worth the two saved lines.
 Not every static fact is re-checked at runtime, and the doc should say so
 rather than imply a uniform belt-and-braces.
 
-`Jump` / `Branch` compute `pc + offset` and store it without a bounds test.
-For a verified chunk that is safe — `JumpOutOfRange` already proved every
-target lands inside the code, or exactly one past the end. For an
-**unverified** chunk it degrades quietly: a negative target becomes a huge
-`pc`, the instruction fetch misses, and the VM treats it as falling off the
-end of the function — an implicit `return Unit` instead of a fault.
+`Jump` / `Branch` compute `pc + offset` and bounds-check the target at
+runtime. Valid targets are `0..=code.len()` (one past the end = implicit
+return). Anything else is [`Fault::BadJump`](crate::Fault::BadJump)
+(fail-closed). For a verified chunk the check is redundant —
+`JumpOutOfRange` already proved every offset — but it keeps hand-built or
+corrupted chunks from completing as a silent `return Unit`.
 
 No memory is touched out of bounds (the fetch goes through a checked
-`get`), but a corrupt jump turning into a silent early return is fail-open,
-and it is the reason `verify` is mandatory rather than advisory for anything
-that crossed a trust boundary.
+`get`). `verify` remains mandatory for untrusted input: it still settles
+the cheaper static facts once per load.
 
 ## Faults never become panics
 
