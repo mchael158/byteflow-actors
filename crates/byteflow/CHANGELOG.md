@@ -4,6 +4,8 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-10-04
+
 ### Fixed
 
 - **VM heap accounting:** `set_reg` bounds-checks before charging; frames

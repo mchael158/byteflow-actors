@@ -275,14 +275,15 @@ impl Vm {
             .get(reg as usize)
             .ok_or(Fault::RegisterOutOfRange { reg, frame_size })?;
 
+        // `old` is `&Value`; keep both sides as references for the helper.
+        let old_bytes = heap_charge_of(old);
+        let new_bytes = heap_charge_of(&value);
+
         match (&value, old) {
             (Value::Str(s), Value::Str(prev)) if Arc::ptr_eq(s, prev) => return Ok(()),
             (Value::Bytes(b), Value::Bytes(prev)) if Arc::ptr_eq(b, prev) => return Ok(()),
             _ => {}
         }
-
-        let old_bytes = heap_charge_of(old);
-        let new_bytes = heap_charge_of(&value);
 
         if let Some(quota) = self.quota.as_ref() {
             if new_bytes > old_bytes {
