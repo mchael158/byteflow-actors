@@ -300,8 +300,14 @@ impl From<i32> for Value {
     }
 }
 impl From<u64> for Value {
+    /// Fits the `Int` domain. Values above `i64::MAX` saturate instead of
+    /// becoming negative.
     fn from(v: u64) -> Self {
-        Value::Int(v as i64)
+        let n = match i64::try_from(v) {
+            Ok(n) => n,
+            Err(_) => i64::MAX,
+        };
+        Value::Int(n)
     }
 }
 impl From<bool> for Value {
@@ -396,6 +402,12 @@ mod tests {
         assert!(!Value::bytes([]).is_truthy());
 
         assert_eq!(s.as_bytes(), Some(b"hi".as_slice()));
+    }
+
+    #[test]
+    fn u64_above_i64_max_saturates() {
+        assert_eq!(Value::from(u64::MAX), Value::Int(i64::MAX));
+        assert_eq!(Value::from(4u64), Value::Int(4));
     }
 
     #[test]

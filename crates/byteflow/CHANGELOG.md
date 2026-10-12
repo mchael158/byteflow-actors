@@ -6,6 +6,9 @@ All notable changes to **byteflow-actors** are documented here.
 
 ### Fixed
 
+- **Assembler:** a `local` past r254 emits `Trap` instead of aliasing a slot. An unbound jump label becomes `Trap` instead of a no-op jump.
+- **`verify`:** `StartChild` function index is range-checked with `Call` / `Spawn`.
+- **`Value::from(u64)`:** saturates at `i64::MAX` instead of wrapping negative.
 - **`WAITING_SEND`:** the parked hop's quota charge is released on admit or
   finalize, and is not forwarded to `MemoryBudget` (that release underflowed
   when the process budget had never been charged for the hop).

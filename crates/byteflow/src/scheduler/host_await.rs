@@ -321,7 +321,10 @@ mod tests {
             Ok(Err((e, _))) => return Err(e.to_string().into()),
             Err((e, _)) => return Err(e.into()),
         };
-        let parked = idx.take_ticket(ticket)?.expect("take");
+        let parked = match idx.take_ticket(ticket)? {
+            Some(parked) => parked,
+            None => return Err("take".into()),
+        };
         assert_eq!(parked.flow.id, id);
         assert_eq!(parked.dest_reg, 2);
         assert!(idx.take_ticket(ticket)?.is_none());
@@ -392,24 +395,37 @@ mod runtime_tests {
             }
         }
 
-        fn wait_for_submissions(&self, n: usize) {
-            let mut g = self.state.lock().expect("HoldBridge lock");
+        fn wait_for_submissions(&self, n: usize) -> Result<(), &'static str> {
+            let mut g = match self.state.lock() {
+                Ok(g) => g,
+                Err(_) => return Err("HoldBridge lock"),
+            };
             while g.submitted < n {
-                g = self.cv.wait(g).expect("HoldBridge wait");
+                g = match self.cv.wait(g) {
+                    Ok(g) => g,
+                    Err(_) => return Err("HoldBridge wait"),
+                };
             }
+            Ok(())
         }
 
-        fn take_all(&self) -> Vec<(FlowId, HostAwaitCompleter)> {
-            let mut g = self.state.lock().expect("HoldBridge lock");
-            std::mem::take(&mut g.held)
+        fn take_all(&self) -> Result<Vec<(FlowId, HostAwaitCompleter)>, &'static str> {
+            let mut g = match self.state.lock() {
+                Ok(g) => g,
+                Err(_) => return Err("HoldBridge lock"),
+            };
+            Ok(std::mem::take(&mut g.held))
         }
 
-        fn take_one(&self) -> Option<(FlowId, HostAwaitCompleter)> {
-            let mut g = self.state.lock().expect("HoldBridge lock");
+        fn take_one(&self) -> Result<Option<(FlowId, HostAwaitCompleter)>, &'static str> {
+            let mut g = match self.state.lock() {
+                Ok(g) => g,
+                Err(_) => return Err("HoldBridge lock"),
+            };
             if g.held.is_empty() {
-                None
+                Ok(None)
             } else {
-                Some(g.held.remove(0))
+                Ok(Some(g.held.remove(0)))
             }
         }
     }
@@ -533,13 +549,13 @@ mod runtime_tests {
         )?;
 
         let first = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(1);
+        bridge.wait_for_submissions(1)?;
         let second = rt.spawn(waiter, &[])?;
         let second_out = second
             .join_timeout(Duration::from_secs(2))
             .ok_or("second HostAwait did not finish")?;
 
-        for (_, done) in bridge.take_all() {
+        for (_, done) in bridge.take_all()? {
             let _ = done.complete(Value::Int(0));
         }
         let _ = first.join_timeout(Duration::from_secs(2));
@@ -568,7 +584,7 @@ mod runtime_tests {
         )?;
 
         let first = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(1);
+        bridge.wait_for_submissions(1)?;
         let second = rt.spawn(waiter, &[])?;
         let second_out = second
             .join_timeout(Duration::from_secs(2))
@@ -581,7 +597,7 @@ mod runtime_tests {
             "got {second_out:?}"
         );
 
-        let (_, done) = bridge.take_one().ok_or("missing first completer")?;
+        let (_, done) = bridge.take_one()?.ok_or("missing first completer")?;
         done.complete(Value::Int(7))?;
         let first_out = first
             .join_timeout(Duration::from_secs(2))
@@ -592,8 +608,8 @@ mod runtime_tests {
         );
 
         let third = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(2);
-        let (_, done3) = bridge.take_one().ok_or("missing third completer")?;
+        bridge.wait_for_submissions(2)?;
+        let (_, done3) = bridge.take_one()?.ok_or("missing third completer")?;
         done3.complete(Value::Int(9))?;
         let third_out = third
             .join_timeout(Duration::from_secs(2))
@@ -624,8 +640,8 @@ mod runtime_tests {
 
         let a = rt.spawn(waiter, &[])?;
         let b = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(2);
-        for (_, done) in bridge.take_all() {
+        bridge.wait_for_submissions(2)?;
+        for (_, done) in bridge.take_all()? {
             let _ = done.complete(Value::Int(1));
         }
         let a_out = a.join_timeout(Duration::from_secs(2)).ok_or("a timed out")?;
@@ -656,8 +672,8 @@ mod runtime_tests {
         )?;
 
         let handle = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(1);
-        let (flow_id, done) = bridge.take_one().ok_or("missing completer")?;
+        bridge.wait_for_submissions(1)?;
+        let (flow_id, done) = bridge.take_one()?.ok_or("missing completer")?;
         assert_eq!(flow_id, handle.id());
         rt.kill(handle.id())?;
         let outcome = handle
@@ -691,14 +707,14 @@ mod runtime_tests {
         )?;
 
         let handle = rt.spawn(waiter, &[])?;
-        bridge.wait_for_submissions(1);
+        bridge.wait_for_submissions(1)?;
         // Completers still held by the bridge — shutdown must still settle.
         rt.shutdown();
         let outcome = handle
             .join_timeout(Duration::from_secs(2))
             .ok_or("joiner stuck after shutdown")?;
         // Late host complete is Stale after drain.
-        for (_, done) in bridge.take_all() {
+        for (_, done) in bridge.take_all()? {
             assert!(matches!(
                 done.complete(Value::Int(1)),
                 Err(HostAwaitError::Stale)

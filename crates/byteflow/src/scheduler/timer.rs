@@ -77,10 +77,14 @@ pub struct TimerWheel {
 
 /// `Instant + Duration` can overflow (far-future delays). Never panic.
 fn deadline_from_now(delay: Duration) -> Instant {
-    Instant::now()
-        .checked_add(delay)
-        .or_else(|| Instant::now().checked_add(Duration::from_secs(60 * 60 * 24 * 365 * 30)))
-        .unwrap_or_else(Instant::now)
+    let now = Instant::now();
+    match now.checked_add(delay) {
+        Some(deadline) => deadline,
+        None => match now.checked_add(Duration::from_secs(60 * 60 * 24 * 365 * 30)) {
+            Some(deadline) => deadline,
+            None => now,
+        },
+    }
 }
 
 impl TimerWheel {

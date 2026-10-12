@@ -231,7 +231,7 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
                     });
                 }
             }
-            Opcode::Spawn | Opcode::Call => {
+            Opcode::Spawn | Opcode::Call | Opcode::StartChild => {
                 let idx = instr.imm as u32;
                 if idx as usize >= chunk.functions.len() {
                     return Err(VerifyError::FunctionOutOfRange {
@@ -312,6 +312,25 @@ mod tests {
         b.emit_return(0);
         let chunk = b.finish();
         assert!(verify(&chunk).is_ok());
+    }
+
+    #[test]
+    fn rejects_start_child_function_out_of_range() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk
+            .code
+            .push(Instruction::new(Opcode::StartChild, 0, 0, 0, 99));
+        assert!(matches!(
+            verify(&chunk),
+            Err(VerifyError::FunctionOutOfRange { index: 99, .. })
+        ));
     }
 
     #[test]

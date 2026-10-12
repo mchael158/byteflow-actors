@@ -25,7 +25,7 @@ pub enum Opcode {
     Halt = 0x00,
 
     // ---- data movement ----------------------------------------------------
-    /// `LoadConst ra, kb`  →  `r[a] = constants[b]`
+    /// `LoadConst ra, imm`  →  `r[a] = constants[imm]`
     LoadConst = 0x01,
     /// `Move ra, rb`  →  `r[a] = r[b]`
     Move = 0x02,
@@ -135,7 +135,7 @@ pub enum Opcode {
     Link = 0x58,
     /// `Unlink ra` → drop the link in `r[a]` (`Int` id).
     Unlink = 0x59,
-    /// `AskTimeout ra, rb, rc, rd` → like `Ask`, but give up after
+    /// `AskTimeout ra, rb, rc, imm` → like `Ask`, but give up after
     /// `r[imm]` milliseconds and write `Value::Unit` into `ra`.
     ///
     /// Encoding: `a=dest`, `b=cap`, `c=msg`, `imm=millis_reg`.

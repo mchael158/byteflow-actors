@@ -602,7 +602,10 @@ fn start_cascade(inner: &Arc<Inner>, failed: ChildSpec, failed_idx: usize, later
                 c.waiting
                     .retain(|id| matches!(inner.spawner.shared.directory.lookup(*id), Ok(Some(_))));
             }
-            slot.as_ref().map(|c| c.waiting.is_empty()).unwrap_or(true)
+            match slot.as_ref() {
+                Some(c) => c.waiting.is_empty(),
+                None => true,
+            }
         }
         Err(e) => {
             report_fault(e);
@@ -935,10 +938,9 @@ mod tests {
         )?;
         let first_id = first.id();
         wait_until(|| registry_target(&rt, "svc").ok() == Some(first_id));
-        wait_until(|| {
-            registry_target(&rt, "svc")
-                .map(|id| id != first_id)
-                .unwrap_or(false)
+        wait_until(|| match registry_target(&rt, "svc") {
+            Ok(id) => id != first_id,
+            Err(_) => false,
         });
         let rebound = registry_target(&rt, "svc")?;
         assert_ne!(rebound, first_id);
@@ -969,9 +971,18 @@ mod tests {
         let old_b = b;
         let old_c = boom.id();
         wait_until(|| {
-            let ok_a = registry_target(&rt, "a").map(|id| id != old_a).unwrap_or(false);
-            let ok_b = registry_target(&rt, "b").map(|id| id != old_b).unwrap_or(false);
-            let ok_c = registry_target(&rt, "c").map(|id| id != old_c).unwrap_or(false);
+            let ok_a = match registry_target(&rt, "a") {
+                Ok(id) => id != old_a,
+                Err(_) => false,
+            };
+            let ok_b = match registry_target(&rt, "b") {
+                Ok(id) => id != old_b,
+                Err(_) => false,
+            };
+            let ok_c = match registry_target(&rt, "c") {
+                Ok(id) => id != old_c,
+                Err(_) => false,
+            };
             ok_a && ok_b && ok_c && sup.live_children() == 3
         });
         assert_ne!(registry_target(&rt, "a")?, old_a);

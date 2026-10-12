@@ -59,7 +59,10 @@ impl RegWindow {
     /// Register at offset `i` within the window (`0 <= i < len`).
     pub fn at(self, i: u8) -> Reg {
         debug_assert!(i < self.len, "RegWindow index out of bounds");
-        Reg(self.base.0.saturating_add(i))
+        match self.base.0.checked_add(i) {
+            Some(idx) => Reg(idx),
+            None => Reg(u8::MAX),
+        }
     }
 }
 
@@ -149,9 +152,17 @@ impl<'a> Fn<'a> {
     }
 
     /// Allocate a fresh local register.
+    ///
+    /// A frame is at most 255 slots (`num_registers` is a `u8`), so index
+    /// 255 is not a real register. One more `local` emits `Trap` and returns
+    /// `r0` instead of aliasing an existing slot.
     pub fn local(&mut self) -> Reg {
+        if self.next_reg == u8::MAX {
+            self.b.emit_trap(0);
+            return Reg(0);
+        }
         let reg = Reg(self.next_reg);
-        self.next_reg = self.next_reg.saturating_add(1);
+        self.next_reg += 1;
         self.b.set_num_registers(self.function, self.next_reg);
         reg
     }
@@ -859,6 +870,23 @@ mod tests {
             f.return_(counter);
         });
         program.build()
+    }
+
+    #[test]
+    fn local_past_the_register_file_traps() {
+        let mut program = Program::new("full");
+        program.function("main", 0, |f| {
+            // `open` starts at 4 registers; fill through r254, then one more.
+            while f.next_reg < u8::MAX {
+                let _ = f.local();
+            }
+            let _ = f.local();
+        });
+        let chunk = program.build();
+        assert!(
+            chunk.code.iter().any(|instr| instr.op == Opcode::Trap),
+            "the 256th register must not alias an existing slot"
+        );
     }
 
     #[test]

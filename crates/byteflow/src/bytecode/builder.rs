@@ -291,7 +291,10 @@ impl ChunkBuilder {
             dst,
             policy,
             0,
-            i32::try_from(function).unwrap_or(i32::MAX),
+            match i32::try_from(function) {
+                Ok(n) => n,
+                Err(_) => i32::MAX,
+            },
         ));
     }
 
@@ -481,19 +484,19 @@ impl ChunkBuilder {
     /// final immutable [`Chunk`].
     ///
     /// An unbound label is a host assembly bug. This method does **not**
-    /// panic: the jump is left with relative offset `0` (falls through).
-    /// [`crate::verify`] / [`crate::Runtime::new`] then reject or run a
-    /// no-op jump rather than taking the process down at assemble time.
+    /// panic: the jump becomes `Trap` so it cannot fall through as a no-op.
+    /// A relative offset that does not fit in `i32` is the same trap.
     pub fn finish(mut self) -> Chunk {
         for (idx, label) in self.pending_jumps.drain(..) {
-            match self.label_targets.get(&label) {
-                Some(target) => {
-                    // Relative offset from the instruction *after* this jump.
-                    let offset = *target as i64 - (idx as i64 + 1);
-                    self.code[idx].imm = offset as i32;
-                }
+            let imm = self.label_targets.get(&label).and_then(|target| {
+                // Relative offset from the instruction *after* this jump.
+                let offset = i64::from(*target) - (idx as i64 + 1);
+                i32::try_from(offset).ok()
+            });
+            match imm {
+                Some(imm) => self.code[idx].imm = imm,
                 None => {
-                    // Fail-closed without panic: identity jump (offset 0).
+                    self.code[idx].op = Opcode::Trap;
                     self.code[idx].imm = 0;
                 }
             }
@@ -509,6 +512,17 @@ impl ChunkBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unbound_label_becomes_a_trap() {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        let missing = b.new_label();
+        b.emit_jump(missing);
+        b.emit_return(0);
+        let chunk = b.finish();
+        assert_eq!(chunk.code[0].op, Opcode::Trap);
+    }
 
     #[test]
     fn emit_native1_from_never_clobbers_source_register() {

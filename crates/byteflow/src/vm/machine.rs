@@ -768,25 +768,26 @@ impl Vm {
                         });
                     }
                     let dict = self.dict.get_or_insert_with(HashMap::new);
-                    let old = dict.insert(key, value).unwrap_or(Value::Unit);
+                    let old = match dict.insert(key, value) {
+                        Some(prev) => prev,
+                        None => Value::Unit,
+                    };
                     trap!(self.set_reg(instr.a, old));
                 }
                 Opcode::DictGet => {
                     let key = trap!(self.int_from_reg(instr.b));
-                    let value = self
-                        .dict
-                        .as_ref()
-                        .and_then(|d| d.get(&key).cloned())
-                        .unwrap_or(Value::Unit);
+                    let value = match self.dict.as_ref().and_then(|d| d.get(&key).cloned()) {
+                        Some(v) => v,
+                        None => Value::Unit,
+                    };
                     trap!(self.set_reg(instr.a, value));
                 }
                 Opcode::DictErase => {
                     let key = trap!(self.int_from_reg(instr.b));
-                    let old = self
-                        .dict
-                        .as_mut()
-                        .and_then(|d| d.remove(&key))
-                        .unwrap_or(Value::Unit);
+                    let old = match self.dict.as_mut().and_then(|d| d.remove(&key)) {
+                        Some(v) => v,
+                        None => Value::Unit,
+                    };
                     trap!(self.set_reg(instr.a, old));
                 }
                 Opcode::ReceiveMatchEq => {
@@ -802,7 +803,10 @@ impl Vm {
                     };
                 }
                 Opcode::StartChild => {
-                    let function = u32::try_from(instr.imm).unwrap_or(u32::MAX);
+                    let function = match u32::try_from(instr.imm) {
+                        Ok(f) => f,
+                        Err(_) => u32::MAX,
+                    };
                     if self.chunk.function(function).is_none() {
                         return VmResult::Trap(Fault::BadFunction {
                             index: function,
@@ -1486,16 +1490,17 @@ mod tests {
     }
 
     #[test]
-    fn fresh_request_id_stays_in_i64_domain() {
+    fn fresh_request_id_stays_in_i64_domain() -> TestResult {
         let mut b = ChunkBuilder::new("t");
         b.begin_function("main", 0, 1);
         b.emit_return(0);
-        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[]).expect("vm");
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
         vm.set_next_request_id_for_test(i64::MAX as u64);
         let id = vm.fresh_request_id();
         assert_eq!(id, i64::MAX as u64);
         assert_eq!(vm.fresh_request_id(), i64::MAX as u64);
         assert!((id as i64) >= 0);
+        Ok(())
     }
 
     #[test]

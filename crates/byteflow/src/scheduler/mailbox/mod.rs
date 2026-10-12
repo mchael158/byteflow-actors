@@ -676,7 +676,10 @@ mod tests {
     }
 
     fn hop_payload_int(msg: &Message) -> i64 {
-        msg.payload.as_int().unwrap_or(0)
+        match msg.payload.as_int() {
+            Some(n) => n,
+            None => 0,
+        }
     }
 
     fn hop(sender: u64, request_id: u64, tag: u16, payload: impl Into<Value>) -> Value {
