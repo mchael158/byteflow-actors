@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.10)
+## 7. FlowCap — Current Version (0.9.11)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -446,7 +446,7 @@ because it originated outside bytecode.
 
 ---
 
-## 16. Capability Model (0.9.10 — implemented)
+## 16. Capability Model (0.9.11 — implemented)
 
 The security architecture is object-capability based:
 
@@ -563,15 +563,17 @@ signatures, MACs, or trust roots inside Byteflow).
 - Process-wide caps on links / monitors / registry names
   (`max_links` / `max_monitors` / `max_registry_names`), enforced inside
   each store under the same lock as the table.
-- [`RuntimeConfig::paranoid_jumps`](../src/scheduler/runtime.rs): always ON
-  when `trust == Untrusted` (OR with the explicit flag). Applied in
-  `spawn_on` for every VM.
+- [`RuntimeConfig::paranoid_jumps`](../src/scheduler/runtime.rs): still
+  forced on for `trust == Untrusted` and for [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs).
+  The VM bounds-checks every `Jump` / `Branch` either way (`Fault::BadJump`).
+  `verify` also rejects a jump that would enter another function.
 - [`Runtime::with_attested`](../src/scheduler/runtime.rs): fingerprint gate
   before verify/start; [`SpawnError::Attestation`](crate::SpawnError) distinct
   from [`SpawnError::VerifyFailed`](crate::SpawnError).
 - [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs) expands to include
-  the new caps + `paranoid_jumps: true`. **`Default` stays permissive** (DX);
-  production untrusted workloads should use `sandbox()` + `with_attested`
+  the relation caps + `paranoid_jumps: true`. **`Default` stays permissive**
+  on those caps (DX); jump bounds are fail-closed in every config.
+  Production untrusted workloads should use `sandbox()` + `with_attested`
   + a minimal native table.
 
 ---

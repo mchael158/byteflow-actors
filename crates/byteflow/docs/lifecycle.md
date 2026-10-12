@@ -120,7 +120,10 @@ unlimited). A park that would exceed the cap fails the asker closed.
 
 Bytecode `Send` / `Ask` against a full `Reject` inbox **park the sender**
 in the target mailbox. Each pop admits **one** waiter (no wake storm).
-Host `Runtime::send` still returns `SendError::MailboxFull`.
+The hop's quota charge is released when the waiter is admitted, or on
+finalize if the flow dies still parked. That charge is not forwarded to
+the process `MemoryBudget`. Host `Runtime::send` still returns
+`SendError::MailboxFull`.
 
 `Mailbox::close` runs before directory unregister so a sender that lost
 the Full/park race cannot park on a dead inbox (that would leak the flow).

@@ -192,7 +192,9 @@ Host `Runtime::send` to a full inbox under `Reject` returns
 `SendError::MailboxFull` and does **not** fail the sending flow (the
 host is not a bytecode actor). Bytecode `Send` / `Ask` to a full inbox
 park the **sender flow** (`WAITING_SEND`) and wake it when a slot
-frees. A hop larger than the whole byte budget is never parked — that
+frees. The in-flight hop is charged on the sender's flow quota only; the
+charge is released on admit or finalize, not on the process `MemoryBudget`.
+A hop larger than the whole byte budget is never parked — that
 wait could never complete.
 
 The default budget is deliberately larger than the decoder's 1 MiB blob

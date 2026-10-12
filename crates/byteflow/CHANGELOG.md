@@ -4,9 +4,16 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-10-12
+
 ### Fixed
 
+- **`verify`:** `Jump` / `Branch` must stay inside the function that contains
+  them, or land exactly at `code.len()`. A target in another function is
+  `JumpOutOfRange`.
 - **Assembler:** a `local` past r254 emits `Trap` instead of aliasing a slot. An unbound jump label becomes `Trap` instead of a no-op jump.
+- **`unwrap` family:** production and tests use `match` / `?`. No `unwrap`,
+  `expect`, `unwrap_or`, or `unwrap_or_else`.
 - **`verify`:** `StartChild` function index is range-checked with `Call` / `Spawn`.
 - **`Value::from(u64)`:** saturates at `i64::MAX` instead of wrapping negative.
 - **`WAITING_SEND`:** the parked hop's quota charge is released on admit or

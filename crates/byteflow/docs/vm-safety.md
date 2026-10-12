@@ -206,9 +206,13 @@ rather than imply a uniform belt-and-braces.
 `Jump` / `Branch` compute `pc + offset` and bounds-check the target at
 runtime. Valid targets are `0..=code.len()` (one past the end = implicit
 return). Anything else is [`Fault::BadJump`](crate::Fault::BadJump)
-(fail-closed). For a verified chunk the check is redundant —
-`JumpOutOfRange` already proved every offset — but it keeps hand-built or
-corrupted chunks from completing as a silent `return Unit`.
+(fail-closed). `verify` is stricter: a jump must stay inside the function
+that contains it, or land exactly at `code.len()`. A target inside another
+function is [`VerifyError::JumpOutOfRange`](crate::VerifyError) — that
+body would otherwise run on the caller's register window. The runtime
+check stays even after `verify`, so a hand-built or corrupted chunk cannot
+complete as a silent `return Unit`. `RuntimeConfig::paranoid_jumps` is
+still set for untrusted and sandbox configs; it no longer toggles the check.
 
 No memory is touched out of bounds (the fetch goes through a checked
 `get`). `verify` remains mandatory for untrusted input: it still settles

@@ -250,8 +250,17 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
                 let target = at as i64 + 1 + instr.imm as i64;
                 if target < 0 || target as usize > len {
                     // == len is allowed: jumping to "one past the end" is a
-                    // valid way to fall off the end of a function body.
+                    // valid way to fall off the end of the chunk.
                     return Err(VerifyError::JumpOutOfRange { at, target, len });
+                }
+                // A jump may stay inside the function that contains `at`, or
+                // land exactly at `code.len()` (implicit return). Landing on
+                // another function's body would run that code with this frame.
+                if let Some((start, end)) = function_span(&chunk.functions, at, len) {
+                    let t = target as usize;
+                    if t != len && (t < start || t >= end) {
+                        return Err(VerifyError::JumpOutOfRange { at, target, len });
+                    }
                 }
             }
             _ => {}
@@ -259,6 +268,38 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
     }
 
     Ok(())
+}
+
+/// Instruction range owned by the function whose `entry` is the greatest
+/// entry `<= at`. The end is the next function entry, or `code_len`.
+fn function_span(
+    functions: &[super::chunk::FunctionDef],
+    at: usize,
+    code_len: usize,
+) -> Option<(usize, usize)> {
+    let mut start = None;
+    for def in functions {
+        let entry = def.entry as usize;
+        if entry <= at {
+            start = Some(match start {
+                Some(prev) if prev >= entry => prev,
+                _ => entry,
+            });
+        }
+    }
+    let start = start?;
+    let mut end = code_len;
+    for def in functions {
+        let entry = def.entry as usize;
+        if entry > start && entry < end {
+            end = entry;
+        }
+    }
+    if at >= end {
+        None
+    } else {
+        Some((start, end))
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +371,32 @@ mod tests {
         assert!(matches!(
             verify(&chunk),
             Err(VerifyError::FunctionOutOfRange { index: 99, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_jump_into_another_function() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "other".into(),
+            entry: 2,
+            arity: 0,
+            num_registers: 1,
+        });
+        // at 0, imm 1 → target 2, the other function's entry.
+        chunk.code.push(Instruction::only_imm(Opcode::Jump, 1));
+        chunk.code.push(Instruction::nullary(Opcode::Nop));
+        chunk.code.push(Instruction::nullary(Opcode::Nop));
+        assert!(matches!(
+            verify(&chunk),
+            Err(VerifyError::JumpOutOfRange { target: 2, .. })
         ));
     }
 
