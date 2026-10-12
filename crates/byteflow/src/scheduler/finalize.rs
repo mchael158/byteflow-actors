@@ -398,6 +398,12 @@ pub(crate) fn resume_or_fail(
 fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<PendingExit>) {
     let id = pending.flow.id;
     let reason = pending.reason;
+    // Parked hops charge FlowQuota only. Drop that before the process
+    // MemoryBudget release below, which must see register-heap bytes alone.
+    let hop = pending.flow.take_hop_charge();
+    if hop > 0 {
+        pending.flow.quota.free(hop);
+    }
 
     // Host FlowId is never spawned; refuse so a bug cannot revoke host Caps.
     if id.is_host() {

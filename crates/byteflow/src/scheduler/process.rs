@@ -102,6 +102,9 @@ pub struct Flow {
     pub last_receive_dest: Option<u8>,
     /// Continuation after a `WAITING_SEND` park is admitted.
     pub(crate) pending_send: Option<PendingSend>,
+    /// Bytes held on [`Self::quota`] while a hop is parked in `WAITING_SEND`.
+    /// Freed once, on admit or finalize — never forwarded to [`crate::MemoryBudget`].
+    pub(crate) hop_charge: usize,
     pub(crate) supervisor: Option<super::supervisor::SupervisorLink>,
     /// Self-authority (rights + native mask). Derived only via [`Cap::attenuate`].
     pub(crate) authority: Cap,
@@ -154,6 +157,7 @@ impl Flow {
             pending_message: None,
             last_receive_dest: None,
             pending_send: None,
+            hop_charge: 0,
             supervisor: None,
             authority,
             cell,
@@ -165,5 +169,12 @@ impl Flow {
 
     pub(crate) fn complete(self, outcome: FlowOutcome) {
         self.completion.send(outcome);
+    }
+
+    /// Take the parked-hop quota charge so it is freed exactly once.
+    pub(crate) fn take_hop_charge(&mut self) -> usize {
+        let bytes = self.hop_charge;
+        self.hop_charge = 0;
+        bytes
     }
 }

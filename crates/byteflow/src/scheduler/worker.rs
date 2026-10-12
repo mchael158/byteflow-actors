@@ -1157,6 +1157,10 @@ fn admit_waiting_on(
             if let Err(e) = shared.waiting_send_at.remove(sender.id) {
                 report_fault(e);
             }
+            let hop = sender.take_hop_charge();
+            if hop > 0 {
+                sender.quota.free(hop);
+            }
             match sender.pending_send.take() {
                 Some(PendingSend::Ask {
                     dest_reg,
@@ -1184,9 +1188,13 @@ fn admit_waiting_on(
             }
         }
         Ok(AdmitSender::Idle) => {}
-        Ok(AdmitSender::Undeliverable(sender)) => {
+        Ok(AdmitSender::Undeliverable(mut sender)) => {
             if let Err(e) = shared.waiting_send_at.remove(sender.id) {
                 report_fault(e);
+            }
+            let hop = sender.take_hop_charge();
+            if hop > 0 {
+                sender.quota.free(hop);
             }
             finish_failed(
                 shared,
@@ -1438,6 +1446,7 @@ fn park_waiting_send(
     pending: PendingSend,
 ) {
     flow.pending_send = Some(pending);
+    flow.hop_charge = stamped.memory_size();
     if let Err(e) = shared.waiting_send_at.insert(flow.id, target) {
         report_fault(e);
         finalize_flow(

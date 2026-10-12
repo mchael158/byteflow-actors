@@ -4,6 +4,12 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`WAITING_SEND`:** the parked hop's quota charge is released on admit or
+  finalize, and is not forwarded to `MemoryBudget` (that release underflowed
+  when the process budget had never been charged for the hop).
+
 ## [0.9.10] — 2026-10-04
 
 ### Fixed
