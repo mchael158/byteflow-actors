@@ -260,7 +260,7 @@ pub mod docs {
 
 pub use attest::{decode_attested, fingerprint_bf, AttestError};
 pub use bytecode::{
-    asm_macros, decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId,
+    decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId,
     CapIdError, CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef,
     Instruction, Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow,
     RestartPolicy, RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION,

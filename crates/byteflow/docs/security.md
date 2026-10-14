@@ -566,7 +566,9 @@ signatures, MACs, or trust roots inside Byteflow).
 - [`RuntimeConfig::paranoid_jumps`](../src/scheduler/runtime.rs): still
   forced on for `trust == Untrusted` and for [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs).
   The VM bounds-checks every `Jump` / `Branch` either way (`Fault::BadJump`).
-  `verify` also rejects a jump that would enter another function.
+  `verify` also rejects a jump that would enter another function, and a
+  function that falls into the next one without `Jump` / `Return` / `Halt` /
+  `Exit` / `Trap`.
 - [`Runtime::with_attested`](../src/scheduler/runtime.rs): fingerprint gate
   before verify/start; [`SpawnError::Attestation`](crate::SpawnError) distinct
   from [`SpawnError::VerifyFailed`](crate::SpawnError).

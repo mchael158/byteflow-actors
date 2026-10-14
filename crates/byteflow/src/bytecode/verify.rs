@@ -119,6 +119,15 @@ pub enum VerifyError {
         index: usize,
         kind: ConstantKind,
     },
+    /// The instruction before the next function's `entry` can continue, so
+    /// the VM would run that body on this function's register window.
+    /// `Jump`, `Return`, `Halt`, `Exit`, and `Trap` close the span.
+    /// `Branch` and `Call` do not: both can execute the following instruction.
+    FallThrough {
+        function: usize,
+        at: usize,
+        next_entry: usize,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -159,6 +168,14 @@ impl fmt::Display for VerifyError {
             VerifyError::ForbiddenConstant { index, kind } => {
                 write!(f, "untrusted constant[{index}] must not embed {kind}")
             }
+            VerifyError::FallThrough {
+                function,
+                at,
+                next_entry,
+            } => write!(
+                f,
+                "function {function} falls through at instruction {at} into the function at {next_entry}"
+            ),
         }
     }
 }
@@ -177,6 +194,8 @@ impl std::error::Error for VerifyError {}
 /// the VM because it is a property of the function table, not of an
 /// execution: such a function cannot be entered at all, so letting it reach
 /// the interpreter only moves the same rejection later and per call.
+/// [`VerifyError::FallThrough`] is the same kind of fact for control flow:
+/// a span that reaches the next `entry` runs that body on the wrong frame.
 ///
 /// `Opcode::CallNative` targets are deliberately **not** range-checked
 /// here: native functions live in a `byteflow_vm::NativeTable` supplied by
@@ -267,6 +286,54 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
         }
     }
 
+    reject_fallthrough(chunk)?;
+    Ok(())
+}
+
+/// `Jump`, `Return`, `Halt`, `Exit`, and `Trap` never execute the next
+/// instruction. Every other opcode can: `Branch` falls through when the
+/// condition is false, and `Call` / `Yield` / `Send` resume at `pc + 1`.
+fn is_terminator(op: Opcode) -> bool {
+    matches!(
+        op,
+        Opcode::Jump | Opcode::Return | Opcode::Halt | Opcode::Exit | Opcode::Trap
+    )
+}
+
+/// Smallest function `entry` strictly after `start`, or `code_len` when
+/// this span runs to the end of the chunk.
+fn exclusive_end(functions: &[super::chunk::FunctionDef], start: usize, code_len: usize) -> usize {
+    let mut end = code_len;
+    for def in functions {
+        let entry = def.entry as usize;
+        if entry > start && entry < end {
+            end = entry;
+        }
+    }
+    end
+}
+
+/// Each function whose span ends at another `entry` must close with a
+/// terminator. Falling off `code.len()` is the implicit return and stays
+/// legal. A span that does not extend past `start` has no instruction to
+/// check (two functions sharing an `entry`).
+fn reject_fallthrough(chunk: &Chunk) -> Result<(), VerifyError> {
+    let len = chunk.code.len();
+    for (function, def) in chunk.functions.iter().enumerate() {
+        let start = def.entry as usize;
+        let end = exclusive_end(&chunk.functions, start, len);
+        if end >= len || end <= start {
+            continue;
+        }
+        let at = end - 1;
+        if !is_terminator(chunk.code[at].op) {
+            return Err(VerifyError::FallThrough {
+                function,
+                at,
+                next_entry: end,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -288,13 +355,7 @@ fn function_span(
         }
     }
     let start = start?;
-    let mut end = code_len;
-    for def in functions {
-        let entry = def.entry as usize;
-        if entry > start && entry < end {
-            end = entry;
-        }
-    }
+    let end = exclusive_end(functions, start, code_len);
     if at >= end {
         None
     } else {
@@ -415,6 +476,61 @@ mod tests {
             verify(&chunk),
             Err(VerifyError::JumpOutOfRange { .. })
         ));
+    }
+
+    fn two_functions(first: crate::bytecode::instruction::Instruction) -> Chunk {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        for (name, entry) in [("main", 0u32), ("other", 1)] {
+            chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+                name: name.into(),
+                entry,
+                arity: 0,
+                num_registers: 1,
+            });
+        }
+        chunk.code.push(first);
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        chunk
+    }
+
+    #[test]
+    fn rejects_fallthrough_into_the_next_function() {
+        use crate::bytecode::instruction::Instruction;
+        let boundary = VerifyError::FallThrough {
+            function: 0,
+            at: 0,
+            next_entry: 1,
+        };
+        for first in [
+            Instruction::nullary(Opcode::Nop),
+            Instruction::a_imm(Opcode::Branch, 0, -1),
+            Instruction::new(Opcode::Call, 0, 0, 0, 1),
+        ] {
+            assert_eq!(verify(&two_functions(first)), Err(boundary.clone()));
+        }
+    }
+
+    #[test]
+    fn accepts_jump_closing_a_function_before_the_next() {
+        use crate::bytecode::instruction::Instruction;
+        // target = 0 + 1 + (-1) = 0, still inside `main`.
+        let chunk = two_functions(Instruction::only_imm(Opcode::Jump, -1));
+        assert!(verify(&chunk).is_ok());
+    }
+
+    #[test]
+    fn accepts_implicit_return_on_the_last_function() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::nullary(Opcode::Nop));
+        assert!(verify(&chunk).is_ok());
     }
 
     #[test]

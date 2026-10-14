@@ -4,6 +4,13 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`verify`:** a function that does not end with `Jump`, `Return`, `Halt`,
+  `Exit`, or `Trap` can no longer fall into the next function's body.
+  `Branch` and `Call` still count as fall-through. The last function may
+  still run off `code.len()` (implicit return).
+
 ## [0.9.11] — 2026-10-12
 
 ### Fixed

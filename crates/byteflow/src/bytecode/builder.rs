@@ -427,8 +427,7 @@ impl ChunkBuilder {
     /// ```
     ///
     /// If you don't need `src` afterwards, call `emit_call_native` directly —
-    /// the `Move` would be pure overhead. See [`crate::emit_native1_from`] for
-    /// the macro-sugar form that forwards here.
+    /// the `Move` would be pure overhead.
     pub fn emit_native1_from(&mut self, dst: u8, src: u8, native_index: u32) {
         self.emit_move(dst, src);
         self.emit_call_native(dst, native_index, 1);
@@ -438,7 +437,7 @@ impl ChunkBuilder {
     /// contiguous at `r[base..base+argc]`.
     ///
     /// No behavior beyond [`Self::emit_call_native`] — exists so the call site
-    /// reads as "args already packed". See [`crate::emit_native_n`].
+    /// reads as "args already packed".
     pub fn emit_native_n(&mut self, base: u8, native_index: u32, argc: u8) {
         self.emit_call_native(base, native_index, argc);
     }
@@ -559,20 +558,5 @@ mod tests {
         assert_eq!(chunk.code[2].a, 1);
         assert_eq!(chunk.code[2].b, 2);
         assert_eq!(chunk.code[2].imm, 99);
-    }
-
-    #[test]
-    fn macro_forms_produce_identical_bytecode_to_the_methods() {
-        let mut via_method = ChunkBuilder::new("via-method");
-        via_method.begin_function("main", 0, 8);
-        via_method.emit_native1_from(1, 0, 10);
-        via_method.emit_native_n(1, 99, 2);
-
-        let mut via_macro = ChunkBuilder::new("via-macro");
-        via_macro.begin_function("main", 0, 8);
-        crate::emit_native1_from!(via_macro, 1, 0, 10);
-        crate::emit_native_n!(via_macro, 1, 99, 2);
-
-        assert_eq!(via_method.finish().code, via_macro.finish().code);
     }
 }
