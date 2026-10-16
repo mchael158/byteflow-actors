@@ -216,8 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_limit_distinct_from_already_registered() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn registry_limit_distinct_from_already_registered() -> Result<(), Box<dyn std::error::Error>> {
         let store = RegistryStore::new(1);
         let a = next_flow_id();
         let b = next_flow_id();

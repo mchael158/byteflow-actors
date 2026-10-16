@@ -863,11 +863,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     }
                 }
             }
-            VmResult::HostAwait {
-                dest_reg,
-                op,
-                args,
-            } => {
+            VmResult::HostAwait { dest_reg, op, args } => {
                 let Some(bridge) = shared.host_await_bridge.as_ref() else {
                     finish_failed(shared, *flow, "HostAwait: no bridge".into());
                     return;
@@ -878,10 +874,8 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         if finalize_if_killed_host_await(shared, flow_id) {
                             return;
                         }
-                        let done = super::host_await::HostAwaitCompleter::new(
-                            Arc::clone(shared),
-                            ticket,
-                        );
+                        let done =
+                            super::host_await::HostAwaitCompleter::new(Arc::clone(shared), ticket);
                         let req = super::host_await::HostAwaitRequest {
                             flow: flow_id,
                             op,
@@ -1059,6 +1053,28 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     finish_failed(shared, *flow, "start_child: bad restart policy".into());
                     return;
                 };
+                match flow.vm.chunk_arc().function(function) {
+                    Some(def) if def.arity == 0 => {}
+                    Some(def) => {
+                        finish_failed(
+                            shared,
+                            *flow,
+                            format!(
+                                "start_child: function {function} has arity {}, the opcode passes none",
+                                def.arity
+                            ),
+                        );
+                        return;
+                    }
+                    None => {
+                        finish_failed(
+                            shared,
+                            *flow,
+                            format!("start_child: function {function} is not in the chunk"),
+                        );
+                        return;
+                    }
+                }
                 let Some(link) = flow.supervisor.clone() else {
                     finish_failed(
                         shared,
@@ -1067,20 +1083,16 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     );
                     return;
                 };
-                let handle = match link.start_child(
-                    crate::ChildSpec::new("", function).restart(policy),
-                ) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                };
+                let handle =
+                    match link.start_child(crate::ChildSpec::new("", function).restart(policy)) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                    };
                 let child = handle.id();
-                match shared
-                    .caps
-                    .mint(flow.id, child, CapRights::ADDRESSING)
-                {
+                match shared.caps.mint(flow.id, child, CapRights::ADDRESSING) {
                     Ok(cap) => {
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(cap))
                         else {
@@ -1145,7 +1157,6 @@ enum DeliverStatus {
     Gone,
     Unavailable,
 }
-
 
 fn admit_waiting_on(
     mailbox: &std::sync::Arc<super::mailbox::Mailbox>,

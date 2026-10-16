@@ -21,7 +21,7 @@ impl EntropyError {
 
 impl fmt::Display for EntropyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "entropy fill failed: {}", self.inner)
+        self.inner.fmt(f)
     }
 }
 

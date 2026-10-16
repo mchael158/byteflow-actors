@@ -114,6 +114,15 @@ pub enum VerifyError {
         arity: u8,
         num_registers: u8,
     },
+    /// `Call` or `Spawn` passes a different argument count than the callee
+    /// declares. `StartChild` is the same fact with `argc == 0`: the opcode
+    /// has no argument window, so a non-zero arity would enter as `Unit`.
+    CallArity {
+        at: usize,
+        function: u32,
+        argc: u8,
+        arity: u8,
+    },
     /// Untrusted chunk embedded a Cap, Pid, or Message in the constant pool.
     ForbiddenConstant {
         index: usize,
@@ -164,6 +173,15 @@ impl fmt::Display for VerifyError {
             } => write!(
                 f,
                 "function {function} declares arity {arity} but only {num_registers} registers"
+            ),
+            VerifyError::CallArity {
+                at,
+                function,
+                argc,
+                arity,
+            } => write!(
+                f,
+                "instruction {at} invokes function {function} with {argc} arguments, arity is {arity}"
             ),
             VerifyError::ForbiddenConstant { index, kind } => {
                 write!(f, "untrusted constant[{index}] must not embed {kind}")
@@ -250,13 +268,43 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
                     });
                 }
             }
-            Opcode::Spawn | Opcode::Call | Opcode::StartChild => {
+            Opcode::Call | Opcode::Spawn => {
                 let idx = instr.imm as u32;
                 if idx as usize >= chunk.functions.len() {
                     return Err(VerifyError::FunctionOutOfRange {
                         at,
                         index: idx,
                         len: chunk.functions.len(),
+                    });
+                }
+                let arity = chunk.functions[idx as usize].arity;
+                if instr.b != arity {
+                    return Err(VerifyError::CallArity {
+                        at,
+                        function: idx,
+                        argc: instr.b,
+                        arity,
+                    });
+                }
+            }
+            Opcode::StartChild => {
+                let idx = instr.imm as u32;
+                if idx as usize >= chunk.functions.len() {
+                    return Err(VerifyError::FunctionOutOfRange {
+                        at,
+                        index: idx,
+                        len: chunk.functions.len(),
+                    });
+                }
+                // The opcode carries a restart policy, not an argument list.
+                // The supervisor starts the child with an empty window.
+                let arity = chunk.functions[idx as usize].arity;
+                if arity != 0 {
+                    return Err(VerifyError::CallArity {
+                        at,
+                        function: idx,
+                        argc: 0,
+                        arity,
                     });
                 }
             }
@@ -517,6 +565,77 @@ mod tests {
         // target = 0 + 1 + (-1) = 0, still inside `main`.
         let chunk = two_functions(Instruction::only_imm(Opcode::Jump, -1));
         assert!(verify(&chunk).is_ok());
+    }
+
+    #[test]
+    fn rejects_call_whose_argc_differs_from_the_callee() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::new(Opcode::Call, 0, 1, 0, 0));
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::CallArity {
+                at: 0,
+                function: 0,
+                argc: 1,
+                arity: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_spawn_whose_argc_differs_from_the_callee() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 2,
+            num_registers: 2,
+        });
+        chunk.code.push(Instruction::new(Opcode::Spawn, 0, 0, 0, 0));
+        chunk.code.push(Instruction::abc(Opcode::Halt, 0, 0, 0));
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::CallArity {
+                at: 0,
+                function: 0,
+                argc: 0,
+                arity: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_start_child_of_a_function_that_expects_arguments() {
+        use crate::bytecode::instruction::Instruction;
+        let mut chunk = Chunk::default();
+        chunk.functions.push(crate::bytecode::chunk::FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 1,
+            num_registers: 1,
+        });
+        chunk
+            .code
+            .push(Instruction::new(Opcode::StartChild, 0, 0, 0, 0));
+        chunk.code.push(Instruction::abc(Opcode::Halt, 0, 0, 0));
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::CallArity {
+                at: 0,
+                function: 0,
+                argc: 0,
+                arity: 1,
+            })
+        );
     }
 
     #[test]

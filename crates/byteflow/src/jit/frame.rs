@@ -9,6 +9,21 @@ pub const OFF_EXIT_KIND: i32 = 24;
 pub const OFF_RETURN_REG: i32 = 28;
 pub const OFF_CALL_DEPTH: i32 = 32;
 pub const OFF_CALL_STACK: i32 = 40;
+/// Four `u64` words: bit `reg` is set when the trace stored that register.
+/// Must match [`JitFrame::written`].
+pub const OFF_WRITTEN: i32 = 48;
+/// Four `u64` words: bit `reg` means the stored value is a `Bool`, not an `Int`.
+/// Must match [`JitFrame::as_bool`].
+pub const OFF_AS_BOOL: i32 = 80;
+/// Four `u64` words: bit `reg` means the stored value is `Unit`.
+/// Must match [`JitFrame::as_unit`].
+pub const OFF_AS_UNIT: i32 = 112;
+/// Tags of the registers as they were when the trace was entered.
+/// A `Move` of a slot the trace has not assigned copies these bits unless
+/// that register was already written earlier in the same execution.
+/// Must match [`JitFrame::entry_as_bool`] and [`JitFrame::entry_as_unit`].
+pub const OFF_ENTRY_BOOL: i32 = 144;
+pub const OFF_ENTRY_UNIT: i32 = 176;
 
 /// Maximum nested intra-chunk calls handled inside one compiled trace.
 pub const MAX_JIT_CALL_DEPTH: usize = 32;
@@ -39,6 +54,47 @@ pub struct JitFrame {
     pub return_reg: u32,
     pub call_depth: u32,
     pub call_stack: *mut JitCallRecord,
+    /// Registers this trace assigned. Unset bits keep the VM's previous value
+    /// on the way back, so a `Unit` the trace never wrote does not become `Int(0)`.
+    pub written: [u64; 4],
+    /// Among [`Self::written`] bits, which results are bytecode `Bool`s
+    /// (`Eq` / `Lt` / `Le` / `LoadConst` of a bool, or a `Move` of one).
+    pub as_bool: [u64; 4],
+    /// Among [`Self::written`] bits, which results are `Unit`.
+    pub as_unit: [u64; 4],
+    /// `Bool` bits observed on entry. Read-only for the compiled trace.
+    pub entry_as_bool: [u64; 4],
+    /// `Unit` bits observed on entry. Read-only for the compiled trace.
+    pub entry_as_unit: [u64; 4],
 }
 
 pub type JitEntry = unsafe extern "C" fn(*mut JitFrame);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_words_sit_where_the_compiler_stores_them() {
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, written),
+            OFF_WRITTEN as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, as_bool),
+            OFF_AS_BOOL as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, as_unit),
+            OFF_AS_UNIT as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, entry_as_bool),
+            OFF_ENTRY_BOOL as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, entry_as_unit),
+            OFF_ENTRY_UNIT as usize
+        );
+    }
+}

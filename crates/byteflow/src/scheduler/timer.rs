@@ -147,6 +147,10 @@ impl TimerWheel {
 
     /// Take every sleeper out of the heap. Receive-timeout entries are
     /// dropped: those flows live in the mailbox and are drained there.
+    ///
+    /// `Flow` is already the scheduler's boxed task. The `Box` is that
+    /// ownership, not a second heap layer around a `Vec` element.
+    #[allow(clippy::vec_box)]
     pub(crate) fn drain(&self) -> Vec<Box<Flow>> {
         let mut flows = Vec::new();
         match sync_lock::lock(&self.heap, "TimerWheel::drain") {

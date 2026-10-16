@@ -224,13 +224,8 @@ impl HostAwaitIndex {
         }
         let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
         g.by_flow.insert(flow_id, ticket);
-        g.by_ticket.insert(
-            ticket,
-            ParkedHostAwait {
-                flow,
-                dest_reg,
-            },
-        );
+        g.by_ticket
+            .insert(ticket, ParkedHostAwait { flow, dest_reg });
         Ok(Ok((ticket, flow_id)))
     }
 
@@ -644,8 +639,12 @@ mod runtime_tests {
         for (_, done) in bridge.take_all()? {
             let _ = done.complete(Value::Int(1));
         }
-        let a_out = a.join_timeout(Duration::from_secs(2)).ok_or("a timed out")?;
-        let b_out = b.join_timeout(Duration::from_secs(2)).ok_or("b timed out")?;
+        let a_out = a
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("a timed out")?;
+        let b_out = b
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("b timed out")?;
         rt.shutdown();
 
         match (a_out, b_out) {

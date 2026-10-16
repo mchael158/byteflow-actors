@@ -201,10 +201,7 @@ impl SupervisorLink {
     }
 
     /// Spawn another child on the same supervisor (bytecode `StartChild`).
-    pub(crate) fn start_child(
-        &self,
-        spec: ChildSpec,
-    ) -> Result<FlowHandle, SpawnError> {
+    pub(crate) fn start_child(&self, spec: ChildSpec) -> Result<FlowHandle, SpawnError> {
         spawn_child(&self.inner, spec)
     }
 }
@@ -353,9 +350,7 @@ fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnE
             if let Some(live) = children.by_id.get_mut(&id) {
                 live.expected_shutdown = true;
             }
-            inner
-                .spawner
-                .request_kill(id, FlowExitReason::Supervisor);
+            inner.spawner.request_kill(id, FlowExitReason::Supervisor);
             return Err(e);
         }
     }
@@ -468,11 +463,7 @@ fn drive(inner: Arc<Inner>) {
                 if let Some(exit) = events.pop_front() {
                     break exit;
                 }
-                match sync_lock::wait(
-                    &inner.cvar,
-                    events,
-                    "supervisor::wait",
-                ) {
+                match sync_lock::wait(&inner.cvar, events, "supervisor::wait") {
                     Ok(guard) => events = guard,
                     Err(e) => {
                         report_fault(e);
@@ -896,9 +887,7 @@ mod tests {
             Err(e) => return Err(format!("expected NameTaken, got Err({e})").into()),
         }
         // Failed register must kill the orphan spawn and leave only `parked`.
-        wait_until(|| {
-            rt.metrics().processes_failed > failed_before && sup.live_children() == 1
-        });
+        wait_until(|| rt.metrics().processes_failed > failed_before && sup.live_children() == 1);
         assert_eq!(sup.live_children(), 1);
         assert_eq!(
             registry_target(&rt, "svc")?,
@@ -910,10 +899,7 @@ mod tests {
         Ok(())
     }
 
-    fn registry_target(
-        rt: &Runtime,
-        name: &str,
-    ) -> Result<FlowId, Box<dyn std::error::Error>> {
+    fn registry_target(rt: &Runtime, name: &str) -> Result<FlowId, Box<dyn std::error::Error>> {
         rt.spawner()
             .shared
             .registry
@@ -933,9 +919,7 @@ mod tests {
             },
         )?;
         // Delayed trap so we can observe the first binding before restart.
-        let first = sup.start_child(
-            ChildSpec::new("svc", 2).restart(RestartPolicy::OnFailure),
-        )?;
+        let first = sup.start_child(ChildSpec::new("svc", 2).restart(RestartPolicy::OnFailure))?;
         let first_id = first.id();
         wait_until(|| registry_target(&rt, "svc").ok() == Some(first_id));
         wait_until(|| match registry_target(&rt, "svc") {
@@ -963,10 +947,8 @@ mod tests {
         )?;
         let a = registry_spawn(&sup, "a", 0)?; // wait
         let b = registry_spawn(&sup, "b", 0)?; // wait
-        // Delayed trap so the post-cascade registry rebind is observable.
-        let boom = sup.start_child(
-            ChildSpec::new("c", 2).restart(RestartPolicy::OnFailure),
-        )?;
+                                               // Delayed trap so the post-cascade registry rebind is observable.
+        let boom = sup.start_child(ChildSpec::new("c", 2).restart(RestartPolicy::OnFailure))?;
         let old_a = a;
         let old_b = b;
         let old_c = boom.id();

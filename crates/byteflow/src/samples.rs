@@ -1,4 +1,4 @@
-﻿//! Built-in demo chunks assembled with [`crate::Program`].
+//! Built-in demo chunks assembled with [`crate::Program`].
 //!
 //! Use these as runnable specs of the messaging contract (and as regression
 //! tests). Prefer copying a sample over inventing hop register layouts from
@@ -886,9 +886,7 @@ mod tests {
         let root = rt.function_index("root").ok_or("root")?;
         let sup = rt.supervisor()?;
         let outcome = sup
-            .start_child(
-                crate::ChildSpec::new("root", root).restart(crate::RestartPolicy::Never),
-            )?
+            .start_child(crate::ChildSpec::new("root", root).restart(crate::RestartPolicy::Never))?
             .join();
         sup.shutdown();
         rt.shutdown();
@@ -1248,7 +1246,10 @@ mod tests {
             "trapper must signal READY after SetTrapExit, got {ready:?}"
         );
         rt.link(trapper.id(), killer.id())?;
-        rt.send(killer.id(), Value::Message(Message::request(0, TAG_REQ as u16, 0)))?;
+        rt.send(
+            killer.id(),
+            Value::Message(Message::request(0, TAG_REQ as u16, 0)),
+        )?;
         let boom_out = killer.join();
         let trap_out = trapper.join();
         rt.shutdown();

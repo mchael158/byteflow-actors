@@ -66,6 +66,15 @@ pub enum Fault {
         index: u32,
         table_size: u32,
     },
+    /// `Call` passed a different argument count than the callee declares.
+    ///
+    /// The interpreter used to drop the extras and leave the missing
+    /// registers as `Unit`. That disagrees with [`crate::VerifyError::CallArity`]:
+    /// a chunk that skips `verify` must still fail closed.
+    BadArity {
+        passed: usize,
+        expected: u8,
+    },
     /// Function call nesting exceeded `Vm::MAX_CALL_DEPTH`. Bytecode has no
     /// native stack overflow (frames are heap-allocated `Vec<Value>`s), so
     /// this is a deliberate, checked limit rather than a segfault.
@@ -131,6 +140,12 @@ impl fmt::Display for Fault {
                 write!(
                     f,
                     "function index {index} out of range (table size {table_size})"
+                )
+            }
+            Fault::BadArity { passed, expected } => {
+                write!(
+                    f,
+                    "call passed {passed} arguments, callee arity is {expected}"
                 )
             }
             Fault::RegisterIndexOverflow { base, offset } => write!(

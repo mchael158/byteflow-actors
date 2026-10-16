@@ -146,15 +146,15 @@ impl CapTable {
     ) -> Result<CapId, RuntimeError> {
         for _ in 0..MINT_ATTEMPTS {
             let id = match CapId::random() {
-                Ok(id) => id,
+                Ok(id) if !id.is_none() => id,
+                Ok(_) | Err(crate::CapIdError::ReservedZero) => {
+                    return Err(RuntimeError::ReservedCapId);
+                }
                 Err(crate::CapIdError::Entropy(err)) => {
                     return Err(RuntimeError::EntropyFailed(err));
                 }
-                Err(crate::CapIdError::ReservedZero) => {
-                    return Err(RuntimeError::CapIdCollision);
-                }
             };
-            if id.is_none() || table.contains_key(&id) {
+            if table.contains_key(&id) {
                 continue;
             }
             table.insert(id, entry);

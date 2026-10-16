@@ -8,8 +8,22 @@ All notable changes to **byteflow-actors** are documented here.
 
 - **`CapId` entropy:** `fill_bytes` reads the OS CSPRNG through `getrandom`
   and keeps that error on `EntropyError`. A failed read is no longer
-  reported as eight reserved-zero draws. The old path hashed a per-thread
-  `RandomState` key and always returned `Ok`.
+  reported as eight reserved-zero draws (`RuntimeError::ReservedCapId`).
+  A full table of live ids stays `CapIdCollision`. The old path hashed a
+  per-thread `RandomState` key and always returned `Ok`.
+- **`verify`:** `Call` and `Spawn` must pass exactly the callee's arity.
+  `StartChild` must target a function of arity 0 (the opcode passes no
+  arguments). The VM traps `Call` with `Fault::BadArity` when a chunk
+  skips `verify`. Bytecode `Spawn` does the same at `spawn_on` instead of
+  filling missing registers with `Unit`.
+- **JIT:** a trace that returns to the interpreter writes back only registers
+  it assigned. Comparison results stay `Bool`. `Move` keeps the source tag,
+  including a `Bool` or `Unit` that was already in the register file when the
+  trace started. `Call` resumes in the interpreter so a callee cannot
+  overwrite the caller's registers. A budget exit flushes values already
+  computed in the trace.
+- **`NativeTable::register_at`:** an index at or past 4096 slots is
+  `IndexTooLarge` instead of resizing the table to `index + 1`.
 
 ## [0.9.12] — 2026-10-14
 

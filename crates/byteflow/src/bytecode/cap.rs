@@ -107,9 +107,7 @@ impl fmt::Display for CapIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CapIdError::Entropy(err) => write!(f, "capability CSPRNG unavailable: {err}"),
-            CapIdError::ReservedZero => {
-                f.write_str("capability id draw was the reserved zero")
-            }
+            CapIdError::ReservedZero => f.write_str("capability id draw was the reserved zero"),
         }
     }
 }

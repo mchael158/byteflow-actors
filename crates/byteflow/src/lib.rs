@@ -174,9 +174,10 @@
 //! # }
 //! ```
 //!
-//! A flow destroyed before it produced an outcome — [`Runtime::shutdown`]
-//! does not drain suspended flows — wakes its joiner with a failure instead
-//! of leaving it parked forever. See [`docs::error_model`].
+//! [`Runtime::shutdown`] finalizes flows still parked in the timer or a
+//! mailbox; the joiner sees `runtime shutdown` instead of blocking. A
+//! completion sender dropped without that finalize is
+//! [`RuntimeError::Abandoned`]. See [`docs::error_model`].
 //!
 //! # Design guides (rendered on docs.rs)
 //!
@@ -260,11 +261,11 @@ pub mod docs {
 
 pub use attest::{decode_attested, fingerprint_bf, AttestError};
 pub use bytecode::{
-    decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId,
-    CapIdError, CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef,
-    Instruction, Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow,
-    RestartPolicy, RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION,
-    MAGIC, TAG_SYS_DOWN, TAG_SYS_EXIT,
+    decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId, CapIdError,
+    CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef, Instruction,
+    Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow, RestartPolicy,
+    RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION, MAGIC, TAG_SYS_DOWN,
+    TAG_SYS_EXIT,
 };
 pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot};
 pub use natives::{
@@ -277,12 +278,12 @@ pub use scheduler::{
     check_admin, check_link, check_monitor, exec_delegate, fault_count, flow_id_from_u64,
     next_flow_id, report_fault, AdminError, CapError, Capability, ChildSpec, DelegateError,
     Delivery, DownEvent, Flow, FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome,
-    FlowQuota, JoinError, LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes,
-    MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef,
-    OverflowPolicy, QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime, RuntimeConfig,
-    RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
-    Supervisor, SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM, HostAwaitBridge, HostAwaitCompleter,
-    HostAwaitError, HostAwaitOp, HostAwaitRequest,
+    FlowQuota, HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest,
+    JoinError, LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity,
+    MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef, OverflowPolicy,
+    QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime, RuntimeConfig, RuntimeError,
+    RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError, Supervisor,
+    SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

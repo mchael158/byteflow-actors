@@ -583,6 +583,15 @@ impl Vm {
                             })
                         }
                     };
+                    // `verify` rejects this statically. Direct `Vm::run` on an
+                    // unverified chunk must not drop extras or fill holes with
+                    // `Unit` — both hide a wrong call.
+                    if argc != arity {
+                        return VmResult::Trap(Fault::BadArity {
+                            passed: usize::from(argc),
+                            expected: arity,
+                        });
+                    }
                     let args = trap!(self.gather_regs(dst, argc, 0));
                     let mut new_frame = Frame::new(function, num_registers, Some(dst));
                     new_frame.set_pc(entry);
@@ -1248,6 +1257,26 @@ mod tests {
             }) => Ok(()),
             Err(e) => Err(format!("unexpected fault: {e}").into()),
             Ok(_) => Err("three arguments cannot be loaded into one register".into()),
+        }
+    }
+
+    #[test]
+    fn call_with_the_wrong_argc_traps_instead_of_padding() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let callee = b.begin_function("callee", 0, 1);
+        b.emit_load_imm(0, 1);
+        b.emit_return(0);
+        let main = b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, 7);
+        b.emit_call(0, callee, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), main, &[])?;
+        match vm.run(20) {
+            VmResult::Trap(Fault::BadArity {
+                passed: 1,
+                expected: 0,
+            }) => Ok(()),
+            other => Err(format!("expected BadArity, got {other:?}").into()),
         }
     }
 

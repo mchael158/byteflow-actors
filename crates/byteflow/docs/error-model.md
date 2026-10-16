@@ -71,12 +71,12 @@ There are two distinct questions, and a runtime owes an answer to both.
 
 ### "The outcome can never arrive"
 
-`Runtime::shutdown` does not drain flows out of the timer or the worker
-deques — they are destroyed where they sit, without producing an outcome.
-Dropping a completion sender without sending is therefore a first-class
-event: it wakes the joiner with
-[`RuntimeError::Abandoned`](crate::RuntimeError::Abandoned) instead of
-leaving it on a condvar nobody will notify again.
+[`Runtime::shutdown`](crate::Runtime::shutdown) finalizes flows still parked
+in the timer, a mailbox, or a worker deque. The joiner wakes with
+`FlowOutcome::Failed("runtime shutdown")` instead of blocking. A completion
+sender dropped *without* that finalize is a different event:
+[`RuntimeError::Abandoned`](crate::RuntimeError::Abandoned) (`destroyed`),
+so a lost value is not reported as a clean shutdown.
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -95,12 +95,11 @@ let handle = rt.spawn(0, &[])?;
 // Give it time to reach the Sleep and park in the timer.
 std::thread::sleep(Duration::from_millis(150));
 
-// Shutdown destroys it where it sits: no outcome will ever be produced.
+// Shutdown finalizes the sleeper. `join` must not block forever.
 rt.shutdown();
 
-// `join` reports that instead of blocking this thread forever.
 match handle.join() {
-    FlowOutcome::Failed(why) => assert!(why.contains("destroyed")),
+    FlowOutcome::Failed(why) => assert!(why.contains("runtime shutdown")),
     FlowOutcome::Completed(_) => return Err("a 60 s sleep cannot have finished".into()),
 }
 # Ok(())

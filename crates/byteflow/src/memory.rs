@@ -427,8 +427,7 @@ mod tests {
     fn same_capacity_replace_needs_peak_headroom() {
         // S3 peaks at old+new before releasing old. With limit == capacity,
         // a same-size replace must fail even though steady-state would fit.
-        let mut buf = Vec::with_capacity(600);
-        buf.resize(600, 0);
+        let buf = vec![0u8; 600];
         let cap = buf.capacity();
         let budget = Arc::new(MemoryBudget::new(cap));
         let mut value = match HeapBytes::new(Arc::clone(&budget), buf) {
@@ -437,8 +436,7 @@ mod tests {
         };
         assert_eq!(budget.used(), cap);
 
-        let mut next = Vec::with_capacity(cap);
-        next.resize(600, 0);
+        let next = vec![0u8; 600];
         assert_eq!(next.capacity(), cap);
 
         let err = value.replace(next);

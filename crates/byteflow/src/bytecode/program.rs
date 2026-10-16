@@ -461,8 +461,7 @@ impl<'a> Fn<'a> {
         argc: u8,
         rights: crate::bytecode::CapRights,
     ) {
-        self.b
-            .emit_spawn_with_rights(dst.0, function, argc, rights);
+        self.b.emit_spawn_with_rights(dst.0, function, argc, rights);
     }
 
     /// Attenuate `src` into a new Cap (rights mask is an immediate).
@@ -524,16 +523,14 @@ impl<'a> Fn<'a> {
     /// Selective receive with BEAM `after`: `Unit` if `millis` elapses first.
     pub fn receive_match_timeout(&mut self, tag: Reg, millis: Reg) -> Reg {
         let msg = self.local();
-        self.b
-            .emit_receive_match_timeout(msg.0, tag.0, millis.0);
+        self.b.emit_receive_match_timeout(msg.0, tag.0, millis.0);
         msg
     }
 
     /// Immediate-tag selective receive with BEAM `after`.
     pub fn receive_match_imm_timeout(&mut self, tag: u16, millis: Reg) -> Reg {
         let msg = self.local();
-        self.b
-            .emit_receive_match_imm_timeout(msg.0, tag, millis.0);
+        self.b.emit_receive_match_imm_timeout(msg.0, tag, millis.0);
         msg
     }
 
@@ -583,8 +580,7 @@ impl<'a> Fn<'a> {
     /// by [`crate::Supervisor`]. `policy` is Always / OnFailure / Never.
     pub fn start_child(&mut self, function: FuncId, policy: crate::RestartPolicy) -> Reg {
         let dst = self.local();
-        self.b
-            .emit_start_child(dst.0, function, policy.as_u8());
+        self.b.emit_start_child(dst.0, function, policy.as_u8());
         dst
     }
 
@@ -948,10 +944,7 @@ mod tests {
         let chunk = program.build();
         crate::verify(&chunk)?;
         let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), main, &[])?;
-        assert!(matches!(
-            vm.run(10_000),
-            VmResult::Complete(Value::Int(42))
-        ));
+        assert!(matches!(vm.run(10_000), VmResult::Complete(Value::Int(42))));
         Ok(())
     }
 
@@ -972,11 +965,7 @@ mod tests {
         crate::verify(&chunk)?;
         let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), main, &[])?;
         match vm.run(10_000) {
-            VmResult::Spawn {
-                function,
-                args,
-                ..
-            } => {
+            VmResult::Spawn { function, args, .. } => {
                 assert_eq!(function, child);
                 assert_eq!(args, vec![Value::Int(10), Value::Int(32)]);
             }
@@ -992,8 +981,7 @@ mod tests {
             let src = f.self_cap();
             let native = f.self_cap();
             let _rights_only = f.delegate(src, crate::bytecode::CapRights::SEND);
-            let _narrowed =
-                f.delegate_with_native(src, crate::bytecode::CapRights::SEND, native);
+            let _narrowed = f.delegate_with_native(src, crate::bytecode::CapRights::SEND, native);
             f.return_(src);
         });
         let chunk = program.build();

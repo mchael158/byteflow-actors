@@ -24,6 +24,12 @@ pub struct JitReturn {
     pub kind: u32,
     pub pc: u32,
     pub return_reg: u32,
+    /// Copied out of [`super::frame::JitFrame::written`] after the trace returns.
+    pub written: [u64; 4],
+    /// Copied out of [`super::frame::JitFrame::as_bool`].
+    pub as_bool: [u64; 4],
+    /// Copied out of [`super::frame::JitFrame::as_unit`].
+    pub as_unit: [u64; 4],
 }
 
 pub const JIT_CONTINUE: u32 = 0;
@@ -35,38 +41,41 @@ pub const JIT_DEOPT: u32 = 5;
 
 impl JitReturn {
     pub fn from_reason(reason: ExitReason) -> Self {
+        let mut ret = Self {
+            kind: 0,
+            pc: 0,
+            return_reg: 0,
+            written: [0; 4],
+            as_bool: [0; 4],
+            as_unit: [0; 4],
+        };
         match reason {
-            ExitReason::Continue { pc } => Self {
-                kind: JIT_CONTINUE,
-                pc,
-                return_reg: 0,
-            },
-            ExitReason::Effect { pc } => Self {
-                kind: JIT_EFFECT,
-                pc,
-                return_reg: 0,
-            },
-            ExitReason::Return { return_reg } => Self {
-                kind: JIT_RETURN,
-                pc: 0,
-                return_reg: u32::from(return_reg),
-            },
-            ExitReason::Budget { pc } => Self {
-                kind: JIT_BUDGET,
-                pc,
-                return_reg: 0,
-            },
-            ExitReason::Trap { pc } => Self {
-                kind: JIT_TRAP,
-                pc,
-                return_reg: 0,
-            },
-            ExitReason::Deopt { pc } => Self {
-                kind: JIT_DEOPT,
-                pc,
-                return_reg: 0,
-            },
+            ExitReason::Continue { pc } => {
+                ret.kind = JIT_CONTINUE;
+                ret.pc = pc;
+            }
+            ExitReason::Effect { pc } => {
+                ret.kind = JIT_EFFECT;
+                ret.pc = pc;
+            }
+            ExitReason::Return { return_reg } => {
+                ret.kind = JIT_RETURN;
+                ret.return_reg = u32::from(return_reg);
+            }
+            ExitReason::Budget { pc } => {
+                ret.kind = JIT_BUDGET;
+                ret.pc = pc;
+            }
+            ExitReason::Trap { pc } => {
+                ret.kind = JIT_TRAP;
+                ret.pc = pc;
+            }
+            ExitReason::Deopt { pc } => {
+                ret.kind = JIT_DEOPT;
+                ret.pc = pc;
+            }
         }
+        ret
     }
 
     pub fn into_reason(self) -> ExitReason {

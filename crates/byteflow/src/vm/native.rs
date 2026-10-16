@@ -73,14 +73,27 @@ impl NativeTable {
     }
 }
 
-/// Host error while building a [`NativeTable`] (duplicate name or occupied slot).
+/// Highest index [`NativeTableBuilder::register_at`] will allocate.
+/// A `u32` index would otherwise resize the slot `Vec` to `index + 1`.
+pub const MAX_NATIVE_SLOTS: usize = 4096;
+
+/// Host error while building a [`NativeTable`] (duplicate name, occupied slot,
+/// or an index past [`MAX_NATIVE_SLOTS`]).
 ///
 /// Category A: the embedder misconfigured FFI. Never a panic — `std_native_table`
 /// and host tables must surface this as `Result`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeTableError {
     DuplicateName(String),
-    SlotOccupied { index: u32, name: String },
+    SlotOccupied {
+        index: u32,
+        name: String,
+    },
+    /// `register_at` asked for an index at or past [`MAX_NATIVE_SLOTS`].
+    IndexTooLarge {
+        index: u32,
+        limit: u32,
+    },
 }
 
 impl std::fmt::Display for NativeTableError {
@@ -94,6 +107,9 @@ impl std::fmt::Display for NativeTableError {
                     f,
                     "native slot {index} already occupied (registering '{name}')"
                 )
+            }
+            NativeTableError::IndexTooLarge { index, limit } => {
+                write!(f, "native slot {index} is past the limit of {limit}")
             }
         }
     }
@@ -143,6 +159,12 @@ impl NativeTableBuilder {
             }
         }
         let index_usize = index as usize;
+        if index_usize >= MAX_NATIVE_SLOTS {
+            return Err(NativeTableError::IndexTooLarge {
+                index,
+                limit: MAX_NATIVE_SLOTS as u32,
+            });
+        }
         if index_usize >= self.entries.len() {
             self.entries.resize_with(index_usize + 1, || None);
         }
@@ -337,6 +359,18 @@ mod tests {
         assert!(matches!(f(&[])?, Value::Int(42)));
         assert!(table.get(2).is_none());
         Ok(())
+    }
+
+    #[test]
+    fn register_at_rejects_an_index_past_the_slot_ceiling() {
+        let result = NativeTable::builder().register_at(u32::MAX, "huge", |_| Ok(Value::Unit));
+        assert_eq!(
+            result.map(|builder| builder.build().len()),
+            Err(NativeTableError::IndexTooLarge {
+                index: u32::MAX,
+                limit: MAX_NATIVE_SLOTS as u32,
+            })
+        );
     }
 
     #[test]

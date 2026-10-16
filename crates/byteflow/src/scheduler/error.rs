@@ -44,7 +44,9 @@ pub enum RuntimeError {
     AlreadyCollected(&'static str),
     /// OS CSPRNG failed while minting a capability.
     EntropyFailed(crate::entropy::EntropyError),
-    /// CSPRNG produced colliding ids beyond the retry budget (should not happen).
+    /// Eight draws were the reserved zero id (`CapId::NONE`).
+    ReservedCapId,
+    /// Fresh ids collided in the table beyond the retry budget.
     CapIdCollision,
     /// `finalize_flow` was asked to tear down the reserved host FlowId.
     CannotFinalizeHostFlow,
@@ -75,6 +77,9 @@ impl fmt::Display for RuntimeError {
             }
             RuntimeError::EntropyFailed(err) => {
                 write!(f, "capability CSPRNG unavailable: {err}")
+            }
+            RuntimeError::ReservedCapId => {
+                write!(f, "capability id draw was the reserved zero")
             }
             RuntimeError::CapIdCollision => {
                 write!(f, "could not allocate a unique capability id")

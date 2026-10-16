@@ -92,7 +92,9 @@ impl WaitFilter {
                 None => false,
             },
             Self::TagPayload { tag, payload } => match value.as_message() {
-                Some(m) => m.tag == tag && matches!(m.payload.as_ref(), Value::Int(n) if *n == payload),
+                Some(m) => {
+                    m.tag == tag && matches!(m.payload.as_ref(), Value::Int(n) if *n == payload)
+                }
                 None => false,
             },
             Self::Correlation {

@@ -264,8 +264,8 @@ impl Runtime {
         natives: Arc<NativeTable>,
         config: RuntimeConfig,
     ) -> Result<Self, SpawnError> {
-        let chunk = crate::decode_attested(bytes, &expected_digest)
-            .map_err(SpawnError::Attestation)?;
+        let chunk =
+            crate::decode_attested(bytes, &expected_digest).map_err(SpawnError::Attestation)?;
         Self::with_natives_and_config(chunk, natives, config)
     }
 
@@ -320,11 +320,8 @@ impl Runtime {
             None
         };
 
-        let paranoid_jumps = config.paranoid_jumps
-            || matches!(
-                config.trust,
-                crate::bytecode::TrustLevel::Untrusted
-            );
+        let paranoid_jumps =
+            config.paranoid_jumps || matches!(config.trust, crate::bytecode::TrustLevel::Untrusted);
 
         let shared = Arc::new(Shared {
             injector: Injector::new(),
@@ -1021,6 +1018,19 @@ pub(crate) struct BytecodeSpawn<'a> {
 /// Returns [`SpawnError`] on bad function index / VM init / directory
 /// poison — never panics. Bytecode `Opcode::Spawn` that fails here turns
 /// into `FlowOutcome::Failed` for the *parent* (see `worker`).
+/// Bytecode `Spawn` must pass exactly the callee's arity. Host spawn is not
+/// checked here.
+pub(crate) fn bytecode_spawn_arity(arity: u8, argc: usize) -> Result<(), crate::vm::Fault> {
+    if argc != usize::from(arity) {
+        Err(crate::vm::Fault::BadArity {
+            passed: argc,
+            expected: arity,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_on(
     shared: &Arc<Shared>,
@@ -1033,6 +1043,24 @@ pub(crate) fn spawn_on(
     parent: Option<FlowId>,
     bytecode: Option<BytecodeSpawn<'_>>,
 ) -> Result<FlowHandle, SpawnError> {
+    // Bytecode `Spawn` encodes argc. Host `Runtime::spawn` does not: a short
+    // host argument list still fills the rest with `Unit`. Only the bytecode
+    // path is rejected here, matching `VerifyError::CallArity` / `Fault::BadArity`.
+    if bytecode.is_some() {
+        match chunk.function(function) {
+            Some(def) => {
+                if let Err(fault) = bytecode_spawn_arity(def.arity, args.len()) {
+                    return Err(fault.into());
+                }
+            }
+            None => {
+                return Err(SpawnError::BadFunction {
+                    index: function,
+                    table_size: chunk.functions.len() as u32,
+                });
+            }
+        }
+    }
     shared.flow_limit.try_reserve()?;
     let id = match super::process::try_next_flow_id() {
         Ok(id) => id,
@@ -1261,6 +1289,18 @@ mod tests {
     use crate::bytecode::{builder::ChunkBuilder, Opcode, Value};
     use crate::scheduler::FlowOutcome;
     use std::time::Duration;
+
+    #[test]
+    fn bytecode_spawn_rejects_an_argc_the_callee_did_not_declare() {
+        assert!(super::bytecode_spawn_arity(2, 2).is_ok());
+        assert!(matches!(
+            super::bytecode_spawn_arity(2, 1),
+            Err(crate::vm::Fault::BadArity {
+                passed: 1,
+                expected: 2,
+            })
+        ));
+    }
 
     fn add_chunk() -> Chunk {
         let mut b = ChunkBuilder::new("test");

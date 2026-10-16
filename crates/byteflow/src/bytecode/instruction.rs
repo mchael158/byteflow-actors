@@ -97,7 +97,11 @@ impl fmt::Display for Instruction {
             Opcode::IsAlive => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::ExitSignal => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::DictPut => {
-                write!(f, "{} r{}, key=r{}, val=r{}", self.op, self.a, self.b, self.c)
+                write!(
+                    f,
+                    "{} r{}, key=r{}, val=r{}",
+                    self.op, self.a, self.b, self.c
+                )
             }
             Opcode::DictGet | Opcode::DictErase => {
                 write!(f, "{} r{}, key=r{}", self.op, self.a, self.b)
@@ -154,11 +158,7 @@ impl fmt::Display for Instruction {
                 }
             }
             Opcode::SetRestartPolicy => write!(f, "{} {}", self.op, self.imm),
-            Opcode::HostAwait => write!(
-                f,
-                "{} r{}, r{}, op={}",
-                self.op, self.a, self.b, self.imm
-            ),
+            Opcode::HostAwait => write!(f, "{} r{}, r{}, op={}", self.op, self.a, self.b, self.imm),
             Opcode::Trap => write!(f, "{} {}", self.op, self.imm),
         }
     }

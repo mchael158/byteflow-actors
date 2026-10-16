@@ -14,14 +14,36 @@ use crate::{Chunk, Instruction, Opcode, Value};
 use super::error::CompileError;
 use super::exit::{JIT_BUDGET, JIT_CONTINUE, JIT_RETURN, JIT_TRAP};
 use super::frame::{
-    JitEntry, MAX_JIT_CALL_DEPTH, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_EXIT_KIND,
-    OFF_FUNCTION, OFF_PC, OFF_REGISTER_COUNT, OFF_RETURN_REG,
+    JitEntry, OFF_AS_BOOL, OFF_AS_UNIT, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_ENTRY_BOOL,
+    OFF_ENTRY_UNIT, OFF_EXIT_KIND, OFF_FUNCTION, OFF_PC, OFF_REGISTER_COUNT, OFF_RETURN_REG,
+    OFF_WRITTEN,
 };
 use super::trace::{CompiledTrace, TraceKey, TraceSpan, MAX_TRACE_LENGTH};
 
+/// Tag of a value the trace may write back.
+///
+/// [`SlotTag::Inherited`] is a slot the trace loaded but did not compute.
+/// The bit is resolved at run time: a register already stored in this
+/// execution keeps that tag; otherwise the tag from trace entry is copied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotTag {
+    Int,
+    Bool,
+    Inherited(u8),
+}
+
+#[derive(Clone, Copy)]
+struct RegVal {
+    value: ClifValue,
+    tag: SlotTag,
+    /// The trace assigned this register. A load from the slot file is only a
+    /// cache and must not be written back over the VM's original tag.
+    defined: bool,
+}
+
 /// Maps bytecode register indices to Cranelift SSA values for the current trace.
 pub struct RegisterMap {
-    values: Vec<Option<ClifValue>>,
+    values: Vec<Option<RegVal>>,
 }
 
 impl RegisterMap {
@@ -32,13 +54,49 @@ impl RegisterMap {
     }
 
     pub fn get(&self, reg: usize) -> Option<ClifValue> {
-        self.values.get(reg).copied().flatten()
+        self.values
+            .get(reg)
+            .and_then(|slot| slot.as_ref().map(|v| v.value))
     }
 
     pub fn set(&mut self, reg: usize, value: ClifValue) {
+        self.define(reg, value, SlotTag::Int);
+    }
+
+    pub fn set_bool(&mut self, reg: usize, value: ClifValue) {
+        self.define(reg, value, SlotTag::Bool);
+    }
+
+    fn define(&mut self, reg: usize, value: ClifValue, tag: SlotTag) {
         if let Some(slot) = self.values.get_mut(reg) {
-            *slot = Some(value);
+            *slot = Some(RegVal {
+                value,
+                tag,
+                defined: true,
+            });
         }
+    }
+
+    /// Remember a slot load without marking the register as assigned.
+    fn cache_load(&mut self, reg: usize, value: ClifValue) {
+        if let Some(slot) = self.values.get_mut(reg) {
+            if slot.is_none() {
+                *slot = Some(RegVal {
+                    value,
+                    tag: SlotTag::Int,
+                    defined: false,
+                });
+            }
+        }
+    }
+
+    /// Tag to store, if this block assigned `reg`.
+    fn defined_tag(&self, reg: usize) -> Option<SlotTag> {
+        self.values
+            .get(reg)
+            .and_then(|slot| slot.as_ref())
+            .filter(|v| v.defined)
+            .map(|v| v.tag)
     }
 
     pub fn clear(&mut self) {
@@ -150,7 +208,15 @@ impl<'a> TraceCompiler<'a> {
             let mut registers = RegisterMap::new(def.num_registers as usize);
 
             for pc in &block.pcs {
-                emit_budget_tick(&mut builder, budget_ptr, frame_ptr, pointer_type, *pc);
+                emit_budget_tick(
+                    &mut builder,
+                    budget_ptr,
+                    frame_ptr,
+                    pointer_type,
+                    slots_ptr,
+                    &registers,
+                    *pc,
+                );
                 let instr = chunk.code[*pc as usize];
                 let mut emit_ctx = EmitContext {
                     builder: &mut builder,
@@ -167,6 +233,19 @@ impl<'a> TraceCompiler<'a> {
                     supports_calls,
                 };
                 emit_instruction(&mut emit_ctx, *pc, instr)?;
+            }
+            if !block_terminated(chunk, block) {
+                flush_registers(&mut builder, &registers, slots_ptr, frame_ptr, pointer_type);
+                if let Some(last) = block.pcs.last() {
+                    write_exit(
+                        &mut builder,
+                        frame_ptr,
+                        pointer_type,
+                        JIT_CONTINUE,
+                        last.saturating_add(1),
+                        0,
+                    );
+                }
             }
         }
 
@@ -292,9 +371,15 @@ fn emit_instruction(
                 opcode: Opcode::LoadConst,
                 pc,
             })?;
-            let v = match konst {
-                Value::Int(i) => builder.ins().iconst(types::I64, *i),
-                Value::Bool(b) => builder.ins().iconst(types::I64, i64::from(*b)),
+            match konst {
+                Value::Int(i) => {
+                    let v = builder.ins().iconst(types::I64, *i);
+                    registers.set(instr.a as usize, v);
+                }
+                Value::Bool(b) => {
+                    let v = builder.ins().iconst(types::I64, i64::from(*b));
+                    registers.set_bool(instr.a as usize, v);
+                }
                 _ => {
                     return Err(CompileError::UnsupportedOpcode {
                         opcode: Opcode::LoadConst,
@@ -302,15 +387,18 @@ fn emit_instruction(
                     });
                 }
             };
-            registers.set(instr.a as usize, v);
         }
         Opcode::Move => {
             let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
-            registers.set(instr.a as usize, v);
+            let tag = registers
+                .defined_tag(instr.b as usize)
+                .unwrap_or(SlotTag::Inherited(instr.b));
+            registers.define(instr.a as usize, v, tag);
         }
         Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Eq | Opcode::Lt | Opcode::Le => {
             let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
+            let produces_bool = matches!(instr.op, Opcode::Eq | Opcode::Lt | Opcode::Le);
             let result = match instr.op {
                 Opcode::Add => builder.ins().iadd(lhs, rhs),
                 Opcode::Sub => builder.ins().isub(lhs, rhs),
@@ -341,12 +429,16 @@ fn emit_instruction(
                 }
                 _ => unreachable!(),
             };
-            registers.set(instr.a as usize, result);
+            if produces_bool {
+                registers.set_bool(instr.a as usize, result);
+            } else {
+                registers.set(instr.a as usize, result);
+            }
         }
         Opcode::Div | Opcode::Mod => {
             let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
-            flush_registers(builder, registers, slots_ptr, pointer_type);
+            flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
             let zero = builder.ins().iconst(types::I64, 0);
             let is_zero =
                 builder
@@ -369,13 +461,13 @@ fn emit_instruction(
             registers.set(instr.a as usize, builder.ins().isub(zero, v));
         }
         Opcode::Jump => {
-            flush_registers(builder, registers, slots_ptr, pointer_type);
+            flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
             let target_pc = jump_target(pc, instr.imm);
             branch_to_pc(builder, frame_ptr, pointer_type, pc_to_block, target_pc);
         }
         Opcode::Branch => {
             let cond = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
-            flush_registers(builder, registers, slots_ptr, pointer_type);
+            flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
             let zero = builder.ins().iconst(types::I64, 0);
             let is_falsy =
                 builder
@@ -407,8 +499,10 @@ fn emit_instruction(
             }
         }
         Opcode::Return => {
-            let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
-            store_slot(builder, slots_ptr, pointer_type, instr.a, v);
+            if let Some(tag) = registers.defined_tag(instr.a as usize) {
+                let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
+                store_slot(builder, slots_ptr, frame_ptr, pointer_type, instr.a, v, tag);
+            }
             if supports_calls {
                 emit_return(
                     builder,
@@ -467,11 +561,22 @@ fn flush_registers(
     builder: &mut FunctionBuilder<'_>,
     registers: &RegisterMap,
     slots_ptr: ClifValue,
+    frame_ptr: ClifValue,
     pointer_type: types::Type,
 ) {
-    for (reg, value) in registers.values.iter().enumerate() {
-        if let Some(v) = *value {
-            store_slot(builder, slots_ptr, pointer_type, reg as u8, v);
+    for (reg, slot) in registers.values.iter().enumerate() {
+        if let Some(v) = slot {
+            if v.defined {
+                store_slot(
+                    builder,
+                    slots_ptr,
+                    frame_ptr,
+                    pointer_type,
+                    reg as u8,
+                    v.value,
+                    v.tag,
+                );
+            }
         }
     }
 }
@@ -492,8 +597,18 @@ fn load_reg(
         .iconst(pointer_type, i64::from(u32::from(reg) * 8));
     let addr = builder.ins().iadd(slots_ptr, offset);
     let v = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
-    registers.set(reg as usize, v);
+    registers.cache_load(reg as usize, v);
     Ok(v)
+}
+
+fn block_terminated(chunk: &Chunk, block: &TraceBlock) -> bool {
+    match block.pcs.last() {
+        Some(pc) => matches!(
+            chunk.code.get(*pc as usize).map(|instr| instr.op),
+            Some(Opcode::Jump | Opcode::Branch | Opcode::Return | Opcode::Call)
+        ),
+        None => true,
+    }
 }
 
 fn collect_trace_region(chunk: &Chunk, key: TraceKey) -> Result<TraceRegion, CompileError> {
@@ -620,15 +735,139 @@ fn field_ptr(
 fn store_slot(
     builder: &mut FunctionBuilder<'_>,
     slots: ClifValue,
+    frame_ptr: ClifValue,
     pointer_type: types::Type,
     reg: u8,
     value: ClifValue,
+    tag: SlotTag,
 ) {
     let offset = builder
         .ins()
         .iconst(pointer_type, i64::from(u32::from(reg) * 8));
     let addr = builder.ins().iadd(slots, offset);
     builder.ins().store(MachMemFlags::new(), value, addr, 0);
+    set_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, reg, true);
+    match tag {
+        SlotTag::Int => {
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
+        }
+        SlotTag::Bool => {
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, true);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
+        }
+        SlotTag::Inherited(src) => {
+            let as_bool = inherited_bit(
+                builder,
+                frame_ptr,
+                pointer_type,
+                src,
+                OFF_AS_BOOL,
+                OFF_ENTRY_BOOL,
+            );
+            let as_unit = inherited_bit(
+                builder,
+                frame_ptr,
+                pointer_type,
+                src,
+                OFF_AS_UNIT,
+                OFF_ENTRY_UNIT,
+            );
+            set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, as_bool);
+            set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, as_unit);
+        }
+    }
+}
+
+/// `written[src]` selects the tag this execution already stored; otherwise
+/// the tag recorded at trace entry.
+fn inherited_bit(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    src: u8,
+    written_tag: i32,
+    entry_tag: i32,
+) -> ClifValue {
+    let written = read_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, src);
+    let from_written = read_reg_bit(builder, frame_ptr, pointer_type, written_tag, src);
+    let from_entry = read_reg_bit(builder, frame_ptr, pointer_type, entry_tag, src);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let use_written = builder.ins().icmp(
+        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+        written,
+        zero,
+    );
+    builder.ins().select(use_written, from_written, from_entry)
+}
+
+fn read_reg_bit(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    base: i32,
+    reg: u8,
+) -> ClifValue {
+    let word = i32::from(reg / 64);
+    let bit = reg % 64;
+    let addr = field_ptr(builder, frame_ptr, pointer_type, base + word * 8);
+    let current = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
+    let mask = builder.ins().iconst(types::I64, 1i64 << u32::from(bit));
+    let masked = builder.ins().band(current, mask);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let set = builder.ins().icmp(
+        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+        masked,
+        zero,
+    );
+    bool_as_i64(builder, set)
+}
+
+fn set_reg_bit(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    base: i32,
+    reg: u8,
+    enable: bool,
+) {
+    let word = i32::from(reg / 64);
+    let bit = reg % 64;
+    let addr = field_ptr(builder, frame_ptr, pointer_type, base + word * 8);
+    let current = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
+    let mask = builder.ins().iconst(types::I64, 1i64 << u32::from(bit));
+    let next = if enable {
+        builder.ins().bor(current, mask)
+    } else {
+        let cleared = builder.ins().band_not(current, mask);
+        cleared
+    };
+    builder.ins().store(MachMemFlags::new(), next, addr, 0);
+}
+
+fn set_reg_bit_value(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    base: i32,
+    reg: u8,
+    enable: ClifValue,
+) {
+    let word = i32::from(reg / 64);
+    let bit = reg % 64;
+    let addr = field_ptr(builder, frame_ptr, pointer_type, base + word * 8);
+    let current = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
+    let mask = builder.ins().iconst(types::I64, 1i64 << u32::from(bit));
+    let zero = builder.ins().iconst(types::I64, 0);
+    let on = builder.ins().icmp(
+        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+        enable,
+        zero,
+    );
+    let bit_val = builder.ins().select(on, mask, zero);
+    let cleared = builder.ins().band_not(current, mask);
+    let next = builder.ins().bor(cleared, bit_val);
+    builder.ins().store(MachMemFlags::new(), next, addr, 0);
 }
 
 fn bool_as_i64(builder: &mut FunctionBuilder<'_>, cond: ClifValue) -> ClifValue {
@@ -642,8 +881,14 @@ fn emit_budget_tick(
     budget_ptr: ClifValue,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
+    slots_ptr: ClifValue,
+    registers: &RegisterMap,
     pc: u32,
 ) {
+    // Previous instructions in this block live in SSA until here. A budget
+    // exit must publish them before returning to the interpreter, or `pc`
+    // moves past work the VM never observes.
+    flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
     let budget = builder
         .ins()
         .load(types::I32, MachMemFlags::new(), budget_ptr, 0);
@@ -698,141 +943,23 @@ fn write_exit(
 #[allow(clippy::too_many_arguments)]
 fn emit_call(
     builder: &mut FunctionBuilder<'_>,
-    chunk: &Chunk,
+    _chunk: &Chunk,
     registers: &mut RegisterMap,
     slots_ptr: ClifValue,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
-    pc_to_block: &HashMap<u32, Block>,
-    call_depth_ptr: ClifValue,
-    call_stack_ptr: ClifValue,
+    _pc_to_block: &HashMap<u32, Block>,
+    _call_depth_ptr: ClifValue,
+    _call_stack_ptr: ClifValue,
     pc: u32,
-    instr: Instruction,
+    _instr: Instruction,
 ) -> Result<(), CompileError> {
-    let callee = instr.imm as u32;
-    let argc = instr.b;
-    let dst = instr.a;
-    let def = chunk
-        .function(callee)
-        .ok_or(CompileError::UnsupportedOpcode {
-            opcode: Opcode::Call,
-            pc,
-        })?;
-    let callee_entry = def.entry;
-    let Some(callee_block) = pc_to_block.get(&callee_entry) else {
-        flush_registers(builder, registers, slots_ptr, pointer_type);
-        write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
-        return Ok(());
-    };
-
-    flush_registers(builder, registers, slots_ptr, pointer_type);
-
-    let depth = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), call_depth_ptr, 0);
-    let max_depth = builder
-        .ins()
-        .iconst(types::I32, i64::from(MAX_JIT_CALL_DEPTH as u32));
-    let too_deep = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
-        depth,
-        max_depth,
-    );
-    let effect_exit = builder.create_block();
-    let call_body = builder.create_block();
-    builder
-        .ins()
-        .brif(too_deep, effect_exit, &[], call_body, &[]);
-    builder.switch_to_block(effect_exit);
-    builder.seal_block(effect_exit);
-    write_exit(
-        builder,
-        frame_ptr,
-        pointer_type,
-        super::exit::JIT_EFFECT,
-        pc,
-        0,
-    );
-    builder.switch_to_block(call_body);
-    builder.seal_block(call_body);
-
-    let record_bytes = builder.ins().iconst(
-        types::I32,
-        i64::from(std::mem::size_of::<super::frame::JitCallRecord>() as u32),
-    );
-    let record_off = builder.ins().imul(depth, record_bytes);
-    let record_off_ptr = builder.ins().uextend(pointer_type, record_off);
-    let record_addr = builder.ins().iadd(call_stack_ptr, record_off_ptr);
-
-    let return_pc = builder.ins().iconst(types::I32, i64::from(pc + 1));
-    builder
-        .ins()
-        .store(MachMemFlags::new(), return_pc, record_addr, 0);
-
-    let func_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_FUNCTION);
-    let caller_fn = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), func_ptr, 0);
-    let caller_fn_addr = {
-        let off = builder.ins().iconst(pointer_type, 4);
-        builder.ins().iadd(record_addr, off)
-    };
-    builder
-        .ins()
-        .store(MachMemFlags::new(), caller_fn, caller_fn_addr, 0);
-
-    let dest = builder.ins().iconst(types::I32, i64::from(u32::from(dst)));
-    let dest_addr = {
-        let off = builder.ins().iconst(pointer_type, 8);
-        builder.ins().iadd(record_addr, off)
-    };
-    builder.ins().store(MachMemFlags::new(), dest, dest_addr, 0);
-
-    let reg_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_REGISTER_COUNT);
-    let caller_regs = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), reg_ptr, 0);
-    let caller_regs_addr = {
-        let off = builder.ins().iconst(pointer_type, 12);
-        builder.ins().iadd(record_addr, off)
-    };
-    builder
-        .ins()
-        .store(MachMemFlags::new(), caller_regs, caller_regs_addr, 0);
-
-    let one = builder.ins().iconst(types::I32, 1);
-    let new_depth = builder.ins().iadd(depth, one);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), new_depth, call_depth_ptr, 0);
-
-    for i in 0..argc {
-        let src_reg = u32::from(dst) + u32::from(i);
-        let src_offset = builder.ins().iconst(pointer_type, i64::from(src_reg * 8));
-        let src_addr = builder.ins().iadd(slots_ptr, src_offset);
-        let value = builder
-            .ins()
-            .load(types::I64, MachMemFlags::new(), src_addr, 0);
-        let dst_offset = builder
-            .ins()
-            .iconst(pointer_type, i64::from(u32::from(i) * 8));
-        let dst_addr = builder.ins().iadd(slots_ptr, dst_offset);
-        builder.ins().store(MachMemFlags::new(), value, dst_addr, 0);
-    }
-
-    let callee_fn = builder.ins().iconst(types::I32, i64::from(callee));
-    builder
-        .ins()
-        .store(MachMemFlags::new(), callee_fn, func_ptr, 0);
-    let callee_regs = builder
-        .ins()
-        .iconst(types::I32, i64::from(def.num_registers));
-    builder
-        .ins()
-        .store(MachMemFlags::new(), callee_regs, reg_ptr, 0);
-
-    registers.clear();
-    builder.ins().jump(*callee_block, &[]);
+    // The slot file is one array. An in-place call overwrites the caller
+    // (a callee store to r2 destroys the caller's r2). The interpreter has
+    // a real frame per activation, so the trace stops here and `Vm::run`
+    // performs the call.
+    flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
+    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
     Ok(())
 }
 
@@ -1062,7 +1189,7 @@ mod tests {
         b.emit_return(0);
         b.begin_function("main", 1, 1);
         b.emit_load_imm(0, 0);
-        b.emit_call(0, 0, 1);
+        b.emit_call(0, 0, 0);
         b.emit_return(0);
         let chunk = Arc::new(b.finish());
 
