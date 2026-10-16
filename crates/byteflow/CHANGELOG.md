@@ -4,6 +4,8 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.13] — 2026-10-16
+
 ### Fixed
 
 - **`CapId` entropy:** `fill_bytes` reads the OS CSPRNG through `getrandom`
