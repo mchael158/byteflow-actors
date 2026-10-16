@@ -100,9 +100,7 @@ impl RegisterMap {
     }
 
     pub fn clear(&mut self) {
-        for slot in &mut self.values {
-            *slot = None;
-        }
+        self.values.fill(None);
     }
 }
 

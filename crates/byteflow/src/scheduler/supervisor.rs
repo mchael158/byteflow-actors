@@ -313,7 +313,7 @@ fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnE
     #[cfg(test)]
     if inner
         .fail_next_spawns
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
         .is_ok()
     {
         return Err(SpawnError::VmInit("test: forced spawn failure".into()));

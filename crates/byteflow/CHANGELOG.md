@@ -4,6 +4,17 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-10-16
+
+### Changed
+
+- **Toolchain:** development and CI use Rust 1.99.1. `rust-version` is
+  `1.99.1`. The edition stays 2021. `Atomic::fetch_update` is now
+  `try_update`.
+- **Dependencies:** `getrandom` 0.4, Cranelift 0.136.3, and Criterion 0.8.
+  CI actions are the 2026 releases of checkout, rust-toolchain, and
+  rust-cache.
+
 ## [0.9.13] — 2026-10-16
 
 ### Fixed

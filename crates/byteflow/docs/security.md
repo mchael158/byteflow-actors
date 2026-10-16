@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.13)
+## 7. FlowCap — Current Version (0.9.14)
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).

@@ -3,8 +3,9 @@ resolver = "2"
 members = ["crates/byteflow"]
 
 [workspace.package]
-version = "0.9.13"
+version = "0.9.14"
 edition = "2021"
+rust-version = "1.99.1"
 authors = ["Byteflow Contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mchael158/bytecode-vm"

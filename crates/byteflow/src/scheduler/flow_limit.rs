@@ -50,7 +50,7 @@ impl FlowLimit {
     pub fn release(&self) {
         let _ = self
             .live
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |c| {
                 Some(c.saturating_sub(1))
             });
     }
