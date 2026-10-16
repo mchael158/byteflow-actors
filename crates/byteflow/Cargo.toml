@@ -39,6 +39,7 @@ path = "examples/jit_loop.rs"
 required-features = ["jit"]
 
 [dependencies]
+getrandom = { version = "0.3", features = ["std"] }
 cranelift-codegen = { version = "0.135.1", optional = true }
 cranelift-frontend = { version = "0.135.1", optional = true }
 cranelift-jit = { version = "0.135.1", optional = true }

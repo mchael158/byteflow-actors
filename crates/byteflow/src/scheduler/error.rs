@@ -43,7 +43,7 @@ pub enum RuntimeError {
     /// normally and was already observed.
     AlreadyCollected(&'static str),
     /// OS CSPRNG failed while minting a capability.
-    EntropyFailed,
+    EntropyFailed(crate::entropy::EntropyError),
     /// CSPRNG produced colliding ids beyond the retry budget (should not happen).
     CapIdCollision,
     /// `finalize_flow` was asked to tear down the reserved host FlowId.
@@ -73,8 +73,8 @@ impl fmt::Display for RuntimeError {
             RuntimeError::AlreadyCollected(where_) => {
                 write!(f, "{where_}: outcome was already collected")
             }
-            RuntimeError::EntropyFailed => {
-                write!(f, "capability CSPRNG unavailable")
+            RuntimeError::EntropyFailed(err) => {
+                write!(f, "capability CSPRNG unavailable: {err}")
             }
             RuntimeError::CapIdCollision => {
                 write!(f, "could not allocate a unique capability id")
@@ -98,7 +98,14 @@ impl fmt::Display for RuntimeError {
     }
 }
 
-impl std::error::Error for RuntimeError {}
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RuntimeError::EntropyFailed(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 /// User-facing lifecycle / naming errors (category A).
 ///

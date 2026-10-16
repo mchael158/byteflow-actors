@@ -28,27 +28,31 @@ pub struct CapId(u128);
 /// Why [`CapId::random`] could not produce a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapIdError {
-    /// Platform entropy unavailable (see [`crate::entropy`]).
-    Entropy,
+    /// The OS CSPRNG read failed. The inner error is the platform failure.
+    Entropy(crate::entropy::EntropyError),
+    /// Every draw in the retry budget was the reserved zero id.
+    ReservedZero,
 }
 
 impl CapId {
     /// Placeholder used on unauthenticated / host-injected hops.
     pub const NONE: CapId = CapId(0);
 
-    /// Draw a non-zero id from platform entropy (`std` only). Never panics.
+    /// Draw a non-zero id from the OS CSPRNG. Never panics.
+    ///
+    /// A failed OS read returns immediately. The reserved zero id is drawn
+    /// again, up to eight times, and then reported as [`CapIdError::ReservedZero`]
+    /// rather than as a dead generator.
     pub fn random() -> Result<Self, CapIdError> {
         for _ in 0..8 {
             let mut bytes = [0u8; 16];
-            if crate::entropy::fill_bytes(&mut bytes).is_err() {
-                return Err(CapIdError::Entropy);
-            }
+            crate::entropy::fill_bytes(&mut bytes)?;
             let raw = u128::from_le_bytes(bytes);
             if raw != 0 {
                 return Ok(CapId(raw));
             }
         }
-        Err(CapIdError::Entropy)
+        Err(CapIdError::ReservedZero)
     }
 
     #[inline]
@@ -84,12 +88,28 @@ impl fmt::Display for CapId {
     }
 }
 
-impl std::error::Error for CapIdError {}
+impl From<crate::entropy::EntropyError> for CapIdError {
+    fn from(err: crate::entropy::EntropyError) -> Self {
+        CapIdError::Entropy(err)
+    }
+}
+
+impl std::error::Error for CapIdError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CapIdError::Entropy(err) => Some(err),
+            CapIdError::ReservedZero => None,
+        }
+    }
+}
 
 impl fmt::Display for CapIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CapIdError::Entropy => f.write_str("capability CSPRNG unavailable"),
+            CapIdError::Entropy(err) => write!(f, "capability CSPRNG unavailable: {err}"),
+            CapIdError::ReservedZero => {
+                f.write_str("capability id draw was the reserved zero")
+            }
         }
     }
 }

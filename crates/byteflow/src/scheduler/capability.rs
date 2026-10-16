@@ -145,7 +145,15 @@ impl CapTable {
         entry: Capability,
     ) -> Result<CapId, RuntimeError> {
         for _ in 0..MINT_ATTEMPTS {
-            let id = CapId::random().map_err(|_| RuntimeError::EntropyFailed)?;
+            let id = match CapId::random() {
+                Ok(id) => id,
+                Err(crate::CapIdError::Entropy(err)) => {
+                    return Err(RuntimeError::EntropyFailed(err));
+                }
+                Err(crate::CapIdError::ReservedZero) => {
+                    return Err(RuntimeError::CapIdCollision);
+                }
+            };
             if id.is_none() || table.contains_key(&id) {
                 continue;
             }

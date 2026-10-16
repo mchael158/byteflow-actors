@@ -18,6 +18,6 @@ cargo test -p byteflow-actors scheduler::capability::properties
 
 ## Design notes
 
-- Default library deps: **none** (`std` only). Optional `feature = "jit"` → Cranelift.
+- Default library deps: **`getrandom`** (OS CSPRNG for `CapId`). Optional `feature = "jit"` → Cranelift.
 - Failures must be `Result` / `Fault` / `FormatError` / `VerifyError`, never
   unwind across the trust boundary (see [`vm-safety.md`](vm-safety.md)).

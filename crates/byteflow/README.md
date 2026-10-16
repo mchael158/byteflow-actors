@@ -203,7 +203,7 @@ byteflow run    <file.bf> [function]
 ## Safety & design notes
 
 - `#![deny(unsafe_code)]` (feature `jit` allows `unsafe` only inside the Cranelift backend)
-- **Default = zero runtime dependencies** (`std` only). Optional `feature = "jit"` adds Cranelift.
+- **Default runtime dependency:** [`getrandom`](https://docs.rs/getrandom) for `CapId` (OS CSPRNG). Optional `feature = "jit"` adds Cranelift.
 - Flow panics are caught at the worker boundary so one bad flow cannot kill the OS thread.
 - Malformed bytecode is a `Fault` on one flow, never a panic on the thread that spawned it (see [`docs/vm-safety.md`](docs/vm-safety.md)).
 - Register indices are never computed with plain `u8` arithmetic — no “panics in debug, silently wraps in release” divergence.

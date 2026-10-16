@@ -4,6 +4,13 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CapId` entropy:** `fill_bytes` reads the OS CSPRNG through `getrandom`
+  and keeps that error on `EntropyError`. A failed read is no longer
+  reported as eight reserved-zero draws. The old path hashed a per-thread
+  `RandomState` key and always returned `Ok`.
+
 ## [0.9.12] — 2026-10-14
 
 ### Fixed
