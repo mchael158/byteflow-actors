@@ -523,7 +523,13 @@ pub fn apply_exit_to_vm(
 ) -> Result<Option<VmResult>, Fault> {
     match exit {
         ExitReason::Return { return_reg } => {
-            let value = Value::Int(slots[return_reg as usize]);
+            let Some(bits) = slots.get(usize::from(return_reg)).copied() else {
+                return Err(Fault::RegisterOutOfRange {
+                    reg: return_reg,
+                    frame_size: u8::try_from(slots.len()).unwrap_or(u8::MAX),
+                });
+            };
+            let value = Value::Int(bits);
             vm.set_register(return_reg, value.clone())?;
             let pc = vm
                 .current_pc()
@@ -715,6 +721,48 @@ mod tests {
         let mut slots = vec![0i64; 3];
         let ret = run_compiled_trace_ref(trace, &mut slots, 0, 10_000, 0, 3);
         assert!(matches!(ret.into_reason(), ExitReason::Trap { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn div_and_mod_of_i64_min_wrap_instead_of_aborting() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-div-overflow");
+        b.begin_function("div", 0, 3);
+        let min = b.const_(Value::Int(i64::MIN));
+        let neg = b.const_(Value::Int(-1));
+        b.emit_load_const(0, min);
+        b.emit_load_const(1, neg);
+        b.emit_binop(Opcode::Div, 2, 0, 1);
+        b.emit_return(2);
+        let rem = b.begin_function("rem", 0, 3);
+        let min = b.const_(Value::Int(i64::MIN));
+        let neg = b.const_(Value::Int(-1));
+        b.emit_load_const(0, min);
+        b.emit_load_const(1, neg);
+        b.emit_binop(Opcode::Mod, 2, 0, 1);
+        b.emit_return(2);
+        let chunk = Arc::new(b.finish());
+        let mut ctx = JitContext::new(chunk.clone())?;
+
+        for (function, expect) in [(0, i64::MIN), (rem, 0)] {
+            let entry = chunk.functions[function as usize].entry;
+            force_compile(
+                &mut ctx,
+                &chunk,
+                TraceKey {
+                    function,
+                    entry_pc: entry,
+                },
+            )?;
+            let mut vm = Vm::new(chunk.clone(), NativeTable::empty(), function, &[])?;
+            let result = run_vm_with_jit(&mut vm, 10_000, &mut ctx);
+            match result {
+                VmResult::Complete(Value::Int(n)) if n == expect => {}
+                other => {
+                    return Err(format!("function {function} finished as {other:?}").into());
+                }
+            }
+        }
         Ok(())
     }
 

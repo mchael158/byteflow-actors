@@ -4,6 +4,11 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **JIT:** `i64::MIN` divided or reduced by `-1` wraps, matching the
+  interpreter. Cranelift `sdiv` / `srem` abort on that pair.
+
 ## [0.9.14] — 2026-10-16
 
 ### Changed

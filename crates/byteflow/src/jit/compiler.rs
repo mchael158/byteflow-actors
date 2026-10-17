@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MachMemFlags, Signature, Value as ClifValue,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MachMemFlags, Signature, Value as ClifValue,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
@@ -442,16 +442,56 @@ fn emit_instruction(
                 builder
                     .ins()
                     .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rhs, zero);
-            let ok = builder.create_block();
-            builder.ins().brif(is_zero, trap_block, &[], ok, &[]);
-            builder.switch_to_block(ok);
-            builder.seal_block(ok);
-            let result = if instr.op == Opcode::Div {
+            let nonzero = builder.create_block();
+            builder.ins().brif(is_zero, trap_block, &[], nonzero, &[]);
+            builder.switch_to_block(nonzero);
+            builder.seal_block(nonzero);
+
+            // `sdiv` / `srem` abort when the dividend is `i64::MIN` and the
+            // divisor is `-1`. The interpreter uses wrapping division, which
+            // yields `i64::MIN` and `0` for that pair.
+            let min_int = builder.ins().iconst(types::I64, i64::MIN);
+            let neg_one = builder.ins().iconst(types::I64, -1);
+            let is_min =
+                builder
+                    .ins()
+                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, min_int);
+            let is_neg_one =
+                builder
+                    .ins()
+                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rhs, neg_one);
+            let check_neg = builder.create_block();
+            let do_op = builder.create_block();
+            let do_wrap = builder.create_block();
+            let merge = builder.create_block();
+            builder.append_block_param(merge, types::I64);
+            builder.ins().brif(is_min, check_neg, &[], do_op, &[]);
+
+            builder.switch_to_block(check_neg);
+            builder.seal_block(check_neg);
+            builder.ins().brif(is_neg_one, do_wrap, &[], do_op, &[]);
+
+            builder.switch_to_block(do_wrap);
+            builder.seal_block(do_wrap);
+            let wrapped = if instr.op == Opcode::Div {
+                min_int
+            } else {
+                zero
+            };
+            builder.ins().jump(merge, &[BlockArg::Value(wrapped)]);
+
+            builder.switch_to_block(do_op);
+            builder.seal_block(do_op);
+            let divided = if instr.op == Opcode::Div {
                 builder.ins().sdiv(lhs, rhs)
             } else {
                 builder.ins().srem(lhs, rhs)
             };
-            registers.set(instr.a as usize, result);
+            builder.ins().jump(merge, &[BlockArg::Value(divided)]);
+
+            builder.switch_to_block(merge);
+            builder.seal_block(merge);
+            registers.set(instr.a as usize, builder.block_params(merge)[0]);
         }
         Opcode::Neg => {
             let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
