@@ -4,6 +4,15 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-10-17
+
+### Added
+
+- **Examples:** `cycles` times one bytecode add with the timestamp
+  counter. The sample is the minimum `Vm::run`, printed as clock,
+  cycles, and nanoseconds. The `jit` feature measures the compiled
+  trace as well.
+
 ## [0.9.15] — 2026-10-17
 
 ### Fixed

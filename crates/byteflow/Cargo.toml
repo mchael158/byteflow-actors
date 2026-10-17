@@ -35,6 +35,10 @@ path = "src/bin/byteflow.rs"
 doc = false
 
 [[example]]
+name = "cycles"
+path = "examples/cycles.rs"
+
+[[example]]
 name = "jit_loop"
 path = "examples/jit_loop.rs"
 required-features = ["jit"]
