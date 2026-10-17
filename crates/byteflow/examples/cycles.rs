@@ -52,12 +52,7 @@ fn clock_ghz() -> f64 {
 }
 
 fn fresh_vm(chunk: &Arc<Chunk>) -> Result<Vm, Box<dyn std::error::Error>> {
-    Ok(Vm::new(
-        Arc::clone(chunk),
-        NativeTable::empty(),
-        0,
-        &[],
-    )?)
+    Ok(Vm::new(Arc::clone(chunk), NativeTable::empty(), 0, &[])?)
 }
 
 fn run_add(vm: &mut Vm) -> Result<(), Box<dyn std::error::Error>> {

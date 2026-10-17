@@ -68,6 +68,18 @@ impl MailboxQueue {
         cost <= self.byte_limit && self.limit >= 1
     }
 
+    /// `Reject` would accept `value` right now. On `Err` the value is
+    /// returned, so a caller can park it instead of dropping the hop.
+    pub(crate) fn try_enqueue_reject(&mut self, value: Value) -> Result<(), Value> {
+        let cost = value.memory_size();
+        if self.is_full() || self.would_exceed_bytes(cost) || !self.reserve_for_push(self.limit) {
+            return Err(value);
+        }
+        self.bytes = self.bytes.saturating_add(cost);
+        self.push_back(value);
+        Ok(())
+    }
+
     #[inline]
     fn is_full(&self) -> bool {
         self.len >= self.limit

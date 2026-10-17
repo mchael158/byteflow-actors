@@ -4,6 +4,12 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mailbox:** a `Reject` send that lost the race with a pop is queued
+  under the park lock instead of waiting for a slot that is already
+  free. A full waiter list fails with `waiting senders full`.
+
 ## [0.9.16] — 2026-10-17
 
 ### Added

@@ -508,14 +508,16 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         flow.quota.free(hop_cost);
                     }
                     DeliverStatus::Full => {
-                        park_waiting_send(
+                        match park_waiting_send(
                             shared,
                             flow,
                             target,
                             stamped,
                             PendingSend::FireAndForget,
-                        );
-                        return;
+                        ) {
+                            Some(resumed) => flow = resumed,
+                            None => return,
+                        }
                     }
                     DeliverStatus::Gone => {
                         flow.quota.free(hop_cost);
@@ -660,7 +662,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                     DeliverStatus::Full => {
-                        park_waiting_send(
+                        match park_waiting_send(
                             shared,
                             flow,
                             target,
@@ -671,8 +673,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                                 expect_sender: target.as_u64(),
                                 timeout,
                             },
-                        );
-                        return;
+                        ) {
+                            Some(resumed) => flow = resumed,
+                            None => return,
+                        }
                     }
                     DeliverStatus::Gone => {
                         flow.quota.free(hop_cost);
@@ -1449,13 +1453,15 @@ fn finish_failed(shared: &Shared, flow: Flow, msg: String) {
     );
 }
 
+/// `Some` means the hop landed before the sender parked, so the caller
+/// keeps running `flow`. `None` means the flow was parked or finalized.
 fn park_waiting_send(
     shared: &Shared,
     mut flow: Box<Flow>,
     target: FlowId,
     stamped: Value,
     pending: PendingSend,
-) {
+) -> Option<Box<Flow>> {
     flow.pending_send = Some(pending);
     flow.hop_charge = stamped.memory_size();
     if let Err(e) = shared.waiting_send_at.insert(flow.id, target) {
@@ -1466,7 +1472,7 @@ fn park_waiting_send(
             FlowOutcome::Failed("waiting-send index".into()),
             FlowExitReason::Fault,
         );
-        return;
+        return None;
     }
     let sender = flow.id;
     let Some(mailbox) = (match shared.directory.lookup(target) {
@@ -1480,7 +1486,7 @@ fn park_waiting_send(
                 FlowOutcome::Failed("send target gone".into()),
                 FlowExitReason::Fault,
             );
-            return;
+            return None;
         }
     }) else {
         let _ = shared.waiting_send_at.remove(flow.id);
@@ -1490,11 +1496,21 @@ fn park_waiting_send(
             FlowOutcome::Failed("send target gone".into()),
             FlowExitReason::Fault,
         );
-        return;
+        return None;
     };
     match mailbox.park_sender(flow, stamped) {
         ParkSender::Parked => {
             let _ = finalize_if_killed_waiting_send(shared, &mailbox, sender);
+            None
+        }
+        ParkSender::Delivered(mut flow) => {
+            let _ = shared.waiting_send_at.remove(flow.id);
+            let hop = flow.take_hop_charge();
+            if hop > 0 {
+                flow.quota.free(hop);
+            }
+            flow.pending_send = None;
+            Some(flow)
         }
         ParkSender::Closed(flow) => {
             let _ = shared.waiting_send_at.remove(flow.id);
@@ -1504,6 +1520,17 @@ fn park_waiting_send(
                 FlowOutcome::Failed("send target gone".into()),
                 FlowExitReason::Fault,
             );
+            None
+        }
+        ParkSender::WaitersFull(flow) => {
+            let _ = shared.waiting_send_at.remove(flow.id);
+            finalize_flow(
+                shared,
+                *flow,
+                FlowOutcome::Failed("waiting senders full".into()),
+                FlowExitReason::Fault,
+            );
+            None
         }
         ParkSender::Undeliverable(flow) => {
             let _ = shared.waiting_send_at.remove(flow.id);
@@ -1513,6 +1540,7 @@ fn park_waiting_send(
                 FlowOutcome::Failed("hop larger than target mailbox budget".into()),
                 FlowExitReason::Fault,
             );
+            None
         }
     }
 }
