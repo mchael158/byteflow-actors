@@ -4,10 +4,14 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.15] — 2026-10-17
+
 ### Fixed
 
 - **JIT:** `i64::MIN` divided or reduced by `-1` wraps, matching the
   interpreter. Cranelift `sdiv` / `srem` abort on that pair.
+- **JIT:** `apply_exit_to_vm` returns `RegisterOutOfRange` when the return
+  register is past the slot slice, instead of panicking on that index.
 
 ## [0.9.14] — 2026-10-16
 
