@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::error::report_fault;
 use super::mailbox::{Mailbox, WaitEpoch};
 use super::process::{Flow, FlowId};
+use super::runtime::enqueue_flow;
 use super::sync_lock;
 
 /// What to do when a timer entry's deadline is reached.
@@ -243,7 +244,7 @@ impl TimerWheel {
     fn fire(&self, entry: TimerEntry, shared: &super::runtime::Shared) {
         match entry.payload {
             TimerPayload::WakeSleeper(flow) => {
-                shared.injector.push(flow);
+                enqueue_flow(shared, flow);
             }
             TimerPayload::WakeReceiver {
                 pid,
@@ -269,7 +270,7 @@ impl TimerWheel {
                             dest_reg,
                             crate::bytecode::Value::Unit,
                         ) {
-                            shared.injector.push(flow);
+                            enqueue_flow(shared, flow);
                         }
                     }
                     Ok(None) => {

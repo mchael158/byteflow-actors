@@ -472,7 +472,7 @@ impl ChunkBuilder {
     /// Patch the register-file size of an already-`begin_function`'d
     /// function. Exists for assemblers whose register count is only known
     /// *after* emitting the body — `begin_function` must still be called
-    /// first so `entry` captures the current code cursor.
+    /// first so `entry` captures the current code position.
     pub fn set_num_registers(&mut self, function_index: u32, num_registers: u8) {
         if let Some(def) = self.functions.get_mut(function_index as usize) {
             def.num_registers = num_registers;

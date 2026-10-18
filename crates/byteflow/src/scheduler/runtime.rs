@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -307,7 +308,7 @@ impl Runtime {
         let workers_n = config.workers.max(1);
 
         let locals: Vec<LocalDeque<Box<Flow>>> =
-            (0..workers_n).map(|_| LocalDeque::new_fifo()).collect();
+            (0..workers_n).map(|_| LocalDeque::new()).collect();
         let stealers: Vec<Stealer<Box<Flow>>> = locals.iter().map(|l| l.stealer()).collect();
 
         #[cfg(feature = "jit")]
@@ -505,7 +506,7 @@ impl Runtime {
                         else {
                             return Err(SendError::Unavailable);
                         };
-                        self.shared.injector.push(flow);
+                        enqueue_flow(&self.shared, flow);
                         wake_workers(&self.shared);
                         Ok(())
                     }
@@ -1161,7 +1162,7 @@ pub(crate) fn spawn_on(
     flow.quota = quota;
     flow.supervisor = supervisor;
     RuntimeMetrics::inc(&shared.metrics.processes_spawned);
-    shared.injector.push(flow);
+    enqueue_flow(shared, flow);
     wake_workers(shared);
     Ok(FlowHandle { id, receiver: rx })
 }
@@ -1189,6 +1190,73 @@ fn grant_caps_in_args(
         }
     }
     Ok(out)
+}
+
+/// Park `flow` on the global injector.
+///
+/// A poisoned injector gives the flow back. Finalizing it here is what
+/// makes [`FlowHandle::join`] observe `runtime queue unavailable` instead
+/// of [`super::error::RuntimeError::Abandoned`].
+pub(crate) fn enqueue_flow(shared: &Shared, flow: Box<Flow>) {
+    if let Err(flow) = shared.injector.push(flow) {
+        super::error::report_fault(super::error::RuntimeError::PoisonedLock("Injector::push"));
+        // `finalize_flow` may itself try to enqueue a peer (monitor, ask,
+        // trap_exit). Those pushes fail too. A direct call would recurse
+        // once per peer and can overflow the stack.
+        poison_finalize(shared, flow);
+    }
+}
+
+thread_local! {
+    static POISON_FINALIZE: RefCell<Option<Vec<Flow>>> = const { RefCell::new(None) };
+}
+
+/// Clears the poison queue if `finalize_flow` unwinds, so the next call on
+/// this thread does not treat itself as a nested enqueue and stall.
+struct ClearPoisonFinalize;
+
+impl Drop for ClearPoisonFinalize {
+    fn drop(&mut self) {
+        POISON_FINALIZE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+/// Finalize `flow` and every peer that fails to re-enqueue, without recursion.
+fn poison_finalize(shared: &Shared, flow: Box<Flow>) {
+    let nested = POISON_FINALIZE.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if let Some(queue) = guard.as_mut() {
+            queue.push(*flow);
+            true
+        } else {
+            *guard = Some(vec![*flow]);
+            false
+        }
+    });
+    if nested {
+        return;
+    }
+    let _clear = ClearPoisonFinalize;
+    loop {
+        let next = POISON_FINALIZE.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            match guard.as_mut() {
+                Some(queue) => queue.pop(),
+                None => None,
+            }
+        });
+        let Some(flow) = next else {
+            break;
+        };
+        finalize_flow(
+            shared,
+            flow,
+            FlowOutcome::Failed("runtime queue unavailable".into()),
+            FlowExitReason::Fault,
+        );
+    }
 }
 
 pub(crate) fn wake_workers(shared: &Shared) {
@@ -1712,5 +1780,17 @@ mod tests {
         assert!(rt.shared.paranoid_jumps);
         rt.shutdown();
         Ok(())
+    }
+
+    #[test]
+    fn poisoned_injector_finalizes_the_flow() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::new(add_chunk())?;
+        rt.shared.injector.poison_for_test();
+        let outcome = rt.spawn(0, &[])?.join_timeout(Duration::from_secs(2));
+        rt.shutdown();
+        match outcome {
+            Some(FlowOutcome::Failed(msg)) if msg.contains("runtime queue unavailable") => Ok(()),
+            other => Err(format!("expected queue failure, got {other:?}").into()),
+        }
     }
 }

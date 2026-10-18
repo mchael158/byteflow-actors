@@ -20,7 +20,7 @@ use super::mailbox::Delivery;
 use super::metrics::RuntimeMetrics;
 use super::monitor::{DownEvent, FlowExitReason};
 use super::process::{Flow, FlowId, FlowOutcome};
-use super::runtime::{wake_workers, Shared};
+use super::runtime::{enqueue_flow, wake_workers, Shared};
 use super::sync_lock;
 
 /// Per-flow BEAM-style `trap_exit` flag (default off).
@@ -558,7 +558,7 @@ fn deliver_system_hop(shared: &Shared, owner: FlowId, hop: Value) {
                         .metrics
                         .messages_received
                         .fetch_add(1, Ordering::Relaxed);
-                    shared.injector.push(parked);
+                    enqueue_flow(shared, parked);
                     wake_workers(shared);
                 }
                 None => {
@@ -606,7 +606,7 @@ fn wake_orphaned_asks(shared: &Shared, target: FlowId, reason: FlowExitReason) {
                     flow.metrics
                         .messages_received
                         .fetch_add(1, Ordering::Relaxed);
-                    shared.injector.push(flow);
+                    enqueue_flow(shared, flow);
                     wake_workers(shared);
                 }
                 None => {

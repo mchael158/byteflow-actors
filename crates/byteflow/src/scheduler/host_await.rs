@@ -17,7 +17,7 @@ use super::error::RuntimeError;
 use super::finalize::{finalize_flow, resume_or_fail};
 use super::monitor::FlowExitReason;
 use super::process::{Flow, FlowId, FlowOutcome};
-use super::runtime::{wake_workers, Shared};
+use super::runtime::{enqueue_flow, wake_workers, Shared};
 use super::sync_lock;
 
 /// Opaque host discriminator passed as the `HostAwait` immediate.
@@ -126,7 +126,7 @@ fn settle_parked(
             let Some(flow) = resume_or_fail(&shared, parked.flow, parked.dest_reg, value) else {
                 return Ok(());
             };
-            shared.injector.push(flow);
+            enqueue_flow(&shared, flow);
             wake_workers(&shared);
             Ok(())
         }

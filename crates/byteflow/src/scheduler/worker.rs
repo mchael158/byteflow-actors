@@ -27,8 +27,10 @@ use super::metrics::RuntimeMetrics;
 use super::monitor::{FlowExitReason, MonitorRef};
 use super::process::{Flow, FlowId, FlowOutcome, PendingSend};
 use super::registry::RegistryName;
-use super::runqueue::{Steal, Worker as LocalDeque};
-use super::runtime::{flow_id_from_u64, spawn_on, wake_workers, BytecodeSpawn, Shared};
+use super::runqueue::{Steal, Worker as LocalDeque, INJECTOR_BATCH};
+use super::runtime::{
+    enqueue_flow, flow_id_from_u64, spawn_on, wake_workers, BytecodeSpawn, Shared,
+};
 use super::sync_lock;
 use crate::bytecode::{CapId, Message, Value};
 use crate::log;
@@ -246,18 +248,57 @@ fn find_work(shared: &Shared, local: &LocalDeque<Box<Flow>>) -> Option<Box<Flow>
         return Some(flow);
     }
 
-    if let Steal::Success(flow) = shared.injector.steal() {
+    if let Some(flow) = take_injector(shared, local) {
         return Some(flow);
     }
 
     for stealer in &shared.stealers {
-        if let Steal::Success(flow) = stealer.steal() {
-            RuntimeMetrics::inc(&shared.metrics.steals);
-            return Some(flow);
+        let mut spins = 0u32;
+        loop {
+            match stealer.steal() {
+                Steal::Success(flow) => {
+                    RuntimeMetrics::inc(&shared.metrics.steals);
+                    return Some(flow);
+                }
+                Steal::Empty => break,
+                Steal::Retry => {
+                    spins += 1;
+                    if spins >= 16 {
+                        break;
+                    }
+                }
+            }
         }
     }
 
     None
+}
+
+/// Pull a batch off the injector. The oldest task runs now; the rest land
+/// on the local deque in FIFO order (owner pop is LIFO, so push newest first).
+fn take_injector(shared: &Shared, local: &LocalDeque<Box<Flow>>) -> Option<Box<Flow>> {
+    let mut batch = shared.injector.steal_batch(INJECTOR_BATCH);
+    if batch.is_empty() {
+        return None;
+    }
+    let first = batch.remove(0);
+    for flow in batch.into_iter().rev() {
+        if let Err(flow) = local.push(flow) {
+            enqueue_flow(shared, flow);
+        }
+    }
+    Some(first)
+}
+
+/// Local ring first. A full ring spills to the injector, which finalizes
+/// the flow if that lock is poisoned. Spill wakes a worker: this thread may
+/// keep running the task it already holds and not look at the injector again
+/// until that task blocks.
+fn enqueue_local(shared: &Shared, local: &LocalDeque<Box<Flow>>, flow: Box<Flow>) {
+    if let Err(flow) = local.push(flow) {
+        enqueue_flow(shared, flow);
+        wake_workers(shared);
+    }
 }
 
 fn wait_for_work(shared: &Shared) {
@@ -380,7 +421,16 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
             VmResult::Yield => {
                 RuntimeMetrics::inc(&shared.metrics.reschedules);
                 flow.metrics.reschedules.fetch_add(1, Ordering::Relaxed);
-                local.push(flow);
+                // Owner pop is LIFO. Pushing here when siblings are already
+                // queued would run this flow again and leave them waiting.
+                // An empty deque has nobody to cut in front of, so the same
+                // worker resumes it without a trip through the injector.
+                if local.has_tasks() {
+                    enqueue_flow(shared, flow);
+                    wake_workers(shared);
+                } else {
+                    enqueue_local(shared, local, flow);
+                }
                 return;
             }
             VmResult::Sleep(delay) => {
@@ -1197,7 +1247,7 @@ fn admit_waiting_on(
                     );
                 }
                 _ => {
-                    local.push(sender);
+                    enqueue_local(shared, local, sender);
                     wake_workers(shared);
                 }
             }
@@ -1261,7 +1311,7 @@ fn deliver(
                     flow.metrics
                         .messages_received
                         .fetch_add(1, Ordering::Relaxed);
-                    local.push(flow);
+                    enqueue_local(shared, local, flow);
                     wake_workers(shared);
                     DeliverStatus::Ok
                 }
@@ -1356,7 +1406,7 @@ fn park_ask(
                     .messages_received
                     .fetch_add(1, Ordering::Relaxed);
             }
-            shared.injector.push(flow);
+            enqueue_flow(shared, flow);
             wake_workers(shared);
         }
         Err((e, flow)) => {
@@ -1389,7 +1439,7 @@ fn resume_ask_target_gone(
             .metrics
             .messages_received
             .fetch_add(1, Ordering::Relaxed);
-        shared.injector.push(parked);
+        enqueue_flow(shared, parked);
         wake_workers(shared);
     }
 }
@@ -1425,7 +1475,7 @@ fn park_on_mailbox(
                     .messages_received
                     .fetch_add(1, Ordering::Relaxed);
             }
-            shared.injector.push(flow);
+            enqueue_flow(shared, flow);
             wake_workers(shared);
         }
         Err((e, flow)) => {
