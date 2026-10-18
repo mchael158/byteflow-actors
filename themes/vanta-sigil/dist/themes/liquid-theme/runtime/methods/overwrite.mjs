@@ -1,1 +1,0 @@
-var t=r=>{let e;return{install(){if(e)return;e=r.setBackgroundColor;const n=r.setBackgroundColor.bind(r);r.setBackgroundColor=o=>n("#00000000")},uninstall(){e&&(r.setBackgroundColor=e,e=void 0)}}};export{t as default};
