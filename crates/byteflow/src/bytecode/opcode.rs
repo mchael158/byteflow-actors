@@ -228,6 +228,18 @@ pub enum Opcode {
     /// Writes an addressing Cap into `r[a]`. The caller must itself have
     /// been started by a host [`crate::Supervisor`]. Append-only (`0x6F`).
     StartChild = 0x6F,
+    /// `ReceiveMatchValue ra, rb, rc` → selective receive: `tag == r[b]` and
+    /// payload structurally equal to `r[c]` (any [`crate::Value`], not only
+    /// `Int`). Non-matching hops stay queued. Append-only (`0x70`).
+    ReceiveMatchValue = 0x70,
+    /// `SendRemote ra, rb, rc` → deliver hop `r[c]` to node `r[a]` (`Int`)
+    /// service `r[b]` (`Str`). The host drains [`crate::DistributionBridge`].
+    /// Byteflow does not open a socket. Append-only (`0x71`).
+    SendRemote = 0x71,
+    /// `StartSupervisor imm` → start a supervisor owned by this flow.
+    /// `imm`: `0` one-for-one, `1` one-for-all, `2` rest-for-one.
+    /// Later `StartChild` attaches to it. Append-only (`0x72`).
+    StartSupervisor = 0x72,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -301,6 +313,9 @@ impl Opcode {
             0x6D => DictErase,
             0x6E => ReceiveMatchEq,
             0x6F => StartChild,
+            0x70 => ReceiveMatchValue,
+            0x71 => SendRemote,
+            0x72 => StartSupervisor,
             0x61 => Nop,
             _ => return None,
         })
@@ -368,6 +383,9 @@ impl std::fmt::Display for Opcode {
             Opcode::DictErase => "DictErase",
             Opcode::ReceiveMatchEq => "ReceiveMatchEq",
             Opcode::StartChild => "StartChild",
+            Opcode::ReceiveMatchValue => "ReceiveMatchValue",
+            Opcode::SendRemote => "SendRemote",
+            Opcode::StartSupervisor => "StartSupervisor",
             Opcode::Trap => "Trap",
             Opcode::Nop => "Nop",
         };

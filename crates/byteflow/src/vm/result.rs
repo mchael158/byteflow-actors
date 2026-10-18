@@ -51,7 +51,19 @@ pub enum VmResult {
         /// When set together with [`Self::Receive::match_tag`], the hop's
         /// payload must be that `Int` (term equality, not a full pattern).
         match_payload_eq: Option<i64>,
+        /// When set together with [`Self::Receive::match_tag`], the hop's
+        /// payload must equal this value (`ReceiveMatchValue`).
+        match_payload_value: Option<Arc<Value>>,
     },
+    /// `SendRemote` — authenticated hop for the host distribution bridge.
+    SendRemote {
+        node: u64,
+        name: Arc<str>,
+        message: Value,
+    },
+    /// `StartSupervisor` — this flow starts its own supervisor.
+    /// `strategy` is `0` one-for-one, `1` one-for-all, `2` rest-for-one.
+    StartSupervisor { strategy: u8 },
     /// `Ask` / `AskTimeout` — RPC hop to a **capability** target (requires ASK).
     Ask {
         dest_reg: u8,

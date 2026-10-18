@@ -116,6 +116,17 @@ impl fmt::Display for Instruction {
                 "{} r{}, fn[{}], policy={}",
                 self.op, self.a, self.imm, self.b
             ),
+            Opcode::ReceiveMatchValue => write!(
+                f,
+                "{} r{}, tag=r{}, payload=r{}",
+                self.op, self.a, self.b, self.c
+            ),
+            Opcode::SendRemote => write!(
+                f,
+                "{} node=r{}, name=r{}, msg=r{}",
+                self.op, self.a, self.b, self.c
+            ),
+            Opcode::StartSupervisor => write!(f, "{} strategy={}", self.op, self.imm),
             Opcode::ReceiveMatchKind => {
                 write!(f, "{} r{}, kind={}", self.op, self.a, self.imm)
             }

@@ -235,7 +235,12 @@ fn run_compiled_trace_with_tags(
         return_function: 0,
         dest_reg: 0,
         caller_register_count: 0,
+        written: [0; 4],
+        as_bool: [0; 4],
+        as_unit: [0; 4],
     }; MAX_JIT_CALL_DEPTH];
+    let stride = slots.len();
+    let mut spill = vec![0i64; stride.saturating_mul(MAX_JIT_CALL_DEPTH)];
     let mut frame = JitFrame {
         slots: slots.as_mut_ptr(),
         register_count,
@@ -246,6 +251,8 @@ fn run_compiled_trace_with_tags(
         return_reg: 0,
         call_depth: 0,
         call_stack: call_stack.as_mut_ptr(),
+        spill: spill.as_mut_ptr(),
+        spill_stride: stride as u32,
         written: [0; 4],
         as_bool: [0; 4],
         as_unit: [0; 4],
@@ -988,6 +995,112 @@ mod tests {
         run(&mut ctx, moved_false, &[Value::Bool(false)])?;
         run(&mut ctx, moved_unit, &[])?;
         run(&mut ctx, overwritten, &[Value::Bool(true)])?;
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_call_stays_in_the_trace() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-call");
+        let add1 = b.begin_function("add1", 1, 2);
+        b.emit_load_imm(1, 1);
+        b.emit_binop(Opcode::Add, 0, 0, 1);
+        b.emit_return(0);
+        let main = b.begin_function("main", 0, 1);
+        b.emit_load_imm(0, 41);
+        b.emit_call(0, add1, 1);
+        b.emit_return(0);
+        let chunk = Arc::new(b.finish());
+        let mut ctx = JitContext::new(chunk.clone())?;
+        let entry = chunk.functions[main as usize].entry;
+        let key = TraceKey {
+            function: main,
+            entry_pc: entry,
+        };
+        force_compile(&mut ctx, &chunk, key)?;
+        let trace = ctx
+            .cache
+            .get(&key)
+            .ok_or("trace missing after force_compile")?;
+        let mut slots = vec![0i64; 2];
+        let exit = run_compiled_trace_ref(trace, &mut slots, entry, 10_000, main, 1).into_reason();
+        match exit {
+            ExitReason::Return { return_reg: 0 } => {}
+            other => return Err(format!("call left the trace: {other:?}").into()),
+        }
+        if slots[0] != 42 {
+            return Err(format!("leaf call produced {}", slots[0]).into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_call_keeps_bool_unit_and_a_high_dest() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-call-tags");
+        let is_true = b.begin_function("is-true", 0, 2);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 1);
+        b.emit_binop(Opcode::Eq, 0, 0, 1);
+        b.emit_return(0);
+        let blank = b.begin_function("blank", 0, 1);
+        b.emit_return(0);
+        let moved = b.begin_function("moved", 1, 2);
+        b.emit_move(1, 0);
+        b.emit_return(1);
+        let add1 = b.begin_function("add1", 1, 2);
+        b.emit_load_imm(1, 1);
+        b.emit_binop(Opcode::Add, 0, 0, 1);
+        b.emit_return(0);
+
+        let main_bool = b.begin_function("main-bool", 0, 1);
+        b.emit_call(0, is_true, 0);
+        b.emit_return(0);
+        let main_unit = b.begin_function("main-unit", 0, 1);
+        b.emit_load_imm(0, 9);
+        b.emit_call(0, blank, 0);
+        b.emit_return(0);
+        let main_moved = b.begin_function("main-moved", 1, 1);
+        b.emit_call(0, moved, 1);
+        b.emit_return(0);
+        let main_high = b.begin_function("main-high", 0, 17);
+        b.emit_load_imm(16, 41);
+        b.emit_call(16, add1, 1);
+        b.emit_return(16);
+        let chunk = Arc::new(b.finish());
+        let mut ctx = JitContext::new(chunk.clone())?;
+
+        let run = |ctx: &mut JitContext,
+                   function: u32,
+                   args: &[Value]|
+         -> Result<VmResult, Box<dyn std::error::Error>> {
+            let entry = chunk.functions[function as usize].entry;
+            force_compile(
+                ctx,
+                &chunk,
+                TraceKey {
+                    function,
+                    entry_pc: entry,
+                },
+            )?;
+            let mut vm = Vm::new(chunk.clone(), NativeTable::empty(), function, args)?;
+            Ok(run_vm_with_jit(&mut vm, 10_000, ctx))
+        };
+
+        match run(&mut ctx, main_bool, &[])? {
+            VmResult::Complete(Value::Bool(true)) => {}
+            other => return Err(format!("bool leaf finished as {other:?}").into()),
+        }
+        match run(&mut ctx, main_unit, &[])? {
+            VmResult::Complete(Value::Unit) => {}
+            other => return Err(format!("unread leaf finished as {other:?}").into()),
+        }
+        match run(&mut ctx, main_moved, &[Value::Bool(false)])? {
+            VmResult::Complete(Value::Bool(false)) => {}
+            other => return Err(format!("bool arg finished as {other:?}").into()),
+        }
+        match run(&mut ctx, main_high, &[])? {
+            VmResult::Complete(Value::Int(42)) => {}
+            other => return Err(format!("r16 dest finished as {other:?}").into()),
+        }
         Ok(())
     }
 }

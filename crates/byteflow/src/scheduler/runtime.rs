@@ -71,6 +71,9 @@ pub struct RuntimeConfig {
     /// Host async bridge for [`crate::Opcode::HostAwait`]. `None` fails
     /// any `HostAwait` closed. Not a `CallNative` / std-native slot.
     pub host_await: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
+    /// Host queue for [`crate::Opcode::SendRemote`]. `None` fails that opcode.
+    /// Byteflow does not open sockets; the embedder drains the bridge.
+    pub distribution: Option<Arc<super::distribution::DistributionBridge>>,
     /// Process-wide memory ceiling for heap charges (`Str` / `Bytes`
     /// register stores and shared [`crate::HeapStr`] / [`crate::HeapBytes`]).
     /// Independent of per-flow [`crate::QuotaConfig::mem_limit`] and mailbox
@@ -135,6 +138,7 @@ impl Default for RuntimeConfig {
             max_monitors: 0,
             max_registry_names: 0,
             host_await: None,
+            distribution: None,
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
             paranoid_jumps: false,
@@ -202,6 +206,11 @@ pub struct Shared {
     pub(crate) host_awaits: super::host_await::HostAwaitIndex,
     /// Host async bridge (`None` ⇒ HostAwait fails closed).
     pub(crate) host_await_bridge: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
+    /// `SendRemote` queue. `None` fails the opcode.
+    pub(crate) distribution: Option<Arc<super::distribution::DistributionBridge>>,
+    /// Supervisors started by bytecode `StartSupervisor`. Joined from
+    /// [`Runtime::shutdown`] after workers stop.
+    pub(crate) flow_supervisors: Mutex<Vec<super::supervisor::Supervisor>>,
     /// Correlation ids for host `Runtime::send` when `request_id == 0`.
     /// Starts at 1; `0` stays the unset sentinel.
     pub(crate) host_next_request_id: AtomicU64,
@@ -347,6 +356,8 @@ impl Runtime {
             ask_waits: super::finalize::AskWaitIndex::new(config.max_ask_waits),
             host_awaits: super::host_await::HostAwaitIndex::new(config.max_host_awaits),
             host_await_bridge: config.host_await.clone(),
+            distribution: config.distribution.clone(),
+            flow_supervisors: Mutex::new(Vec::new()),
             host_next_request_id: AtomicU64::new(1),
             paranoid_jumps,
             #[cfg(feature = "jit")]
@@ -842,8 +853,9 @@ impl Runtime {
         Ok(())
     }
 
-    /// Signal workers and the timer to stop. Does **not** join threads —
-    /// use [`Self::shutdown`] for a deterministic join. [`Drop`] only signals.
+    /// Signal workers and the timer to stop. Does **not** join those threads —
+    /// use [`Self::shutdown`] for a deterministic join. [`Drop`] signals, then
+    /// joins flow-owned supervisors so their spawner does not keep `Shared` alive.
     fn request_shutdown(&self) {
         self.shared.shutdown.store(true, Ordering::Release);
         // Settle parked HostAwaits before joining workers: otherwise a bridge
@@ -869,6 +881,7 @@ impl Runtime {
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
+        super::flow_supervisor::shutdown_all(&self.shared.flow_supervisors);
         if let Some(t) = self.timer_thread.take() {
             let _ = t.join();
         }
@@ -950,6 +963,7 @@ impl Drop for Runtime {
         if !self.shared.shutdown.load(Ordering::Acquire) {
             self.request_shutdown();
         }
+        super::flow_supervisor::shutdown_all(&self.shared.flow_supervisors);
     }
 }
 

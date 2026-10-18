@@ -3,6 +3,7 @@
 //! Compiles int-specialized traces (`LoadImm`, `LoadConst`, `Move`, binops,
 //! `Neg`, `Branch`, `Jump`, `Call`, `Return`). Scheduler effects stop recording.
 
+mod call;
 mod compiler;
 mod dispatch;
 mod error;

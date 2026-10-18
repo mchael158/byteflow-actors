@@ -681,6 +681,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveTimeout => {
@@ -692,6 +693,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveMatch => {
@@ -703,6 +705,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveMatchImm => {
@@ -714,6 +717,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveMatchTimeout => {
@@ -726,6 +730,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveMatchImmTimeout => {
@@ -738,6 +743,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::IsAlive => {
@@ -809,7 +815,66 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: None,
                         match_payload_eq: Some(payload),
+                        match_payload_value: None,
                     };
+                }
+                Opcode::ReceiveMatchValue => {
+                    let tag = trap!(self.tag_from_reg(instr.b));
+                    let payload = trap!(self.get_reg(instr.c));
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: None,
+                        match_tag: Some(tag),
+                        match_request_id: None,
+                        match_payload_kind: None,
+                        match_payload_eq: None,
+                        match_payload_value: Some(Arc::new(payload)),
+                    };
+                }
+                Opcode::SendRemote => {
+                    let node = trap!(self.int_from_reg(instr.a));
+                    if node < 0 {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "node id >= 0",
+                            got: "negative",
+                        });
+                    }
+                    let name = match trap!(self.get_reg(instr.b)) {
+                        Value::Str(name) => name,
+                        _ => {
+                            return VmResult::Trap(Fault::TypeMismatch {
+                                expected: "str",
+                                got: "not-str",
+                            })
+                        }
+                    };
+                    let message = trap!(self.expect_message_value(instr.c));
+                    let Ok(node) = u64::try_from(node) else {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "node id",
+                            got: "imm-out-of-range",
+                        });
+                    };
+                    return VmResult::SendRemote {
+                        node,
+                        name,
+                        message,
+                    };
+                }
+                Opcode::StartSupervisor => {
+                    let Ok(strategy) = u8::try_from(instr.imm) else {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "strategy 0..=2",
+                            got: "imm-out-of-range",
+                        });
+                    };
+                    if strategy > 2 {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "strategy 0..=2",
+                            got: "imm-out-of-range",
+                        });
+                    }
+                    return VmResult::StartSupervisor { strategy };
                 }
                 Opcode::StartChild => {
                     let function = match u32::try_from(instr.imm) {
@@ -853,6 +918,7 @@ impl Vm {
                         match_request_id: None,
                         match_payload_kind: Some(kind),
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::FreshRequestId => {
@@ -869,6 +935,7 @@ impl Vm {
                         match_request_id: Some(rid),
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::ReceiveMatchCorrImm => {
@@ -881,6 +948,7 @@ impl Vm {
                         match_request_id: Some(rid),
                         match_payload_kind: None,
                         match_payload_eq: None,
+                        match_payload_value: None,
                     };
                 }
                 Opcode::Ask => {

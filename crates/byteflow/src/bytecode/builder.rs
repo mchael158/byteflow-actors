@@ -284,6 +284,34 @@ impl ChunkBuilder {
         ));
     }
 
+    /// Selective receive: tag register + structural payload equality.
+    pub fn emit_receive_match_value(&mut self, dst: u8, tag_reg: u8, payload_reg: u8) {
+        self.emit(Instruction::abc(
+            Opcode::ReceiveMatchValue,
+            dst,
+            tag_reg,
+            payload_reg,
+        ));
+    }
+
+    /// Hand a hop to the host distribution bridge.
+    pub fn emit_send_remote(&mut self, node_reg: u8, name_reg: u8, msg_reg: u8) {
+        self.emit(Instruction::abc(
+            Opcode::SendRemote,
+            node_reg,
+            name_reg,
+            msg_reg,
+        ));
+    }
+
+    /// Start a supervisor for this flow. `strategy` is `0..=2`.
+    pub fn emit_start_supervisor(&mut self, strategy: u8) {
+        self.emit(Instruction::only_imm(
+            Opcode::StartSupervisor,
+            i32::from(strategy),
+        ));
+    }
+
     /// Spawn `function` under this flow's supervisor. `policy` is `0..=2`.
     pub fn emit_start_child(&mut self, dst: u8, function: u32, policy: u8) {
         self.emit(Instruction::new(

@@ -277,13 +277,13 @@ pub use scheduler::JitConfig;
 pub use scheduler::{
     check_admin, check_link, check_monitor, exec_delegate, fault_count, flow_id_from_u64,
     next_flow_id, report_fault, AdminError, CapError, Capability, ChildSpec, DelegateError,
-    Delivery, DownEvent, Flow, FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome,
-    FlowQuota, HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest,
-    JoinError, LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity,
-    MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef, OverflowPolicy,
-    QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime, RuntimeConfig, RuntimeError,
-    RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError, Supervisor,
-    SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM,
+    Delivery, DistributionBridge, DownEvent, Flow, FlowExitReason, FlowHandle, FlowId, FlowMetrics,
+    FlowOutcome, FlowQuota, HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp,
+    HostAwaitRequest, JoinError, LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes,
+    MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason, MailboxStats, MonitorRef,
+    OutboundHop, OverflowPolicy, QuotaConfig, QuotaError, RegistryName, RestartStrategy, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError,
+    SpawnError, Supervisor, SupervisorConfig, WaitEpoch, DEFAULT_QUANTUM,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

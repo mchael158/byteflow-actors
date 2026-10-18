@@ -106,6 +106,9 @@ pub struct Flow {
     /// Freed once, on admit or finalize — never forwarded to [`crate::MemoryBudget`].
     pub(crate) hop_charge: usize,
     pub(crate) supervisor: Option<super::supervisor::SupervisorLink>,
+    /// Supervisor this flow started with `StartSupervisor`. Preferred by
+    /// `StartChild` over [`Self::supervisor`].
+    pub(crate) local_supervisor: Option<super::supervisor::SupervisorLink>,
     /// Self-authority (rights + native mask). Derived only via [`Cap::attenuate`].
     pub(crate) authority: Cap,
     pub(crate) cell: Arc<RevocationCell>,
@@ -159,6 +162,7 @@ impl Flow {
             pending_send: None,
             hop_charge: 0,
             supervisor: None,
+            local_supervisor: None,
             authority,
             cell,
             quota: Arc::new(super::quota::FlowQuota::from_config(

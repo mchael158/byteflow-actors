@@ -21,9 +21,11 @@
 mod capability;
 mod delegate;
 mod directory;
+mod distribution;
 mod error;
 mod finalize;
 mod flow_limit;
+mod flow_supervisor;
 mod handle;
 mod host_await;
 #[cfg(feature = "jit")]
@@ -48,6 +50,7 @@ mod worker;
 pub use crate::bytecode::RestartPolicy;
 pub use capability::{CapError, CapRights, Capability};
 pub use delegate::{exec_delegate, DelegateError};
+pub use distribution::{DistributionBridge, OutboundHop};
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};
 pub use host_await::{

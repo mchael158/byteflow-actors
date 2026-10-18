@@ -35,9 +35,9 @@ mod policy;
 mod queue;
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::bytecode::Value;
+use crate::bytecode::{payload_matches, Value};
 
 use super::error::RuntimeError;
 use super::process::{Flow, FlowId};
@@ -53,7 +53,7 @@ use queue::{EnqueueEffect, MailboxQueue};
 ///
 /// Used by classic `Receive`, `ReceiveMatch`, and `Ask`. Matching always
 /// **skips** (never drops) non-matching hops already in the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WaitFilter {
     /// `Receive`: consume the oldest value regardless of contents.
     Any,
@@ -63,6 +63,9 @@ pub(crate) enum WaitFilter {
     PayloadKind(u8),
     /// `ReceiveMatchEq`: oldest hop with this tag and `Int` payload.
     TagPayload { tag: u16, payload: i64 },
+    /// `ReceiveMatchValue`: oldest hop with this tag and a payload equal
+    /// to `payload` ([`crate::payload_matches`]).
+    TagValue { tag: u16, payload: Arc<Value> },
     /// `Ask`: reply belonging to one specific request.
     ///
     /// `expect_request_id` is the RPC correlation key.
@@ -97,6 +100,7 @@ impl WaitFilter {
                 }
                 None => false,
             },
+            Self::TagValue { tag, ref payload } => payload_matches(tag, payload, value),
             Self::Correlation {
                 expect_request_id,
                 expect_sender,
@@ -432,7 +436,7 @@ impl Mailbox {
             Ok(g) => g,
             Err(e) => return Err((e, flow)),
         };
-        if let Some(value) = inner.queue.take(filter) {
+        if let Some(value) = inner.queue.take(filter.clone()) {
             inner.stats.dequeued = inner.stats.dequeued.saturating_add(1);
             drop(inner);
             return Ok(Err(with_pending(flow, value)));

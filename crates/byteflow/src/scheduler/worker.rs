@@ -167,9 +167,13 @@ fn receive_filter(
     match_request_id: Option<u64>,
     match_payload_kind: Option<u8>,
     match_payload_eq: Option<i64>,
+    match_payload_value: Option<std::sync::Arc<crate::Value>>,
 ) -> WaitFilter {
     if let Some(kind) = match_payload_kind {
         return WaitFilter::PayloadKind(kind);
+    }
+    if let (Some(tag), Some(payload)) = (match_tag, match_payload_value) {
+        return WaitFilter::TagValue { tag, payload };
     }
     if let (Some(tag), Some(payload)) = (match_tag, match_payload_eq) {
         return WaitFilter::TagPayload { tag, payload };
@@ -587,6 +591,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 match_request_id,
                 match_payload_kind,
                 match_payload_eq,
+                match_payload_value,
             } => {
                 if !flow.authority.rights.contains(CapRights::RECV) {
                     finish_failed(
@@ -602,8 +607,9 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     match_request_id,
                     match_payload_kind,
                     match_payload_eq,
+                    match_payload_value,
                 );
-                match flow.mailbox.try_pop_filter(filter) {
+                match flow.mailbox.try_pop_filter(filter.clone()) {
                     Ok(Some(msg)) => {
                         flow.metrics
                             .messages_received
@@ -738,7 +744,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 }
-                match flow.mailbox.try_pop_filter(filter) {
+                match flow.mailbox.try_pop_filter(filter.clone()) {
                     Ok(Some(reply)) => {
                         flow.metrics
                             .messages_received
@@ -1097,6 +1103,23 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     super::finalize::signal_exit(shared, flow.id, target, reason);
                 }
             }
+            VmResult::SendRemote {
+                node,
+                name,
+                message,
+            } => {
+                if let Err(e) = super::distribution::deliver(shared, &mut flow, node, name, message)
+                {
+                    finish_failed(shared, *flow, e);
+                    return;
+                }
+            }
+            VmResult::StartSupervisor { strategy } => {
+                if let Err(e) = super::flow_supervisor::start(shared, &mut flow, strategy) {
+                    finish_failed(shared, *flow, e);
+                    return;
+                }
+            }
             VmResult::StartChild {
                 dest_reg,
                 function,
@@ -1128,7 +1151,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 }
-                let Some(link) = flow.supervisor.clone() else {
+                let Some(link) = super::flow_supervisor::link_for(&flow) else {
                     finish_failed(
                         shared,
                         *flow,
@@ -1346,13 +1369,13 @@ fn park_ask(
     target: FlowId,
 ) {
     let asker = flow.id;
-    let rid = match filter {
+    let rid = match &filter {
         WaitFilter::Correlation {
             expect_request_id, ..
-        } => expect_request_id,
+        } => *expect_request_id,
         WaitFilter::TaggedCorrelation {
             expect_request_id, ..
-        } => expect_request_id,
+        } => *expect_request_id,
         _ => 0,
     };
     match shared.ask_waits.insert(asker, target, rid) {

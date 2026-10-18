@@ -576,6 +576,32 @@ impl<'a> Fn<'a> {
         msg
     }
 
+    /// Selective receive: tag **and** structural equality with `payload`.
+    ///
+    /// `payload` may be any value (`Str`, `Bytes`, `Bool`, `Float`, nested
+    /// hop). Non-matching hops stay queued.
+    pub fn receive_match_value(&mut self, tag: Reg, payload: Reg) -> Reg {
+        let msg = self.local();
+        self.b.emit_receive_match_value(msg.0, tag.0, payload.0);
+        msg
+    }
+
+    /// Deliver `msg` to `name` on `node` via [`crate::DistributionBridge`].
+    pub fn send_remote(&mut self, node: Reg, name: Reg, msg: Reg) {
+        self.b.emit_send_remote(node.0, name.0, msg.0);
+    }
+
+    /// Start a supervisor for this flow. Later [`Self::start_child`] attaches
+    /// to it. `strategy` is one-for-one, one-for-all, or rest-for-one.
+    pub fn start_supervisor(&mut self, strategy: crate::RestartStrategy) {
+        let byte = match strategy {
+            crate::RestartStrategy::OneForOne => 0,
+            crate::RestartStrategy::OneForAll => 1,
+            crate::RestartStrategy::RestForOne => 2,
+        };
+        self.b.emit_start_supervisor(byte);
+    }
+
     /// OTP child of this flow's supervisor. Caller must have been started
     /// by [`crate::Supervisor`]. `policy` is Always / OnFailure / Never.
     pub fn start_child(&mut self, function: FuncId, policy: crate::RestartPolicy) -> Reg {

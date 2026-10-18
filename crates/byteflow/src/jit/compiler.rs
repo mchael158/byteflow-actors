@@ -15,8 +15,7 @@ use super::error::CompileError;
 use super::exit::{JIT_BUDGET, JIT_CONTINUE, JIT_RETURN, JIT_TRAP};
 use super::frame::{
     JitEntry, OFF_AS_BOOL, OFF_AS_UNIT, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_ENTRY_BOOL,
-    OFF_ENTRY_UNIT, OFF_EXIT_KIND, OFF_FUNCTION, OFF_PC, OFF_REGISTER_COUNT, OFF_RETURN_REG,
-    OFF_WRITTEN,
+    OFF_ENTRY_UNIT, OFF_EXIT_KIND, OFF_PC, OFF_RETURN_REG, OFF_WRITTEN,
 };
 use super::trace::{CompiledTrace, TraceKey, TraceSpan, MAX_TRACE_LENGTH};
 
@@ -183,6 +182,28 @@ impl<'a> TraceCompiler<'a> {
                 .iter()
                 .any(|pc| chunk.code[*pc as usize].op == Opcode::Call)
         });
+        let mut reg_slots = def.num_registers as usize;
+        if supports_calls {
+            for function in &chunk.functions {
+                reg_slots = reg_slots.max(function.num_registers as usize);
+            }
+        }
+        let mut skip_budget = HashSet::new();
+        if supports_calls {
+            for block in &region.blocks {
+                for pc in &block.pcs {
+                    let instr = chunk.code[*pc as usize];
+                    if instr.op != Opcode::Call {
+                        continue;
+                    }
+                    if let Some(leaf) = super::call::leaf_body(chunk, instr.imm as u32) {
+                        if leaf.arity == instr.b {
+                            skip_budget.extend(leaf.pcs.iter().copied());
+                        }
+                    }
+                }
+            }
+        }
 
         let trap_block = builder.create_block();
         let return_block = builder.create_block();
@@ -200,21 +221,35 @@ impl<'a> TraceCompiler<'a> {
             })?;
         builder.ins().jump(entry_clif, &[]);
 
+        let mut continuations = HashMap::new();
+        for block in &region.blocks {
+            for pc in &block.pcs {
+                if chunk.code[*pc as usize].op == Opcode::Call {
+                    let next = pc.saturating_add(1);
+                    if let Some(cont) = pc_to_block.get(&next) {
+                        continuations.insert(next, *cont);
+                    }
+                }
+            }
+        }
+
         for block in &region.blocks {
             let clif_block = pc_to_block[&block.start_pc];
             builder.switch_to_block(clif_block);
-            let mut registers = RegisterMap::new(def.num_registers as usize);
+            let mut registers = RegisterMap::new(reg_slots);
 
             for pc in &block.pcs {
-                emit_budget_tick(
-                    &mut builder,
-                    budget_ptr,
-                    frame_ptr,
-                    pointer_type,
-                    slots_ptr,
-                    &registers,
-                    *pc,
-                );
+                if !skip_budget.contains(pc) {
+                    emit_budget_tick(
+                        &mut builder,
+                        budget_ptr,
+                        frame_ptr,
+                        pointer_type,
+                        slots_ptr,
+                        &registers,
+                        *pc,
+                    );
+                }
                 let instr = chunk.code[*pc as usize];
                 let mut emit_ctx = EmitContext {
                     builder: &mut builder,
@@ -229,6 +264,7 @@ impl<'a> TraceCompiler<'a> {
                     call_depth_ptr,
                     call_stack_ptr,
                     supports_calls,
+                    continuations: &continuations,
                 };
                 emit_instruction(&mut emit_ctx, *pc, instr)?;
             }
@@ -339,6 +375,7 @@ struct EmitContext<'a, 'b> {
     call_depth_ptr: ClifValue,
     call_stack_ptr: ClifValue,
     supports_calls: bool,
+    continuations: &'a HashMap<u32, Block>,
 }
 
 fn emit_instruction(
@@ -358,6 +395,7 @@ fn emit_instruction(
     let pc_to_block = ctx.pc_to_block;
     let call_depth_ptr = ctx.call_depth_ptr;
     let call_stack_ptr = ctx.call_stack_ptr;
+    let continuations = ctx.continuations;
     match instr.op {
         Opcode::LoadImm => {
             let v = builder.ins().iconst(types::I64, i64::from(instr.imm));
@@ -542,7 +580,7 @@ fn emit_instruction(
                 store_slot(builder, slots_ptr, frame_ptr, pointer_type, instr.a, v, tag);
             }
             if supports_calls {
-                emit_return(
+                super::call::emit_return(
                     builder,
                     frame_ptr,
                     pointer_type,
@@ -550,6 +588,7 @@ fn emit_instruction(
                     call_stack_ptr,
                     slots_ptr,
                     registers,
+                    continuations,
                     instr.a,
                     pc,
                 );
@@ -560,7 +599,7 @@ fn emit_instruction(
         }
         Opcode::Nop => {}
         Opcode::Call => {
-            emit_call(
+            super::call::emit_call(
                 builder,
                 chunk,
                 registers,
@@ -570,6 +609,7 @@ fn emit_instruction(
                 pc_to_block,
                 call_depth_ptr,
                 call_stack_ptr,
+                trap_block,
                 pc,
                 instr,
             )?;
@@ -595,7 +635,7 @@ fn branch_to_pc(
     }
 }
 
-fn flush_registers(
+pub(crate) fn flush_registers(
     builder: &mut FunctionBuilder<'_>,
     registers: &RegisterMap,
     slots_ptr: ClifValue,
@@ -738,6 +778,9 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::DictGet
             | Opcode::DictErase
             | Opcode::ReceiveMatchEq
+            | Opcode::ReceiveMatchValue
+            | Opcode::SendRemote
+            | Opcode::StartSupervisor
             | Opcode::StartChild
             | Opcode::Ask
             | Opcode::AskTimeout
@@ -760,7 +803,7 @@ fn is_effect_opcode(op: Opcode) -> bool {
     )
 }
 
-fn field_ptr(
+pub(crate) fn field_ptr(
     builder: &mut FunctionBuilder<'_>,
     base: ClifValue,
     pointer_type: types::Type,
@@ -819,7 +862,7 @@ fn store_slot(
 
 /// `written[src]` selects the tag this execution already stored; otherwise
 /// the tag recorded at trace entry.
-fn inherited_bit(
+pub(crate) fn inherited_bit(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -839,7 +882,7 @@ fn inherited_bit(
     builder.ins().select(use_written, from_written, from_entry)
 }
 
-fn read_reg_bit(
+pub(crate) fn read_reg_bit(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -861,7 +904,7 @@ fn read_reg_bit(
     bool_as_i64(builder, set)
 }
 
-fn set_reg_bit(
+pub(crate) fn set_reg_bit(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -883,7 +926,7 @@ fn set_reg_bit(
     builder.ins().store(MachMemFlags::new(), next, addr, 0);
 }
 
-fn set_reg_bit_value(
+pub(crate) fn set_reg_bit_value(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -906,6 +949,44 @@ fn set_reg_bit_value(
     let cleared = builder.ins().band_not(current, mask);
     let next = builder.ins().bor(cleared, bit_val);
     builder.ins().store(MachMemFlags::new(), next, addr, 0);
+}
+
+/// Set or clear one tag bit selected by a runtime register index (`0..256`).
+///
+/// `reg` is `I32`. `enable` is `I64`: any non-zero value sets the bit.
+pub(crate) fn set_dynamic_reg_bit(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    base: i32,
+    reg: ClifValue,
+    enable: ClifValue,
+) {
+    let word = builder.ins().ushr_imm_u(reg, 6);
+    let bit = builder.ins().band_imm_u(reg, 63);
+    let bit64 = builder.ins().uextend(types::I64, bit);
+    let one = builder.ins().iconst(types::I64, 1);
+    let mask = builder.ins().ishl(one, bit64);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let on = builder.ins().icmp(
+        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+        enable,
+        zero,
+    );
+    for index in 0..4i32 {
+        let expect = builder.ins().iconst(types::I32, i64::from(index));
+        let in_word =
+            builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, word, expect);
+        let active = builder.ins().select(in_word, mask, zero);
+        let addr = field_ptr(builder, frame_ptr, pointer_type, base + index * 8);
+        let current = builder.ins().load(types::I64, MachMemFlags::new(), addr, 0);
+        let cleared = builder.ins().band_not(current, active);
+        let bit_val = builder.ins().select(on, active, zero);
+        let next = builder.ins().bor(cleared, bit_val);
+        builder.ins().store(MachMemFlags::new(), next, addr, 0);
+    }
 }
 
 fn bool_as_i64(builder: &mut FunctionBuilder<'_>, cond: ClifValue) -> ClifValue {
@@ -952,7 +1033,7 @@ fn emit_budget_tick(
         .store(MachMemFlags::new(), new_budget, budget_ptr, 0);
 }
 
-fn write_u32_field(
+pub(crate) fn write_u32_field(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -964,7 +1045,7 @@ fn write_u32_field(
     builder.ins().store(MachMemFlags::new(), val, addr, 0);
 }
 
-fn write_exit(
+pub(crate) fn write_exit(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
@@ -978,133 +1059,7 @@ fn write_exit(
     builder.ins().return_(&[]);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_call(
-    builder: &mut FunctionBuilder<'_>,
-    _chunk: &Chunk,
-    registers: &mut RegisterMap,
-    slots_ptr: ClifValue,
-    frame_ptr: ClifValue,
-    pointer_type: types::Type,
-    _pc_to_block: &HashMap<u32, Block>,
-    _call_depth_ptr: ClifValue,
-    _call_stack_ptr: ClifValue,
-    pc: u32,
-    _instr: Instruction,
-) -> Result<(), CompileError> {
-    // The slot file is one array. An in-place call overwrites the caller
-    // (a callee store to r2 destroys the caller's r2). The interpreter has
-    // a real frame per activation, so the trace stops here and `Vm::run`
-    // performs the call.
-    flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
-    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_return(
-    builder: &mut FunctionBuilder<'_>,
-    frame_ptr: ClifValue,
-    pointer_type: types::Type,
-    call_depth_ptr: ClifValue,
-    call_stack_ptr: ClifValue,
-    slots_ptr: ClifValue,
-    registers: &mut RegisterMap,
-    return_reg: u8,
-    pc: u32,
-) {
-    let depth = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), call_depth_ptr, 0);
-    let zero = builder.ins().iconst(types::I32, 0);
-    let is_outer = builder
-        .ins()
-        .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, depth, zero);
-    let outer = builder.create_block();
-    let inner = builder.create_block();
-    builder.ins().brif(is_outer, outer, &[], inner, &[]);
-    builder.switch_to_block(outer);
-    builder.seal_block(outer);
-    write_exit(
-        builder,
-        frame_ptr,
-        pointer_type,
-        JIT_RETURN,
-        pc,
-        u32::from(return_reg),
-    );
-    builder.switch_to_block(inner);
-    builder.seal_block(inner);
-
-    let one = builder.ins().iconst(types::I32, 1);
-    let new_depth = builder.ins().isub(depth, one);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), new_depth, call_depth_ptr, 0);
-
-    let record_bytes = builder.ins().iconst(
-        types::I32,
-        i64::from(std::mem::size_of::<super::frame::JitCallRecord>() as u32),
-    );
-    let record_off = builder.ins().imul(new_depth, record_bytes);
-    let record_off_ptr = builder.ins().uextend(pointer_type, record_off);
-    let record_addr = builder.ins().iadd(call_stack_ptr, record_off_ptr);
-
-    let return_pc = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), record_addr, 0);
-    let return_fn_addr = {
-        let off = builder.ins().iconst(pointer_type, 4);
-        builder.ins().iadd(record_addr, off)
-    };
-    let return_fn = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), return_fn_addr, 0);
-    let dest_addr = {
-        let off = builder.ins().iconst(pointer_type, 8);
-        builder.ins().iadd(record_addr, off)
-    };
-    let dest_reg = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), dest_addr, 0);
-    let caller_regs_addr = {
-        let off = builder.ins().iconst(pointer_type, 12);
-        builder.ins().iadd(record_addr, off)
-    };
-    let caller_regs = builder
-        .ins()
-        .load(types::I32, MachMemFlags::new(), caller_regs_addr, 0);
-
-    let ret_offset = builder
-        .ins()
-        .iconst(pointer_type, i64::from(u32::from(return_reg) * 8));
-    let ret_addr = builder.ins().iadd(slots_ptr, ret_offset);
-    let ret_val = builder
-        .ins()
-        .load(types::I64, MachMemFlags::new(), ret_addr, 0);
-    let eight = builder.ins().iconst(types::I32, 8);
-    let dest_offset = builder.ins().imul(dest_reg, eight);
-    let dest_offset_ptr = builder.ins().uextend(pointer_type, dest_offset);
-    let dest_slot = builder.ins().iadd(slots_ptr, dest_offset_ptr);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), ret_val, dest_slot, 0);
-
-    let func_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_FUNCTION);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), return_fn, func_ptr, 0);
-    let reg_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_REGISTER_COUNT);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), caller_regs, reg_ptr, 0);
-
-    registers.clear();
-    write_dynamic_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, return_pc, 0);
-    let _ = pc;
-}
-
-fn write_dynamic_exit(
+pub(crate) fn write_dynamic_exit(
     builder: &mut FunctionBuilder<'_>,
     frame_ptr: ClifValue,
     pointer_type: types::Type,

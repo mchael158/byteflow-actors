@@ -206,6 +206,15 @@ impl SupervisorLink {
     }
 }
 
+impl Supervisor {
+    /// Handle a worker uses for [`SupervisorLink::start_child`].
+    pub(crate) fn link(&self) -> SupervisorLink {
+        SupervisorLink {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 /// Host-side child restarter (design notes §15-16).
 ///
 /// A `Supervisor` is **not** a bytecode Flow. It is a dedicated OS
