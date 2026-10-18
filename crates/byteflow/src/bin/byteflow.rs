@@ -111,7 +111,7 @@ fn print_help() {
     );
 }
 
-/// 16-color ANSI so Cursor `terminal.ansi*` (VANTA) remaps the CLI.
+/// Standard 16-color ANSI. A terminal palette remaps these codes.
 const BLOOD: &str = "31";
 const CRIMSON: &str = "1;31";
 const SCARLET: &str = "91";
