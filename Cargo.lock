@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "byteflow-actors"
-version = "0.9.16"
+version = "0.9.17"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
