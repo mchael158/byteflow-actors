@@ -5,9 +5,13 @@ debug/
 *.pdb
 **/mutants.out*/
 
-# Editors
+# Editors and local tooling. Not part of the crate.
 .idea/
 .vscode/
+.cursor/
+.cursorignore
+.memoria/
+CLAUDE.md
 
 # Packed bytecode demos / local artifacts
 /*.bf
