@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ fn main() -> ExitCode {
             cmd_demo(&demo)
         }
         other => {
-            eprintln!("unknown command {other:?}");
+            banner_error(&format!("unknown command {other:?}"));
             print_help();
             Err(())
         }
@@ -57,26 +58,102 @@ fn main() -> ExitCode {
 }
 
 fn usage(msg: &str) -> Result<(), ()> {
-    eprintln!("usage: {msg}");
+    let t = Palette::new();
+    eprintln!(
+        "{}\n{} {}",
+        t.bar('╭', "usage", ""),
+        t.paint(CRIMSON, "╰─"),
+        t.paint(FLARE, msg)
+    );
     Err(())
 }
 
+fn banner_error(msg: &str) {
+    let t = Palette::new();
+    eprintln!("{} {}", t.paint(CRIMSON, "╰─ ✗"), t.paint(HOT, msg));
+}
+
 fn print_help() {
+    let t = Palette::new();
+    let cmd = |name: &str, spec: &str| {
+        format!(
+            "{}  {}  {}",
+            t.paint(HOT, "│"),
+            t.paint(FLARE, name),
+            t.paint(SCARLET, spec)
+        )
+    };
     eprintln!(
         "\
-byteflow — verify, disassemble and run .bf modules (assembled via Program)
-
-USAGE:
-    byteflow demo [ping-pong|atomic|selective|selective-after|match-eq|exit|dict|ask|ask-timeout|server-loop|monitor|alive|add]
-    byteflow pack  <ping-pong|atomic|ask|add> <out.bf>
-    byteflow verify <file.bf>
-    byteflow disasm <file.bf>
-    byteflow run    <file.bf> [function]
-
-`run` and hop demos attach the std native table (print=0, now_ms=1, make_msg=2, …, msg_reply_cap=7).
-Every `Send` is an Atomic Hop (`Value::Message` only).
-"
+{}
+{}  verify, disassemble and run .bf modules
+{}
+{}
+{}
+{}
+{}
+{}
+{}  run/hop demos attach natives print=0 · now_ms=1 · make_msg=2 · … · msg_reply_cap=7
+{}  every Send is an Atomic Hop (Value::Message only)",
+        t.bar('╭', "𝕭𝖄𝕿𝕰𝕱𝕷𝕺𝖂", "runtime"),
+        t.paint(HOT, "│"),
+        t.bar('├', "usage", ""),
+        cmd(
+            "demo  ",
+            "[ping-pong|atomic|selective|selective-after|match-eq|exit|dict|ask|ask-timeout|server-loop|monitor|alive|add]",
+        ),
+        cmd("pack  ", "<ping-pong|atomic|ask|add> <out.bf>"),
+        cmd("verify", "<file.bf>"),
+        cmd("disasm", "<file.bf>"),
+        cmd("run   ", "<file.bf> [function]"),
+        t.paint(BLOOD, "│"),
+        t.paint(CRIMSON, "╰─"),
     );
+}
+
+/// 16-color ANSI so Cursor `terminal.ansi*` (VANTA) remaps the CLI.
+const BLOOD: &str = "31";
+const CRIMSON: &str = "1;31";
+const SCARLET: &str = "91";
+const HOT: &str = "93";
+const FLARE: &str = "97";
+
+struct Palette {
+    on: bool,
+}
+
+impl Palette {
+    fn new() -> Self {
+        Self {
+            on: env::var_os("NO_COLOR").is_none() && io::stderr().is_terminal(),
+        }
+    }
+
+    fn paint(&self, codes: &str, text: &str) -> String {
+        if self.on {
+            format!("\x1b[{codes}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn bar(&self, corner: char, title: &str, tag: &str) -> String {
+        let head = format!(
+            "{} {}",
+            self.paint(CRIMSON, &format!("{corner}─")),
+            self.paint(FLARE, title)
+        );
+        if tag.is_empty() {
+            head
+        } else {
+            format!(
+                "{} {} {}",
+                head,
+                self.paint(BLOOD, "╱╱"),
+                self.paint(SCARLET, tag)
+            )
+        }
+    }
 }
 
 fn load_bf(path: &str) -> Result<byteflow::Chunk, ()> {

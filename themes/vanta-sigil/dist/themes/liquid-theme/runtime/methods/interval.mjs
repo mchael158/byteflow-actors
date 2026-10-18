@@ -1,0 +1,1 @@
+const n=global.lynx_liquid_plugin;var l=r=>{let e;return{install(){clearInterval(e),e=setInterval(()=>{r.setBackgroundColor("#00000000")},n?.config?.refreshInterval??1e3)},uninstall(){clearInterval(e)}}};export{l as default};

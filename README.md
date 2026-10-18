@@ -4,8 +4,6 @@
 [![docs.rs](https://docs.rs/byteflow-actors/badge.svg)](https://docs.rs/byteflow-actors)
 [![license](https://img.shields.io/crates/l/byteflow-actors.svg)](LICENSE)
 
-[English](README.md) · [Português (Brasil)](README.pt-BR.md)
-
 Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, named discovery (`register_name` / `whereis`), and a supervisor — **one crate**.
 
 ```toml
