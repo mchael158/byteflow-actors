@@ -30,16 +30,16 @@
 
 /* Title Bar — no backdrop-filter to avoid stacking context trapping menu dropdowns */
 .part.titlebar {
-  background: rgba(8, 12, 20, 0.55) !important;
+  background: rgba(8, 12, 20, 0.16) !important;
 }
 
 /* Panel — no backdrop-filter to avoid z-index issues with terminal/output */
 .part.panel {
-  background: rgba(8, 12, 20, 0.60) !important;
+  background: rgba(8, 12, 20, 0.14) !important;
 }
 
 .part.panel .title {
-  background: rgba(6, 10, 18, 0.50) !important;
+  background: rgba(6, 10, 18, 0.12) !important;
   border-bottom: 1px solid var(--glass-edge) !important;
 }
 
@@ -53,13 +53,13 @@
 
 /* Minimap */
 .minimap {
-  background: rgba(8, 12, 20, 0.35) !important;
+  background: rgba(8, 12, 20, 0.10) !important;
   border-left: 1px solid var(--glass-edge) !important;
 }
 
 /* Sticky Scroll */
 .sticky-scroll-widget {
-  background: rgba(8, 12, 20, 0.80) !important;
+  background: rgba(8, 12, 20, 0.22) !important;
   backdrop-filter: var(--blur-sm);
   -webkit-backdrop-filter: var(--blur-sm);
   border-bottom: 1px solid var(--glass-edge) !important;

@@ -1,16 +1,16 @@
 :root {
-  --glass-base:          rgba(10, 14, 20, 0.45);
-  --glass-mid:           rgba(10, 14, 20, 0.30);
-  --glass-clear:         rgba(10, 14, 20, 0.15);
-  --glass-frosted:       rgba(8, 12, 18, 0.72);
+  --glass-base:          rgba(10, 14, 20, 0.10);
+  --glass-mid:           rgba(10, 14, 20, 0.10);
+  --glass-clear:         rgba(10, 14, 20, 0.10);
+  --glass-frosted:       rgba(8, 12, 18, 0.36);
 
-  --accent:              #7aa2f7;
-  --accent-dim:          rgba(122, 162, 247, 0.45);
-  --accent-glow:         rgba(122, 162, 247, 0.12);
-  --accent-glow-strong:  rgba(122, 162, 247, 0.25);
-  --accent-tint:         rgba(122, 162, 247, 0.05);
-  --accent-tint-hover:   rgba(122, 162, 247, 0.08);
-  --accent-tint-active:  rgba(122, 162, 247, 0.14);
+  --accent:              #FF1F38;
+  --accent-dim:          rgba(255, 31, 56, 0.40);
+  --accent-glow:         rgba(255, 31, 56, 0.12);
+  --accent-glow-strong:  rgba(255, 31, 56, 0.22);
+  --accent-tint:         rgba(255, 31, 56, 0.05);
+  --accent-tint-hover:   rgba(255, 31, 56, 0.08);
+  --accent-tint-active:  rgba(255, 31, 56, 0.14);
 
   --glass-edge:          rgba(255, 255, 255, 0.04);
   --glass-edge-hover:    rgba(255, 255, 255, 0.08);
@@ -30,8 +30,8 @@
   --shadow-lift:    0 6px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.30);
 
   --glow-accent:  0 0 18px var(--accent-glow), 0 0 6px var(--accent-glow-strong);
-  --glow-soft:    0 0 30px rgba(122, 162, 247, 0.08);
-  --glow-ring:    0 0 0 3px rgba(122, 162, 247, 0.12);
+  --glow-soft:    0 0 30px rgba(255, 31, 56, 0.08);
+  --glow-ring:    0 0 0 3px rgba(255, 31, 56, 0.12);
 
   --r-xs:  4px;
   --r-sm:  8px;
@@ -233,6 +233,16 @@
 
 .editor-container,
 .editor-group-container {
+  background: transparent !important;
+}
+
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .overflow-guard,
+.monaco-editor .monaco-editor-background,
+.monaco-editor .margin,
+.editor-instance,
+.minimap-inner-container {
   background: transparent !important;
 }
 

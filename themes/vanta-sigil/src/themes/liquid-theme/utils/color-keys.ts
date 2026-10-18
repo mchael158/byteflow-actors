@@ -78,7 +78,7 @@ export const ALL_BG_KEYS = [
 export const THEME_BG = '0a0e14';
 
 /** Glass tier: subtle enough to feel transparent but with perceptible tint */
-export const DEFAULT_OPACITY = 0.42;
+export const DEFAULT_OPACITY = 0.10;
 
 /** Frosted tier: dense enough for readability on floating panels */
-export const FROSTED_OPACITY = 0.76;
+export const FROSTED_OPACITY = 0.4;

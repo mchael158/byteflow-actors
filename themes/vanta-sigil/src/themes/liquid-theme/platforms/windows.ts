@@ -136,8 +136,20 @@ export async function uninstall(context: vscode.ExtensionContext): Promise<void>
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+async function isGlassPatched(): Promise<boolean> {
+  try {
+    const { ElectronJSFile } = resolveVSCodePaths(RUNTIME_DIR_NAME);
+    const electronJS = await fsPromises.readFile(ElectronJSFile, 'utf-8');
+    return electronJS.includes('frame:false,transparent:true');
+  } catch {
+    return false;
+  }
+}
+
 export async function handleActivation(context: vscode.ExtensionContext): Promise<void> {
-  if (context.globalState.get('lynxLiquidInstalled', false)) { return; }
+  if (context.globalState.get('lynxLiquidInstalled', false) && await isGlassPatched()) {
+    return;
+  }
   await install(context);
 }
 

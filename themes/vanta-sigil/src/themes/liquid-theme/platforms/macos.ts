@@ -178,7 +178,13 @@ export async function uninstall(context: vscode.ExtensionContext): Promise<void>
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function handleActivation(context: vscode.ExtensionContext): Promise<void> {
-  if (context.globalState.get('lynxLiquidInstalled', false)) { return; }
+  if (context.globalState.get('lynxLiquidInstalled', false)) {
+    try {
+      const { ElectronJSFile } = resolveVSCodePaths(RUNTIME_DIR_NAME);
+      const electronJS = await fsPromises.readFile(ElectronJSFile, 'utf-8');
+      if (electronJS.includes('visualEffectState:"active"')) { return; }
+    } catch { /* reinstall */ }
+  }
   await install(context);
 }
 
