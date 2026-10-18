@@ -5,8 +5,11 @@
 //! [`Injector`] is the multi-producer FIFO for spawns and wakeups. Workers
 //! move a batch off it under one lock, then run from the local deque.
 //!
-//! `Injector::push` returns the task when the mutex is poisoned. Callers
-//! finalize that flow; dropping it would surface as [`super::error::RuntimeError::Abandoned`].
+//! A panic while holding the injector used to poison the mutex and leave
+//! every flow already in the deque unreachable. The critical section only
+//! touches a [`VecDeque`], whose updates stay valid if they unwind, so the
+//! injector clears that poison and keeps the queued flows. `push` still
+//! returns the task when the lock cannot be taken at all.
 
 mod chase_lev;
 
@@ -14,7 +17,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use self::chase_lev::LocalQueue;
-use super::sync_lock;
 
 /// How many injector tasks one worker pulls under a single lock.
 pub(crate) const INJECTOR_BATCH: usize = 32;
@@ -40,47 +42,47 @@ impl<T> Injector<T> {
         }
     }
 
-    /// Enqueue `task`. On a poisoned lock the task is returned so the caller
-    /// can finalize it instead of dropping it.
-    #[must_use = "a poisoned injector returns the task; dropping it abandons the flow"]
-    pub fn push(&self, task: T) -> Result<(), T> {
-        match sync_lock::lock(&self.inner, "Injector::push") {
-            Ok(mut q) => {
-                q.push_back(task);
-                Ok(())
-            }
-            Err(_) => Err(task),
-        }
+    /// Enqueue `task`. A poisoned injector is cleared first, so `task` joins
+    /// the flows that were already queued instead of being dropped.
+    pub fn push(&self, task: T) {
+        self.lock_queue("Injector::push").push_back(task);
     }
 
     /// Take up to `limit` tasks from the front (oldest first).
     ///
-    /// A poisoned lock yields an empty batch. Tasks already inside the queue
-    /// stay there; this path does not drop them.
+    /// A poisoned lock is cleared. Flows already in the deque come out in
+    /// FIFO order instead of staying trapped until process exit.
     pub fn steal_batch(&self, limit: usize) -> Vec<T> {
         if limit == 0 {
             return Vec::new();
         }
-        match sync_lock::lock(&self.inner, "Injector::steal_batch") {
-            Ok(mut q) => {
-                let n = limit.min(q.len());
-                let mut out = Vec::with_capacity(n);
-                for _ in 0..n {
-                    match q.pop_front() {
-                        Some(task) => out.push(task),
-                        None => break,
-                    }
-                }
-                out
+        let mut q = self.lock_queue("Injector::steal_batch");
+        let n = limit.min(q.len());
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            match q.pop_front() {
+                Some(task) => out.push(task),
+                None => break,
             }
-            Err(_) => Vec::new(),
         }
+        out
     }
 
     pub(crate) fn drain(&self) -> Vec<T> {
-        match sync_lock::lock(&self.inner, "Injector::drain") {
-            Ok(mut q) => q.drain(..).collect(),
-            Err(_) => Vec::new(),
+        self.lock_queue("Injector::drain").drain(..).collect()
+    }
+
+    /// The deque under this mutex only changes through `VecDeque` methods,
+    /// which stay valid if they unwind. A poisoned guard is cleared so those
+    /// flows can still be run or finalized.
+    fn lock_queue(&self, where_: &'static str) -> std::sync::MutexGuard<'_, VecDeque<T>> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                self.inner.clear_poison();
+                super::error::report_fault(super::error::RuntimeError::PoisonedLock(where_));
+                poisoned.into_inner()
+            }
         }
     }
 
@@ -180,8 +182,8 @@ mod tests {
     #[test]
     fn injector_fifo_order() {
         let inj = Injector::new();
-        assert!(inj.push(1u32).is_ok());
-        assert!(inj.push(2).is_ok());
+        inj.push(1u32);
+        inj.push(2);
         assert_eq!(inj.steal_batch(1), vec![1]);
         assert_eq!(inj.steal_batch(1), vec![2]);
         assert!(inj.steal_batch(1).is_empty());
@@ -190,18 +192,23 @@ mod tests {
     #[test]
     fn injector_batch_keeps_fifo() {
         let inj = Injector::new();
-        assert!(inj.push(1u32).is_ok());
-        assert!(inj.push(2).is_ok());
-        assert!(inj.push(3).is_ok());
+        inj.push(1u32);
+        inj.push(2);
+        inj.push(3);
         assert_eq!(inj.steal_batch(2), vec![1, 2]);
         assert_eq!(inj.steal_batch(1), vec![3]);
     }
 
     #[test]
-    fn poisoned_push_returns_the_task() {
+    fn poisoned_injector_keeps_the_tasks_already_queued() {
         let inj = Injector::new();
+        inj.push(1u32);
+        inj.push(2);
         inj.poison_for_test();
-        assert!(matches!(inj.push(7u32), Err(7)));
+        inj.push(3);
+        assert_eq!(inj.steal_batch(2), vec![1, 2]);
+        assert_eq!(inj.drain(), vec![3]);
+        assert!(inj.steal_batch(1).is_empty());
     }
 
     #[test]

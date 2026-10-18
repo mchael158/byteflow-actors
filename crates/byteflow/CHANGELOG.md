@@ -9,8 +9,8 @@ All notable changes to **byteflow-actors** are documented here.
 - **Run queue:** each worker owns a Chase-Lev deque, so local push/pop
   no longer shares a mutex with stealers. The injector stays a
   multi-producer FIFO; workers pull a batch under one lock. A poisoned
-  `Injector::push` returns the flow and finalizes it (`runtime queue
-  unavailable`) instead of dropping it.
+  injector is cleared. Flows already in it stay queued, and a later
+  `push` joins them instead of failing the flow.
 - **Mailbox:** a `Reject` send that lost the race with a pop is queued
   under the park lock instead of waiting for a slot that is already
   free. A full waiter list fails with `waiting senders full`.

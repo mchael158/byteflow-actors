@@ -290,10 +290,9 @@ fn take_injector(shared: &Shared, local: &LocalDeque<Box<Flow>>) -> Option<Box<F
     Some(first)
 }
 
-/// Local ring first. A full ring spills to the injector, which finalizes
-/// the flow if that lock is poisoned. Spill wakes a worker: this thread may
-/// keep running the task it already holds and not look at the injector again
-/// until that task blocks.
+/// Local ring first. A full ring spills to the injector. Spill wakes a
+/// worker: this thread may keep running the task it already holds and not
+/// look at the injector again until that task blocks.
 fn enqueue_local(shared: &Shared, local: &LocalDeque<Box<Flow>>, flow: Box<Flow>) {
     if let Err(flow) = local.push(flow) {
         enqueue_flow(shared, flow);
