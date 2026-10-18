@@ -12,6 +12,18 @@ debug/
 .cursorignore
 .memoria/
 CLAUDE.md
+*~
+*.swp
+*.swo
+
+# OS metadata. Not part of the crate.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local secrets.
+.env
+.env.local
 
 # Packed bytecode demos / local artifacts
 /*.bf
