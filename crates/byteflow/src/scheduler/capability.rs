@@ -371,9 +371,7 @@ impl CapTable {
         if !valid {
             return Err(CapError::Unknown);
         }
-        let narrowed = cap
-            .cap
-            .attenuate(cap.cap.rights(), cap.cap.native_mask());
+        let narrowed = cap.cap.attenuate(cap.cap.rights(), cap.cap.native_mask());
         self.insert(new_holder, narrowed).map_err(CapError::from)
     }
 

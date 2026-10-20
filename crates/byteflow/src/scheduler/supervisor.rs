@@ -33,7 +33,7 @@ const DEFAULT_MAX_PERIOD: Duration = Duration::from_secs(5);
 /// restart so a child always comes back with the original call.
 ///
 /// Non-empty [`Self::name`] is registered as `register_name` → an addressing
-/// Cap ([`CapRights::ADDRESSING`]) for that incarnation (swept on exit,
+/// Cap ([`crate::CapRights::ADDRESSING`]) for that incarnation (swept on exit,
 /// re-bound on restart).
 #[derive(Clone, Debug)]
 pub struct ChildSpec {
@@ -206,15 +206,6 @@ impl SupervisorLink {
     }
 }
 
-impl Supervisor {
-    /// Handle a worker uses for [`SupervisorLink::start_child`].
-    pub(crate) fn link(&self) -> SupervisorLink {
-        SupervisorLink {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
 /// Host-side child restarter (design notes §15-16).
 ///
 /// A `Supervisor` is **not** a bytecode Flow. It is a dedicated OS
@@ -235,6 +226,13 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Handle a worker uses for [`SupervisorLink::start_child`].
+    pub(crate) fn link(&self) -> SupervisorLink {
+        SupervisorLink {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     pub fn new(spawner: RuntimeSpawner) -> Result<Self, SpawnError> {
         Self::with_config(spawner, SupervisorConfig::default())
     }
@@ -300,11 +298,15 @@ impl Supervisor {
     /// Stop the drive thread. Does not terminate live children — they
     /// belong to the runtime, not to us.
     pub fn shutdown(mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        self.inner.cvar.notify_all();
+        self.stop_drive();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+
+    fn stop_drive(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.cvar.notify_all();
     }
 
     #[cfg(test)]
@@ -315,6 +317,15 @@ impl Supervisor {
     #[cfg(test)]
     fn respawn_fail_count(&self) -> u64 {
         self.inner.respawn_fail_count.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        self.stop_drive();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -518,6 +529,15 @@ fn handle_exit(inner: &Arc<Inner>, exit: ChildExit) {
     if inner.intensity_exceeded.load(Ordering::Acquire) || intensity_hit(inner) {
         return;
     }
+    // One restart wave at a time. A second unexpected exit (e.g. RestForOne
+    // earlier sibling) must not overwrite the in-flight cascade's specs.
+    if cascade_active(inner) {
+        eprintln!(
+            "byteflow: supervisor restart abandoned — cascade already in progress (exit {})",
+            exit.id
+        );
+        return;
+    }
 
     match inner.config.strategy {
         RestartStrategy::OneForOne => {
@@ -538,7 +558,22 @@ fn handle_exit(inner: &Arc<Inner>, exit: ChildExit) {
     }
 }
 
+fn cascade_active(inner: &Inner) -> bool {
+    match sync_lock::lock(&inner.cascade, "cascade_active") {
+        Ok(slot) => slot.is_some(),
+        Err(e) => {
+            report_fault(e);
+            true
+        }
+    }
+}
+
 fn start_cascade(inner: &Arc<Inner>, failed: ChildSpec, failed_idx: usize, later: Vec<FlowId>) {
+    if cascade_active(inner) {
+        eprintln!("byteflow: supervisor cascade abort — another wave is already in progress");
+        return;
+    }
+
     let specs = {
         let mut children = match sync_lock::lock(&inner.children, "start_cascade") {
             Ok(c) => c,
@@ -581,10 +616,16 @@ fn start_cascade(inner: &Arc<Inner>, failed: ChildSpec, failed_idx: usize, later
     let waiting: HashSet<FlowId> = later.iter().copied().collect();
     match sync_lock::lock(&inner.cascade, "start_cascade.cascade") {
         Ok(mut slot) => {
+            if slot.is_some() {
+                eprintln!(
+                    "byteflow: supervisor cascade abort — another wave is already in progress"
+                );
+                return;
+            }
             *slot = Some(Cascade {
                 waiting: waiting.clone(),
                 specs,
-            })
+            });
         }
         Err(e) => {
             report_fault(e);
@@ -878,6 +919,66 @@ mod tests {
             matches!(later_outcome, FlowOutcome::Failed(_)),
             "rest-for-one must kill children started after the failure, got {later_outcome:?}"
         );
+        Ok(())
+    }
+
+    /// A second unexpected exit must not overwrite an in-flight cascade's specs.
+    #[test]
+    fn second_wave_does_not_clobber_cascade_specs() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = tiny_runtime(wait_and_trap_chunk())?;
+        let sup = Supervisor::with_config(
+            rt.spawner(),
+            SupervisorConfig {
+                max_restarts: 8,
+                max_period: Duration::from_secs(5),
+                strategy: RestartStrategy::RestForOne,
+            },
+        )?;
+        let kept = ChildSpec::new("kept-wave", 0).restart(RestartPolicy::OnFailure);
+        {
+            let mut slot = sync_lock::lock(&sup.inner.cascade, "cascade-test-seed")?;
+            *slot = Some(Cascade {
+                waiting: HashSet::new(),
+                specs: vec![kept.clone()],
+            });
+        }
+        // Simulate an earlier sibling failing while the first wave still owns
+        // the slot — same path RestForOne hits in production.
+        let earlier = FlowId(0xCA5C_ADE0);
+        {
+            let mut children = sync_lock::lock(&sup.inner.children, "cascade-test-child")?;
+            children.insert(
+                earlier,
+                LiveChild {
+                    spec: ChildSpec::new("earlier", 1).restart(RestartPolicy::OnFailure),
+                    expected_shutdown: false,
+                },
+            );
+        }
+        handle_exit(
+            &sup.inner,
+            ChildExit {
+                id: earlier,
+                outcome: FlowOutcome::Failed("mid-cascade".into()),
+                restart: RestartPolicy::OnFailure,
+            },
+        );
+        {
+            let slot = sync_lock::lock(&sup.inner.cascade, "cascade-test-check")?;
+            let cascade = slot.as_ref().ok_or("cascade slot cleared")?;
+            assert_eq!(cascade.specs.len(), 1);
+            assert_eq!(cascade.specs[0].name, "kept-wave");
+        }
+        assert_eq!(sup.live_children(), 0);
+        assert_eq!(rt.metrics().processes_spawned, 0);
+        // Clear the seeded slot without respawning into the real runtime.
+        {
+            let mut slot = sync_lock::lock(&sup.inner.cascade, "cascade-test-clear")?;
+            *slot = None;
+        }
+        sup.shutdown();
+        rt.shutdown();
+        let _ = kept;
         Ok(())
     }
 
