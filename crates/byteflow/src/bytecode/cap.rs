@@ -1,4 +1,4 @@
-//! Capability model — Phase 3.
+//! Capability model.
 //!
 //! A [`CapId`] is still the bytecode-visible token. Authorization lives in a
 //! [`Cap`] record (target + rights + optional native mask + epoch).
@@ -313,12 +313,15 @@ impl CapTarget {
 }
 
 /// Authorization record stored in the runtime Cap table, never in bytecode.
+///
+/// Fields are private so authority can only change through [`Cap::root`]
+/// (trusted mint) or [`Cap::attenuate`] (strict intersection).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cap {
-    pub target: CapTarget,
-    pub rights: CapRights,
+    target: CapTarget,
+    rights: CapRights,
     /// Meaningful only when `rights.contains(NATIVE)`.
-    pub native_mask: Option<NativeMask>,
+    native_mask: Option<NativeMask>,
     /// Incremented by [`RevocationCell::revoke`]. A Cap is valid iff
     /// `self.epoch == issuer.epoch()`.
     epoch: u64,
@@ -363,6 +366,21 @@ impl Cap {
             native_mask,
             epoch: cell.epoch(),
         }
+    }
+
+    #[inline]
+    pub fn target(&self) -> CapTarget {
+        self.target
+    }
+
+    #[inline]
+    pub fn rights(&self) -> CapRights {
+        self.rights
+    }
+
+    #[inline]
+    pub fn native_mask(&self) -> Option<&NativeMask> {
+        self.native_mask.as_ref()
     }
 
     pub fn epoch(&self) -> u64 {
@@ -443,14 +461,14 @@ mod tests {
         );
 
         let child = parent.attenuate(CapRights::SEND.union(CapRights::ADMIN), None);
-        assert!(!child.rights.contains(CapRights::ADMIN));
-        assert!(child.rights.contains(CapRights::SEND));
+        assert!(!child.rights().contains(CapRights::ADMIN));
+        assert!(child.rights().contains(CapRights::SEND));
 
         let wide = NativeMask::full(128);
         let child2 = parent.attenuate(CapRights::NATIVE, Some(&wide));
-        let child_mask = child2.native_mask.as_ref();
+        let child_mask = child2.native_mask();
         assert!(child_mask.is_some_and(|m| m.allows(3)));
-        let parent_mask = parent.native_mask.as_ref();
+        let parent_mask = parent.native_mask();
         assert!(parent_mask.is_some_and(|m| !m.allows(7)));
     }
 
@@ -462,11 +480,11 @@ mod tests {
                 let parent = Cap::root(CapTarget::Flow(1), CapRights::from_bits(src), None, &cell);
                 let child = parent.attenuate(CapRights::from_bits(want), None);
                 assert!(
-                    child.rights.is_subset_of(parent.rights),
+                    child.rights().is_subset_of(parent.rights()),
                     "escalation src={src:#x} want={want:#x} got={:#x}",
-                    child.rights.bits()
+                    child.rights().bits()
                 );
-                assert_eq!(child.rights.bits(), src & want);
+                assert_eq!(child.rights().bits(), src & want);
             }
         }
     }
@@ -489,9 +507,9 @@ mod tests {
         ];
         for want in adversarial {
             cap = cap.attenuate(want, Some(&NativeMask::full(32)));
-            assert!(cap.rights.is_subset_of(CapRights::FLOW));
-            assert!(!cap.rights.contains(CapRights::ADMIN));
-            if let Some(mask) = &cap.native_mask {
+            assert!(cap.rights().is_subset_of(CapRights::FLOW));
+            assert!(!cap.rights().contains(CapRights::ADMIN));
+            if let Some(mask) = cap.native_mask() {
                 assert!(!mask.allows(7));
             }
         }

@@ -102,7 +102,7 @@ pub(crate) fn deliver(
     name: Arc<str>,
     message: Value,
 ) -> Result<(), String> {
-    if !flow.authority.rights.contains(crate::CapRights::SEND) {
+    if !flow.authority.rights().contains(crate::CapRights::SEND) {
         return Err("send_remote denied: flow lacks SEND right".into());
     }
     let Some(bridge) = shared.distribution.as_ref() else {

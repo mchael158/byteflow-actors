@@ -53,7 +53,7 @@ pub fn exec_spawn_authority(
     if !parent_cap.is_valid(parent_cell) {
         return Err(ConfinedSpawnError::SourceCapRevoked);
     }
-    if !parent_cap.rights.contains(CapRights::SPAWN) {
+    if !parent_cap.rights().contains(CapRights::SPAWN) {
         return Err(ConfinedSpawnError::MissingSpawnRight);
     }
     parent_quota
@@ -63,8 +63,8 @@ pub fn exec_spawn_authority(
     let attenuated = parent_cap.attenuate(requested_rights, requested_native);
     Ok(Cap::root(
         CapTarget::Flow(new_child_id),
-        attenuated.rights,
-        attenuated.native_mask,
+        attenuated.rights(),
+        attenuated.native_mask().cloned(),
         child_cell,
     ))
 }
@@ -97,8 +97,8 @@ mod tests {
             Ok(c) => c,
             Err(_) => panic!("spawn authority must succeed"),
         };
-        assert!(!out.rights.contains(CapRights::ADMIN));
-        assert!(out.rights.contains(CapRights::NATIVE));
+        assert!(!out.rights().contains(CapRights::ADMIN));
+        assert!(out.rights().contains(CapRights::NATIVE));
     }
 
     #[test]
@@ -119,6 +119,6 @@ mod tests {
             Ok(c) => c,
             Err(_) => panic!("confined spawn must succeed"),
         };
-        assert_eq!(out.rights, CapRights::NONE);
+        assert_eq!(out.rights(), CapRights::NONE);
     }
 }

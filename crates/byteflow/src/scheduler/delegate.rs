@@ -74,7 +74,7 @@ pub fn exec_delegate(
     if !src.is_valid(src_cell) {
         return Err(DelegateError::SourceRevoked);
     }
-    if want_native.is_some() && !src.rights.contains(CapRights::NATIVE) {
+    if want_native.is_some() && !src.rights().contains(CapRights::NATIVE) {
         return Err(DelegateError::SourceLacksNative);
     }
     Ok(src.attenuate(want_rights, want_native))
@@ -100,10 +100,10 @@ mod tests {
             Ok(c) => c,
             Err(err) => panic!("delegate of live SEND cap must succeed: {err}"),
         };
-        assert!(out.rights.contains(CapRights::SEND));
-        assert!(!out.rights.contains(CapRights::ADMIN));
-        assert!(!out.rights.contains(CapRights::NATIVE));
-        assert!(out.rights.is_subset_of(src.rights));
+        assert!(out.rights().contains(CapRights::SEND));
+        assert!(!out.rights().contains(CapRights::ADMIN));
+        assert!(!out.rights().contains(CapRights::NATIVE));
+        assert!(out.rights().is_subset_of(src.rights()));
     }
 
     #[test]
@@ -121,8 +121,8 @@ mod tests {
                     Ok(c) => c,
                     Err(err) => panic!("live cap must delegate: {err}"),
                 };
-                assert_eq!(out.rights.bits(), src_bits & want_bits);
-                assert!(out.rights.is_subset_of(src.rights));
+                assert_eq!(out.rights().bits(), src_bits & want_bits);
+                assert!(out.rights().is_subset_of(src.rights()));
             }
         }
     }
@@ -142,7 +142,7 @@ mod tests {
             Ok(cap) => cap,
             Err(err) => panic!("live NATIVE capability should delegate: {err}"),
         };
-        let got = match out.native_mask.as_ref() {
+        let got = match out.native_mask() {
             Some(m) => m,
             None => panic!("native mask present"),
         };
@@ -181,8 +181,8 @@ mod tests {
         };
         // SEND-only result still inherits the (unchanged) mask payload;
         // NATIVE bit was intersected away.
-        assert!(!out.rights.contains(CapRights::NATIVE));
-        let got = match out.native_mask.as_ref() {
+        assert!(!out.rights().contains(CapRights::NATIVE));
+        let got = match out.native_mask() {
             Some(m) => m,
             None => panic!("mask preserved"),
         };

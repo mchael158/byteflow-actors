@@ -34,10 +34,10 @@ fn check_flow_right(
     if !cap.is_valid(cell) {
         return Err(LinkError::CapRevoked);
     }
-    if cap.target != CapTarget::Flow(target) {
+    if cap.target() != CapTarget::Flow(target) {
         return Err(LinkError::WrongTarget);
     }
-    if !cap.rights.contains(right) {
+    if !cap.rights().contains(right) {
         return Err(LinkError::MissingRight);
     }
     Ok(())
@@ -75,10 +75,10 @@ pub fn check_admin(cap: &Cap, cell: &RevocationCell) -> Result<(), AdminError> {
     if !cap.is_valid(cell) {
         return Err(AdminError::CapRevoked);
     }
-    if cap.target != CapTarget::Scheduler {
+    if cap.target() != CapTarget::Scheduler {
         return Err(AdminError::WrongTarget);
     }
-    if !cap.rights.contains(CapRights::ADMIN) {
+    if !cap.rights().contains(CapRights::ADMIN) {
         return Err(AdminError::MissingRight);
     }
     Ok(())

@@ -593,7 +593,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 match_payload_eq,
                 match_payload_value,
             } => {
-                if !flow.authority.rights.contains(CapRights::RECV) {
+                if !flow.authority.rights().contains(CapRights::RECV) {
                     finish_failed(
                         shared,
                         *flow,
@@ -955,7 +955,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 }
             }
             VmResult::RegisterName { name } => {
-                if !flow.authority.rights.contains(CapRights::SEND) {
+                if !flow.authority.rights().contains(CapRights::SEND) {
                     finish_failed(
                         shared,
                         *flow,
@@ -1191,7 +1191,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 let want_native = match want_native_cap {
                     None => None,
                     Some(id) => match shared.caps.resolve(id, flow.id, CapRights::NATIVE) {
-                        Ok(entry) => entry.cap.native_mask,
+                        Ok(entry) => entry.cap.native_mask().cloned(),
                         Err(e) => {
                             finish_failed(shared, *flow, e.to_string());
                             return;

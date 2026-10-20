@@ -39,11 +39,11 @@ pub struct Capability {
 impl Capability {
     /// Flow this Cap addresses, if the target is a flow.
     pub fn target(&self) -> Option<FlowId> {
-        self.cap.target.flow_id().map(FlowId)
+        self.cap.target().flow_id().map(FlowId)
     }
 
     pub fn rights(&self) -> CapRights {
-        self.cap.rights
+        self.cap.rights()
     }
 }
 
@@ -239,10 +239,10 @@ impl CapTable {
         if entry.holder != holder {
             return false;
         }
-        if entry.cap.target != CapTarget::Flow(target.as_u64()) {
+        if entry.cap.target() != CapTarget::Flow(target.as_u64()) {
             return false;
         }
-        if !entry.cap.rights.contains(rights) {
+        if !entry.cap.rights().contains(rights) {
             return false;
         }
         match table.flow_cells.get(&target.as_u64()) {
@@ -280,10 +280,10 @@ impl CapTable {
         if entry.holder != holder {
             return Err(CapError::NotHolder);
         }
-        if !entry.cap.rights.contains(required) {
+        if !entry.cap.rights().contains(required) {
             return Err(CapError::InsufficientRights);
         }
-        let valid = match entry.cap.target {
+        let valid = match entry.cap.target() {
             CapTarget::Flow(fid) => match table.flow_cells.get(&fid) {
                 Some(cell) => entry.cap.is_valid(cell.as_ref()),
                 None => false,
@@ -308,7 +308,7 @@ impl CapTable {
         want_native: Option<&NativeMask>,
     ) -> Result<CapId, CapError> {
         let src = self.resolve(id, from_holder, CapRights::empty())?;
-        let cell = match src.cap.target {
+        let cell = match src.cap.target() {
             CapTarget::Flow(fid) => self
                 .lock("CapTable::attenuate")?
                 .flow_cells
@@ -348,8 +348,8 @@ impl CapTable {
             id,
             from_holder,
             to_holder,
-            src.cap.rights,
-            src.cap.native_mask.as_ref(),
+            src.cap.rights(),
+            src.cap.native_mask(),
         )
     }
 
@@ -359,7 +359,7 @@ impl CapTable {
     pub fn reissue_for(&self, id: CapId, new_holder: FlowId) -> Result<CapId, CapError> {
         let cap = self.lookup(id)?.ok_or(CapError::Unknown)?;
         let table = self.lock("CapTable::reissue_for")?;
-        let valid = match cap.cap.target {
+        let valid = match cap.cap.target() {
             CapTarget::Flow(fid) => match table.flow_cells.get(&fid) {
                 Some(cell) => cap.cap.is_valid(cell.as_ref()),
                 None => false,
@@ -373,7 +373,7 @@ impl CapTable {
         }
         let narrowed = cap
             .cap
-            .attenuate(cap.cap.rights, cap.cap.native_mask.as_ref());
+            .attenuate(cap.cap.rights(), cap.cap.native_mask());
         self.insert(new_holder, narrowed).map_err(CapError::from)
     }
 
@@ -388,7 +388,7 @@ impl CapTable {
         let before = g.entries.len();
         let fid = flow.as_u64();
         g.entries
-            .retain(|_, e| e.holder != flow && e.cap.target != CapTarget::Flow(fid));
+            .retain(|_, e| e.holder != flow && e.cap.target() != CapTarget::Flow(fid));
         g.reply_index.retain(|(h, t), _| *h != flow && *t != flow);
         Ok(before - g.entries.len())
     }
@@ -647,7 +647,7 @@ mod properties {
             if cap.holder != holder {
                 return Err("holder mismatch".into());
             }
-            if !cap.cap.rights.contains(CapRights::SEND) {
+            if !cap.cap.rights().contains(CapRights::SEND) {
                 return Err("missing SEND".into());
             }
         }

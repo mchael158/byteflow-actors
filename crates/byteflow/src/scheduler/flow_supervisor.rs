@@ -45,7 +45,7 @@ pub(crate) fn start(
     flow: &mut Flow,
     strategy: u8,
 ) -> Result<(), String> {
-    if !flow.authority.rights.contains(CapRights::SPAWN) {
+    if !flow.authority.rights().contains(CapRights::SPAWN) {
         return Err("start_supervisor denied: flow lacks SPAWN right".into());
     }
     if flow.local_supervisor.is_some() {

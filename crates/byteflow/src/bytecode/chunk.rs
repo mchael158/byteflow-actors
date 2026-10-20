@@ -17,13 +17,14 @@ pub const ABI_VERSION: u32 = 5;
 
 /// A callable entry point inside a [`Chunk`]: either bytecode-defined or a
 /// slot reserved for a native (Rust) function registered with the runtime
-/// via the FFI table (design notes §30-31).
-#[derive(Clone, Debug, PartialEq)]
+/// via the FFI table.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: String,
     /// Index into `Chunk::code` where execution starts.
     pub entry: u32,
-    /// Number of parameters, passed in registers `r0..r{arity}`.
+    /// Number of parameters. The VM copies them into `r0..arity`
+    /// (exclusive end): arity 2 fills `r0` and `r1`.
     pub arity: u8,
     /// Upper bound on registers this function uses; the VM allocates
     /// exactly this many per call frame instead of a fixed worst-case size.
@@ -31,10 +32,10 @@ pub struct FunctionDef {
 }
 
 /// A compiled unit of Byteflow bytecode: code, constants and the function
-/// table. One `Chunk` can back many concurrently-running processes — it is
+/// table. One `Chunk` can back many concurrently-running flows — it is
 /// immutable after construction, so it is shared behind an `Arc` rather than
-/// copied per Flow (see `byteflow-vm::Vm::chunk`).
-#[derive(Clone, Debug, Default)]
+/// copied per flow (see [`crate::Vm`]).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Chunk {
     pub name: String,
     pub constants: Vec<Value>,

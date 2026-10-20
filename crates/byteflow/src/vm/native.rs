@@ -282,12 +282,12 @@ impl NativeGate {
         native_cell: Arc<RevocationCell>,
         native_count: usize,
     ) -> Self {
-        let mask = match &cap.native_mask {
+        let mask = match cap.native_mask() {
             Some(m) => m.clone(),
             None => NativeMask::empty(native_count),
         };
         Self {
-            has_native: cap.rights.contains(CapRights::NATIVE),
+            has_native: cap.rights().contains(CapRights::NATIVE),
             mask,
             authority_epoch: cap.epoch(),
             flow_cell,
@@ -314,10 +314,10 @@ pub fn check_native_call(
     if (idx as usize) >= table.len() {
         return Err(NativeCallError::IndexOutOfRange(idx));
     }
-    if !cap.rights.contains(CapRights::NATIVE) {
+    if !cap.rights().contains(CapRights::NATIVE) {
         return Err(NativeCallError::NoNativeRight);
     }
-    match &cap.native_mask {
+    match cap.native_mask() {
         Some(mask) if mask.allows(idx) => Ok(()),
         _ => Err(NativeCallError::IndexNotAllowlisted(idx)),
     }
