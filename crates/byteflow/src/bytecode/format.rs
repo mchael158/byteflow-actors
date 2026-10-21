@@ -9,20 +9,33 @@ const MAX_ITEMS: u32 = 1_000_000;
 /// Max length for [`Value::Str`] / [`Value::Bytes`] constant payloads.
 const MAX_BLOB: u32 = 1_048_576;
 /// Nested `Message.payload` depth (defense against hostile `.bf` files).
-const MAX_VALUE_DEPTH: u32 = 16;
+pub(crate) const MAX_VALUE_DEPTH: u32 = 16;
 
 /// Why a `.bf` buffer failed to decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatError {
-    BadMagic { found: [u8; 4] },
+    BadMagic {
+        found: [u8; 4],
+    },
     UnsupportedAbi(u32),
     Truncated,
-    LimitExceeded { what: &'static str, got: u32 },
+    LimitExceeded {
+        what: &'static str,
+        got: u32,
+    },
     BadUtf8,
     UnknownValueTag(u8),
-    UnknownOpcode { at: usize, byte: u8 },
+    UnknownOpcode {
+        at: usize,
+        byte: u8,
+    },
     ForbiddenConstant(super::verify::ConstantKind),
     ValueTooNested,
+    /// Bytes left after a complete module. Ignoring them would accept a
+    /// buffer that is not the module the caller hashed or transmitted.
+    Trailing {
+        leftover: usize,
+    },
 }
 
 impl std::fmt::Display for FormatError {
@@ -48,6 +61,9 @@ impl std::fmt::Display for FormatError {
                 )
             }
             FormatError::ValueTooNested => write!(f, "value nesting exceeds decoder limit"),
+            FormatError::Trailing { leftover } => {
+                write!(f, "trailing {leftover} bytes after module")
+            }
         }
     }
 }
@@ -130,6 +146,11 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
             b: r.read_u8()?,
             c: r.read_u8()?,
             imm: r.read_i32()?,
+        });
+    }
+    if r.pos != bytes.len() {
+        return Err(FormatError::Trailing {
+            leftover: bytes.len() - r.pos,
         });
     }
     Ok(Chunk {
@@ -417,5 +438,18 @@ mod tests {
     #[test]
     fn rejects_bad_magic() {
         assert!(matches!(decode(b"XXXX"), Err(FormatError::BadMagic { .. })));
+    }
+
+    #[test]
+    fn rejects_bytes_after_a_complete_module() {
+        let mut b = ChunkBuilder::new("exact");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut bytes = encode(&b.finish());
+        bytes.push(0xFF);
+        assert!(matches!(
+            decode(&bytes),
+            Err(FormatError::Trailing { leftover: 1 })
+        ));
     }
 }
