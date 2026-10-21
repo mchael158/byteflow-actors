@@ -433,6 +433,20 @@ fn should_restart(policy: RestartPolicy, outcome: &FlowOutcome) -> bool {
     }
 }
 
+/// Drop restart marks older than `period`.
+///
+/// `checked_sub` fails when `period` reaches past the start of the `Instant`
+/// clock. That means every recorded mark is still inside the window. Treating
+/// the start as `now` dropped the whole history and intensity never tripped.
+fn prune_restart_window(times: &mut VecDeque<Instant>, now: Instant, period: Duration) {
+    let Some(start) = now.checked_sub(period) else {
+        return;
+    };
+    while times.front().is_some_and(|t| *t < start) {
+        times.pop_front();
+    }
+}
+
 fn intensity_hit(inner: &Inner) -> bool {
     let now = Instant::now();
     let mut times = match sync_lock::lock(&inner.restart_times, "intensity_hit") {
@@ -443,18 +457,7 @@ fn intensity_hit(inner: &Inner) -> bool {
         }
     };
     times.push_back(now);
-    let window_start = match now.checked_sub(inner.config.max_period) {
-        Some(t) => t,
-        None => now,
-    };
-    loop {
-        match times.front() {
-            Some(t) if *t < window_start => {
-                times.pop_front();
-            }
-            _ => break,
-        }
-    }
+    prune_restart_window(&mut times, now, inner.config.max_period);
     if times.len() as u32 > inner.config.max_restarts {
         inner.intensity_exceeded.store(true, Ordering::Release);
         true
@@ -699,7 +702,23 @@ fn finish_cascade(inner: &Arc<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_period_longer_than_the_clock_keeps_every_restart() {
+        let now = Instant::now();
+        let earlier = match now.checked_sub(Duration::from_secs(1)) {
+            Some(t) => t,
+            None => return,
+        };
+        let mut times = VecDeque::from([earlier, now]);
+        super::prune_restart_window(&mut times, now, Duration::MAX);
+        assert_eq!(times.len(), 2);
+        super::prune_restart_window(&mut times, now, Duration::from_millis(100));
+        assert_eq!(times.len(), 1);
+        assert_eq!(times.front().copied(), Some(now));
+    }
 
     use crate::bytecode::{builder::ChunkBuilder, Chunk, Value};
     use crate::scheduler::runtime::{Runtime, RuntimeConfig};
