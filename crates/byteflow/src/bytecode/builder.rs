@@ -79,7 +79,15 @@ impl ChunkBuilder {
     }
 
     pub fn emit_move(&mut self, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
         self.emit(Instruction::abc(Opcode::Move, dst, src, 0));
+    }
+
+    /// `r[dst] = r[src] + imm`. Does not allocate a scratch register.
+    pub fn emit_add_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::AddImm, dst, src, 0, imm));
     }
 
     pub fn emit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
@@ -436,29 +444,27 @@ impl ChunkBuilder {
         ));
     }
 
-    /// Move `src` into `dst`, then `CallNative(dst, native_index, 1)`.
+    /// `r[dst] = native_1(r[src])` as a single [`Opcode::CallNativeFrom`].
     ///
-    /// # The contract this exists to protect: `CallNative` clobbers its argument
-    ///
-    /// `Opcode::CallNative ra, fb, nc` reads `nc` arguments from
-    /// `r[a..a+nc]` and writes the result back into `r[a]`. For `nc == 1`
-    /// the argument and result are the same slot — calling a one-arg native
-    /// straight on a register you still need destroys it.
-    ///
-    /// The textbook case is unpacking several fields from one `Message` in
-    /// `r0` (`msg_sender`, `msg_tag`, …). `emit_native1_from` always operates
-    /// on a **copy** (`dst`), so `src` survives:
+    /// `Opcode::CallNative` writes the result over its first argument. This
+    /// form keeps `src` intact when `dst != src`, which is what unpacking one
+    /// `Message` into several fields needs:
     ///
     /// ```text
     /// b.emit_native1_from(1, 0, native_msg_sender);   // r1 = sender(r0)
     /// b.emit_native1_from(2, 0, native_msg_request_id);
     /// ```
     ///
-    /// If you don't need `src` afterwards, call `emit_call_native` directly —
-    /// the `Move` would be pure overhead.
+    /// A multi-arg native still uses [`Self::emit_call_native`]: the arguments
+    /// have to sit in a contiguous window, and the result overwrites `r[base]`.
     pub fn emit_native1_from(&mut self, dst: u8, src: u8, native_index: u32) {
-        self.emit_move(dst, src);
-        self.emit_call_native(dst, native_index, 1);
+        self.emit(Instruction::new(
+            Opcode::CallNativeFrom,
+            dst,
+            src,
+            0,
+            native_index as i32,
+        ));
     }
 
     /// `CallNative(base, native_index, argc)` when `argc` args are **already**
@@ -560,15 +566,14 @@ mod tests {
         b.emit_native1_from(3, 0, 12);
         let chunk = b.finish();
 
-        assert_eq!(chunk.code.len(), 6);
-        for (move_idx, call_idx, expected_native) in
-            [(0usize, 1usize, 10i32), (2, 3, 11), (4, 5, 12)]
-        {
-            assert_eq!(chunk.code[move_idx].op, Opcode::Move);
-            assert_eq!(chunk.code[move_idx].b, 0);
-            assert_eq!(chunk.code[call_idx].op, Opcode::CallNative);
-            assert_ne!(chunk.code[call_idx].a, 0);
-            assert_eq!(chunk.code[call_idx].imm, expected_native);
+        assert_eq!(chunk.code.len(), 3);
+        for (idx, dest, expected_native) in [(0usize, 1u8, 10i32), (1, 2, 11), (2, 3, 12)] {
+            let instr = chunk.code[idx];
+            assert_eq!(instr.op, Opcode::CallNativeFrom);
+            assert_eq!(instr.b, 0, "source register stays r0");
+            assert_eq!(instr.a, dest);
+            assert_ne!(instr.a, instr.b);
+            assert_eq!(instr.imm, expected_native);
         }
     }
 

@@ -240,6 +240,18 @@ pub enum Opcode {
     /// `imm`: `0` one-for-one, `1` one-for-all, `2` rest-for-one.
     /// Later `StartChild` attaches to it. Append-only (`0x72`).
     StartSupervisor = 0x72,
+    /// `AddImm ra, rb, imm` → `r[a] = r[b] + imm` (`imm` sign-extended to
+    /// `i64`). Integer add wraps; a float in `r[b]` adds in `f64`. One
+    /// instruction instead of `LoadImm` plus `Add`, and no scratch register.
+    /// Append-only (`0x73`).
+    AddImm = 0x73,
+    /// `CallNativeFrom ra, rb, native` → `r[a] = native_1(r[b])`.
+    ///
+    /// Same FFI slot as [`Self::CallNative`] (`imm` is the native index) but
+    /// the argument is `r[b]` and the result lands in `r[a]`. `r[b]` survives
+    /// when `a != b`, so unpacking a `Message` does not need a preceding
+    /// `Move`. Append-only (`0x74`).
+    CallNativeFrom = 0x74,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -316,6 +328,8 @@ impl Opcode {
             0x70 => ReceiveMatchValue,
             0x71 => SendRemote,
             0x72 => StartSupervisor,
+            0x73 => AddImm,
+            0x74 => CallNativeFrom,
             0x61 => Nop,
             _ => return None,
         })
@@ -335,6 +349,7 @@ impl std::fmt::Display for Opcode {
             Opcode::Move => "Move",
             Opcode::LoadImm => "LoadImm",
             Opcode::Add => "Add",
+            Opcode::AddImm => "AddImm",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",
@@ -348,6 +363,7 @@ impl std::fmt::Display for Opcode {
             Opcode::Call => "Call",
             Opcode::Return => "Return",
             Opcode::CallNative => "CallNative",
+            Opcode::CallNativeFrom => "CallNativeFrom",
             Opcode::Spawn => "Spawn",
             Opcode::Yield => "Yield",
             Opcode::Sleep => "Sleep",

@@ -56,14 +56,29 @@ impl fmt::Display for Instruction {
             | Opcode::Le => {
                 write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
             }
+            Opcode::AddImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
             Opcode::Neg => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
             Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
-            Opcode::Call | Opcode::CallNative => {
+            Opcode::Call => {
                 write!(
                     f,
                     "{} r{}, fn[{}], argc={}",
                     self.op, self.a, self.imm, self.b
+                )
+            }
+            Opcode::CallNative => {
+                write!(
+                    f,
+                    "{} r{}, native[{}], argc={}",
+                    self.op, self.a, self.imm, self.b
+                )
+            }
+            Opcode::CallNativeFrom => {
+                write!(
+                    f,
+                    "{} r{}, r{}, native[{}]",
+                    self.op, self.a, self.b, self.imm
                 )
             }
             Opcode::Return

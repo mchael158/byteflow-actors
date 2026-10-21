@@ -133,7 +133,9 @@ pub struct Fn<'a> {
 
 impl<'a> Fn<'a> {
     fn open(b: &'a mut ChunkBuilder, name: impl Into<String>, arity: u8) -> Self {
-        Self::open_with(b, name, arity, arity.max(4))
+        // Parameters occupy `r0..arity`. Locals continue from there, so a
+        // 0-arity function starts at `r0` instead of leaving four dead slots.
+        Self::open_with(b, name, arity, arity)
     }
 
     fn open_with(
@@ -271,11 +273,9 @@ impl<'a> Fn<'a> {
         self.binop(Opcode::Add, lhs, rhs)
     }
 
-    /// `dst += imm` in place.
+    /// `dst += imm` in place. One [`Opcode::AddImm`], no scratch register.
     pub fn add_imm(&mut self, dst: Reg, imm: i32) {
-        let tmp = self.temp();
-        self.b.emit_load_imm(tmp.0, imm);
-        self.b.emit_binop(Opcode::Add, dst.0, dst.0, tmp.0);
+        self.b.emit_add_imm(dst.0, dst.0, imm);
     }
 
     pub fn sub(&mut self, lhs: Reg, rhs: Reg) -> Reg {
@@ -648,9 +648,19 @@ impl<'a> Fn<'a> {
     }
 
     /// Build a hop with a freshly minted `request_id`.
+    ///
+    /// The id is written straight into the `make_msg` window, so the usual
+    /// copy from a temporary register is not emitted.
     pub fn hop_fresh(&mut self, tag: i32, payload: Reg) -> Reg {
-        let req_id = self.fresh_request_id();
-        self.hop(req_id, tag, payload)
+        let w = self.window(3);
+        self.b.emit_fresh_request_id(w.at(0).0);
+        self.fill_msg_window(
+            w,
+            w.at(0),
+            tag,
+            payload,
+            crate::natives::std_native::MAKE_MSG,
+        )
     }
 
     /// RPC hop: deliver `msg` to `target_cap`, wait for correlated reply.
@@ -841,6 +851,21 @@ impl<'a> Fn<'a> {
     /// discarded) so forged-sender regressions keep compiling.
     pub fn make_msg(&mut self, native_index: u32, request_id: Reg, tag: i32, payload: Reg) -> Reg {
         let w = self.window(3);
+        self.fill_msg_window(w, request_id, tag, payload, native_index)
+    }
+
+    /// Pack `(request_id, tag, payload)` into `w` and call `make_msg`.
+    ///
+    /// A copy onto the same register is omitted, which is how
+    /// [`Self::hop_fresh`] plants the new id in `w[0]` without a `Move`.
+    fn fill_msg_window(
+        &mut self,
+        w: RegWindow,
+        request_id: Reg,
+        tag: i32,
+        payload: Reg,
+        native_index: u32,
+    ) -> Reg {
         self.mov(w.at(0), request_id);
         self.set(w.at(1), tag);
         self.mov(w.at(2), payload);
@@ -898,7 +923,7 @@ mod tests {
     fn local_past_the_register_file_traps() {
         let mut program = Program::new("full");
         program.function("main", 0, |f| {
-            // `open` starts at 4 registers; fill through r254, then one more.
+            // Arity 0 starts at r0; fill through r254, then one more.
             while f.next_reg < u8::MAX {
                 let _ = f.local();
             }
@@ -929,6 +954,28 @@ mod tests {
                 num_registers: 1,
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn add_imm_is_one_instruction_and_frame_starts_at_r0() -> TestResult {
+        let mut program = Program::new("compact");
+        program.function("main", 0, |f| {
+            let n = f.load_i32(1);
+            f.add_imm(n, 41);
+            f.return_(n);
+        });
+        let chunk = program.build();
+        assert_eq!(chunk.functions[0].num_registers, 1);
+        assert_eq!(chunk.code.len(), 3);
+        assert_eq!(chunk.code[0].op, Opcode::LoadImm);
+        assert_eq!(chunk.code[0].a, 0);
+        assert_eq!(chunk.code[1].op, Opcode::AddImm);
+        assert_eq!(chunk.code[1].a, 0);
+        assert_eq!(chunk.code[1].b, 0);
+        assert_eq!(chunk.code[1].imm, 41);
+        let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), 0, &[])?;
+        assert!(matches!(vm.run(10_000), VmResult::Complete(Value::Int(42))));
         Ok(())
     }
 

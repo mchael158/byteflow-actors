@@ -32,9 +32,8 @@
 //!
 //! `CallNative ra, fb, nc` takes args from `r[a .. a+nc]` and writes the
 //! result back into `r[a]` — so a call **destroys** the first argument
-//! register. Samples that need to keep a `Message` while unpacking must
-//! `Move` it into the dest register first (see
-//! [`crate::samples::atomic_request_reply`]).
+//! register. One-arg unpacking uses `CallNativeFrom ra, rb, native`
+//! (`r[a] = native(r[b])`), which leaves the source `Message` in place.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -331,6 +331,22 @@ impl Vm {
         Ok(instr)
     }
 
+    fn add_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        let addend = i64::from(imm);
+        let result = match src_val {
+            Value::Int(x) => Value::Int(x.wrapping_add(addend)),
+            Value::Float(x) => Value::Float(x + (addend as f64)),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
     fn numeric_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) -> Result<(), Fault> {
         let a = self.get_reg(lhs)?;
         let b = self.get_reg(rhs)?;
@@ -528,6 +544,9 @@ impl Vm {
                 Opcode::LoadImm => {
                     trap!(self.set_reg(instr.a, Value::Int(instr.imm as i64)));
                 }
+                Opcode::AddImm => {
+                    trap!(self.add_imm(instr.a, instr.b, instr.imm));
+                }
                 Opcode::Move => {
                     let v = trap!(self.get_reg(instr.b));
                     trap!(self.set_reg(instr.a, v));
@@ -598,9 +617,16 @@ impl Vm {
                     trap!(self.load_frame_args_charged(&mut new_frame, args, arity));
                     self.frames.push(new_frame);
                 }
-                Opcode::CallNative => {
+                Opcode::CallNative | Opcode::CallNativeFrom => {
                     let native_index = instr.imm as u32;
-                    let argc = instr.b;
+                    // `CallNative` reads and writes `r[a]`. `CallNativeFrom`
+                    // reads `r[b]` and writes `r[a]`, so a one-arg unpack does
+                    // not destroy the source.
+                    let (arg_base, argc) = if instr.op == Opcode::CallNativeFrom {
+                        (instr.b, 1)
+                    } else {
+                        (instr.a, instr.b)
+                    };
                     let dst = instr.a;
                     if let Err(err) =
                         check_native_gate(&self.native_gate, &self.natives, native_index)
@@ -613,7 +639,7 @@ impl Vm {
                             other => Fault::NativeDenied(other),
                         });
                     }
-                    let args = trap!(self.gather_regs(dst, argc, 0));
+                    let args = trap!(self.gather_regs(arg_base, argc, 0));
                     // Runs inline on this worker thread — see
                     // `NativeFn`'s doc comment on why natives must not
                     // block. This is the actual FFI boundary (design

@@ -312,7 +312,7 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
             // runtime, outside this chunk — see this function's doc
             // comment. Not checked here; checked as `Fault::BadNative` at
             // call time instead.
-            Opcode::CallNative => {}
+            Opcode::CallNative | Opcode::CallNativeFrom => {}
             Opcode::Jump | Opcode::Branch => {
                 let target = at as i64 + 1 + instr.imm as i64;
                 if target < 0 || target as usize > len {

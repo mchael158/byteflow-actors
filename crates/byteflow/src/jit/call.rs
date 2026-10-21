@@ -64,6 +64,7 @@ pub(super) fn leaf_body(chunk: &Chunk, function: u32) -> Option<LeafBody> {
             }
             Opcode::LoadImm
             | Opcode::Move
+            | Opcode::AddImm
             | Opcode::Add
             | Opcode::Sub
             | Opcode::Mul

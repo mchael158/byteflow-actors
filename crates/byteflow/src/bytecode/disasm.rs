@@ -48,4 +48,17 @@ mod tests {
         assert!(text.contains("LoadImm r0, 1"));
         assert!(text.contains("main"));
     }
+
+    #[test]
+    fn call_native_names_the_native_table() {
+        let mut b = ChunkBuilder::new("n");
+        b.begin_function("main", 0, 2);
+        b.emit_call_native(0, 6, 1);
+        b.emit_native1_from(1, 0, 7);
+        b.emit_return(1);
+        let text = super::disassemble(&b.finish());
+        assert!(text.contains("CallNative r0, native[6], argc=1"));
+        assert!(text.contains("CallNativeFrom r1, r0, native[7]"));
+        assert!(!text.contains("CallNative r0, fn["));
+    }
 }

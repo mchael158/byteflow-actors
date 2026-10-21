@@ -401,6 +401,12 @@ fn emit_instruction(
             let v = builder.ins().iconst(types::I64, i64::from(instr.imm));
             registers.set(instr.a as usize, v);
         }
+        Opcode::AddImm => {
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+            let result = builder.ins().iadd(lhs, imm);
+            registers.set(instr.a as usize, result);
+        }
         Opcode::LoadConst => {
             let idx = instr.imm as u32;
             let konst = chunk.constant(idx).ok_or(CompileError::UnsupportedOpcode {
@@ -760,6 +766,7 @@ fn is_effect_opcode(op: Opcode) -> bool {
     matches!(
         op,
         Opcode::CallNative
+            | Opcode::CallNativeFrom
             | Opcode::Spawn
             | Opcode::Yield
             | Opcode::Sleep

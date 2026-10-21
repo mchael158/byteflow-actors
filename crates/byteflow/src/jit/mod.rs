@@ -1,6 +1,6 @@
 //! Trace JIT for Byteflow — Cranelift backend, isolated `unsafe`.
 //!
-//! Compiles int-specialized traces (`LoadImm`, `LoadConst`, `Move`, binops,
+//! Compiles int-specialized traces (`LoadImm`, `AddImm`, `LoadConst`, `Move`, binops,
 //! `Neg`, `Branch`, `Jump`, `Call`, `Return`). Scheduler effects stop recording.
 
 mod call;
