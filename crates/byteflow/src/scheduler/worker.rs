@@ -11,7 +11,7 @@
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,6 +95,18 @@ fn authenticate_outgoing_message(
         .authenticate(sender.as_u64(), reply))
 }
 
+/// Next host correlation id. `0` is reserved as “unset”, so a counter that
+/// lands on zero is skipped. Mapping that zero to `1` without consuming it
+/// made the following id `1` as well.
+fn mint_host_request_id(counter: &AtomicU64) -> u64 {
+    loop {
+        let id = counter.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
 /// Host `Runtime::send`: same choke-point as bytecode hops.
 ///
 /// The embedder is not a flow — it has no mailbox — so `reply_cap` stays
@@ -106,10 +118,7 @@ pub(crate) fn authenticate_host_outgoing_message(
     mut message: Message,
 ) -> Result<Message, CapError> {
     if message.request_id == 0 {
-        let rid = shared
-            .host_next_request_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        message.request_id = if rid == 0 { 1 } else { rid };
+        message.request_id = mint_host_request_id(&shared.host_next_request_id);
     }
     let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone())?;
     Ok(message
@@ -1614,5 +1623,22 @@ fn park_waiting_send(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mint_host_request_id;
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn host_request_ids_skip_zero_instead_of_repeating_one() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(mint_host_request_id(&counter), 1);
+        assert_eq!(mint_host_request_id(&counter), 2);
+
+        let counter = AtomicU64::new(1);
+        assert_eq!(mint_host_request_id(&counter), 1);
+        assert_eq!(mint_host_request_id(&counter), 2);
     }
 }
