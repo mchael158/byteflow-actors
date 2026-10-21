@@ -168,6 +168,23 @@ impl Value {
         Value::Bytes(Arc::from(b.as_ref()))
     }
 
+    /// Same ceiling as the `.bf` decoder ([`super::MAX_VALUE_DEPTH`]).
+    ///
+    /// A deeper `Message` chain would recurse through cap reissue on a
+    /// worker stack. The walk stops at the limit instead of descending.
+    pub(crate) fn within_nesting_limit(&self) -> bool {
+        fn walk(value: &Value, depth: u32) -> bool {
+            if depth > super::MAX_VALUE_DEPTH {
+                return false;
+            }
+            match value {
+                Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
+                _ => true,
+            }
+        }
+        walk(self, 0)
+    }
+
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
     /// `Int(0)`, empty [`Value::Str`], and empty [`Value::Bytes`].
     #[inline]
@@ -354,6 +371,17 @@ impl From<Vec<u8>> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nesting_stops_at_the_decoder_ceiling() {
+        let mut value = Value::Int(1);
+        for _ in 0..16 {
+            value = Value::Message(Message::new(0, 1, 1, value));
+        }
+        assert!(value.within_nesting_limit());
+        value = Value::Message(Message::new(0, 1, 1, value));
+        assert!(!value.within_nesting_limit());
+    }
 
     #[test]
     fn message_is_truthy_and_round_trips_helpers() {

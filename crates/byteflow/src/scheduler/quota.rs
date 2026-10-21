@@ -442,7 +442,10 @@ mod tests {
     fn credit_at_the_top_of_i64_does_not_wrap_the_bucket_negative() {
         let bucket = TokenBucket::new(i64::MAX, 0);
         bucket.credit(8);
-        assert!(bucket.try_consume(), "a wrapped bucket would refuse the token");
+        assert!(
+            bucket.try_consume(),
+            "a wrapped bucket would refuse the token"
+        );
     }
 
     #[test]

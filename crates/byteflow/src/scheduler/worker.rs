@@ -85,7 +85,7 @@ fn authenticate_outgoing_message(
     if message.request_id == 0 {
         message.request_id = vm.fresh_request_id();
     }
-    let payload = reissue_caps_in_value(shared, sender, recipient, (*message.payload).clone())?;
+    let payload = reissue_caps_in_value(shared, sender, recipient, (*message.payload).clone(), 0)?;
     let reply = shared
         .caps
         .mint_or_reuse(recipient, sender, CapRights::SEND)
@@ -120,7 +120,7 @@ pub(crate) fn authenticate_host_outgoing_message(
     if message.request_id == 0 {
         message.request_id = mint_host_request_id(&shared.host_next_request_id);
     }
-    let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone())?;
+    let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone(), 0)?;
     Ok(message
         .with_payload(payload)
         .authenticate(FlowId::HOST.as_u64(), CapId::NONE))
@@ -131,7 +131,11 @@ fn reissue_caps_from_host(
     shared: &Shared,
     recipient: FlowId,
     value: Value,
+    depth: u32,
 ) -> Result<Value, CapError> {
+    if depth == 0 && !value.within_nesting_limit() {
+        return Err(CapError::TooNested);
+    }
     match value {
         Value::Cap(id) if id.is_none() => Ok(Value::Cap(id)),
         Value::Cap(id) => {
@@ -140,7 +144,7 @@ fn reissue_caps_from_host(
         }
         Value::Message(m) => {
             let inner = (*m.payload).clone();
-            let new_inner = reissue_caps_from_host(shared, recipient, inner)?;
+            let new_inner = reissue_caps_from_host(shared, recipient, inner, depth + 1)?;
             Ok(Value::Message(m.with_payload(new_inner)))
         }
         other => Ok(other),
@@ -155,7 +159,11 @@ fn reissue_caps_in_value(
     sender: FlowId,
     recipient: FlowId,
     value: Value,
+    depth: u32,
 ) -> Result<Value, CapError> {
+    if depth == 0 && !value.within_nesting_limit() {
+        return Err(CapError::TooNested);
+    }
     match value {
         Value::Cap(id) if id.is_none() => Ok(Value::Cap(id)),
         Value::Cap(id) => {
@@ -164,7 +172,7 @@ fn reissue_caps_in_value(
         }
         Value::Message(m) => {
             let inner = (*m.payload).clone();
-            let new_inner = reissue_caps_in_value(shared, sender, recipient, inner)?;
+            let new_inner = reissue_caps_in_value(shared, sender, recipient, inner, depth + 1)?;
             Ok(Value::Message(m.with_payload(new_inner)))
         }
         other => Ok(other),
