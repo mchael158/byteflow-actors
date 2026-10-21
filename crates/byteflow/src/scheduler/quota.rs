@@ -87,10 +87,10 @@ impl TokenBucket {
         let mut last = sync_lock::lock(&self.last_refill, "TokenBucket::refill")?;
         let elapsed = last.elapsed();
         if elapsed >= Duration::from_millis(50) {
-            let add = (elapsed.as_secs_f64() * self.refill_per_sec as f64) as i64;
+            let add = tokens_for_elapsed(elapsed, self.refill_per_sec);
             if add > 0 {
                 let cur = self.tokens.load(Ordering::Relaxed);
-                let new = (cur + add).min(self.capacity);
+                let new = cur.saturating_add(add).min(self.capacity);
                 self.tokens.store(new, Ordering::Relaxed);
                 *last = Instant::now();
             }
@@ -119,11 +119,39 @@ impl TokenBucket {
     }
 
     /// ADMIN credit. May exceed capacity until the next refill caps it.
+    ///
+    /// A credit that does not fit stays at `i64::MAX`. Wrapping would make
+    /// the bucket look empty and refuse every later spawn or send.
     pub fn credit(&self, extra: i64) {
         if extra <= 0 {
             return;
         }
-        self.tokens.fetch_add(extra, Ordering::Relaxed);
+        loop {
+            let cur = self.tokens.load(Ordering::Relaxed);
+            let new = cur.saturating_add(extra);
+            if self
+                .tokens
+                .compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// How many tokens `per_sec` earns over `elapsed`, without a float cast.
+///
+/// `as i64` on an out-of-range float is a saturating conversion, and the
+/// old `cur + add` then overflowed `i64` (panic in debug, wrap in release).
+fn tokens_for_elapsed(elapsed: Duration, per_sec: i64) -> i64 {
+    if per_sec <= 0 {
+        return 0;
+    }
+    let add = (per_sec as u128).saturating_mul(elapsed.as_nanos()) / 1_000_000_000;
+    match i64::try_from(add) {
+        Ok(n) => n,
+        Err(_) => i64::MAX,
     }
 }
 
@@ -369,6 +397,21 @@ mod tests {
         assert!(q.alloc(60).is_err());
         q.top_up_mem(50);
         assert!(q.alloc(60).is_ok());
+    }
+
+    #[test]
+    fn credit_at_the_top_of_i64_does_not_wrap_the_bucket_negative() {
+        let bucket = TokenBucket::new(i64::MAX, 0);
+        bucket.credit(8);
+        assert!(bucket.try_consume(), "a wrapped bucket would refuse the token");
+    }
+
+    #[test]
+    fn tokens_for_a_long_interval_saturate_instead_of_overflowing() {
+        let add = tokens_for_elapsed(Duration::from_secs(u64::MAX), i64::MAX);
+        assert_eq!(add, i64::MAX);
+        assert_eq!(tokens_for_elapsed(Duration::from_millis(50), 32), 1);
+        assert_eq!(tokens_for_elapsed(Duration::from_millis(50), -1), 0);
     }
 
     #[test]
