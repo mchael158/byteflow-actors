@@ -30,6 +30,8 @@ pub struct JitReturn {
     pub as_bool: [u64; 4],
     /// Copied out of [`super::frame::JitFrame::as_unit`].
     pub as_unit: [u64; 4],
+    /// Copied out of [`super::frame::JitFrame::as_float`].
+    pub as_float: [u64; 4],
 }
 
 pub const JIT_CONTINUE: u32 = 0;
@@ -48,6 +50,7 @@ impl JitReturn {
             written: [0; 4],
             as_bool: [0; 4],
             as_unit: [0; 4],
+            as_float: [0; 4],
         };
         match reason {
             ExitReason::Continue { pc } => {

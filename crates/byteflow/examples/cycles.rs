@@ -111,6 +111,7 @@ fn measure() -> Result<(), Box<dyn std::error::Error>> {
             TraceKey {
                 function: 0,
                 entry_pc: 0,
+                floats: false,
             },
         )?;
         let jit_cycles = min_cycles(&chunk, |vm| match run_vm_with_jit(vm, 64, &mut ctx) {

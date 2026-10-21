@@ -28,6 +28,10 @@ pub const OFF_ENTRY_UNIT: i32 = 176;
 /// slots per [`MAX_JIT_CALL_DEPTH`] level.
 pub const OFF_SPILL: i32 = 208;
 pub const OFF_SPILL_STRIDE: i32 = 216;
+/// Bit `reg` means the stored bits are an `f64`, not an `Int`.
+pub const OFF_AS_FLOAT: i32 = 224;
+/// Float tags observed on entry. Must match [`JitFrame::entry_as_float`].
+pub const OFF_ENTRY_FLOAT: i32 = 256;
 
 /// Byte offsets inside [`JitCallRecord`].
 pub const REC_RETURN_PC: i32 = 0;
@@ -87,6 +91,11 @@ pub struct JitFrame {
     /// of the trace for the duration of the call.
     pub spill: *mut i64,
     pub spill_stride: u32,
+    /// Among [`Self::written`] bits, which results are `Float`s stored as
+    /// their IEEE bits in the `i64` slot.
+    pub as_float: [u64; 4],
+    /// `Float` bits observed on entry.
+    pub entry_as_float: [u64; 4],
 }
 
 pub type JitEntry = unsafe extern "C" fn(*mut JitFrame);
@@ -121,6 +130,14 @@ mod tests {
         assert_eq!(
             std::mem::offset_of!(JitFrame, spill_stride),
             OFF_SPILL_STRIDE as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, as_float),
+            OFF_AS_FLOAT as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitFrame, entry_as_float),
+            OFF_ENTRY_FLOAT as usize
         );
         assert_eq!(
             std::mem::offset_of!(JitCallRecord, written),

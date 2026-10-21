@@ -90,6 +90,26 @@ impl ChunkBuilder {
         self.emit(Instruction::new(Opcode::AddImm, dst, src, 0, imm));
     }
 
+    pub fn emit_sub_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::SubImm, dst, src, 0, imm));
+    }
+
+    pub fn emit_lt_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::LtImm, dst, src, 0, imm));
+    }
+
+    pub fn emit_list_pack(&mut self, dst: u8, base: u8, count: i32) {
+        self.emit(Instruction::new(Opcode::ListPack, dst, base, 0, count));
+    }
+
+    pub fn emit_list_get(&mut self, dst: u8, src: u8, index: i32) {
+        self.emit(Instruction::new(Opcode::ListGet, dst, src, 0, index));
+    }
+
+    pub fn emit_list_len(&mut self, dst: u8, src: u8) {
+        self.emit(Instruction::abc(Opcode::ListLen, dst, src, 0));
+    }
+
     pub fn emit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
         debug_assert!(matches!(
             op,

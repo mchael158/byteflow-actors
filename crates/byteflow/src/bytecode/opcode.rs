@@ -178,7 +178,7 @@ pub enum Opcode {
     /// the caller, or `Unit` if missing. Never a raw FlowId. (`0x63`)
     Whereis = 0x63,
     /// `ReceiveMatchKind ra, imm` → block until a [`crate::Value::Message`]
-    /// whose `payload.wire_tag() == imm` (BFV0 tag `0..=8`) is available.
+    /// whose `payload.wire_tag() == imm` (BFV0 tag `0..=9`) is available.
     /// Non-matching hops stay queued (FIFO skip). Append-only (`0x64`);
     /// `Trap` stays `0x60`.
     ReceiveMatchKind = 0x64,
@@ -253,6 +253,22 @@ pub enum Opcode {
     /// when `a != b`, so unpacking a `Message` does not need a preceding
     /// `Move`. Append-only (`0x74`).
     CallNativeFrom = 0x74,
+    /// `SubImm ra, rb, imm` → `r[a] = r[b] - imm` (`imm` sign-extended to
+    /// `i64`). Integer subtraction wraps; a float in `r[b]` subtracts in
+    /// `f64`. Append-only (`0x75`).
+    SubImm = 0x75,
+    /// `LtImm ra, rb, imm` → `r[a] = r[b] < imm` as `Bool`. Integers compare
+    /// as signed `i64`. Floats compare as `f64` (NaN is not less). `Bool`
+    /// is not a number here. Append-only (`0x76`).
+    LtImm = 0x76,
+    /// `ListPack ra, rb, imm` → `r[a]` becomes a list of `imm` values
+    /// starting at `r[b]`. `imm` is `0..=32`. Append-only (`0x77`).
+    ListPack = 0x77,
+    /// `ListGet ra, rb, imm` → `r[a] = r[b][imm]`. `r[b]` must be a list
+    /// and `imm` a valid index. Append-only (`0x78`).
+    ListGet = 0x78,
+    /// `ListLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x79`).
+    ListLen = 0x79,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -331,6 +347,11 @@ impl Opcode {
             0x72 => StartSupervisor,
             0x73 => AddImm,
             0x74 => CallNativeFrom,
+            0x75 => SubImm,
+            0x76 => LtImm,
+            0x77 => ListPack,
+            0x78 => ListGet,
+            0x79 => ListLen,
             0x61 => Nop,
             _ => return None,
         })
@@ -351,6 +372,11 @@ impl std::fmt::Display for Opcode {
             Opcode::LoadImm => "LoadImm",
             Opcode::Add => "Add",
             Opcode::AddImm => "AddImm",
+            Opcode::SubImm => "SubImm",
+            Opcode::LtImm => "LtImm",
+            Opcode::ListPack => "ListPack",
+            Opcode::ListGet => "ListGet",
+            Opcode::ListLen => "ListLen",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",

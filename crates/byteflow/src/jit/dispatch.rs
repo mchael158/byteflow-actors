@@ -16,7 +16,10 @@ use super::trace::{CompiledTrace, JitContext, TraceKey, HOT_THRESHOLD};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncSlotsResult {
     Ok,
-    /// A register held a non-int type — interpreter must resume.
+    /// Every register is `Float`, `Bool`, or `Unit`, and at least one is
+    /// `Float`. Slots hold IEEE bits.
+    Float,
+    /// A register held a type this specialization cannot guard.
     Deopt,
     /// Frame unavailable.
     Unavailable,
@@ -30,12 +33,14 @@ pub enum SyncSlotsResult {
 struct EntryTags {
     as_bool: [u64; 4],
     as_unit: [u64; 4],
+    as_float: [u64; 4],
 }
 
 impl EntryTags {
     const INT: Self = Self {
         as_bool: [0; 4],
         as_unit: [0; 4],
+        as_float: [0; 4],
     };
 
     fn from_vm(vm: &Vm) -> Self {
@@ -52,6 +57,7 @@ impl EntryTags {
             match value {
                 Value::Bool(_) => tags.as_bool[word] |= bit,
                 Value::Unit => tags.as_unit[word] |= bit,
+                Value::Float(_) => tags.as_float[word] |= bit,
                 _ => {}
             }
         }
@@ -69,14 +75,16 @@ fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> Option<VmResu
     let register_count = vm.current_num_registers()?;
 
     let mut slots = vec![0i64; slot_capacity(vm)];
-    match sync_slots_from_vm(vm, &mut slots) {
-        SyncSlotsResult::Ok => {}
+    let floats = match sync_slots_from_vm(vm, &mut slots) {
+        SyncSlotsResult::Ok => false,
+        SyncSlotsResult::Float => true,
         SyncSlotsResult::Deopt | SyncSlotsResult::Unavailable => return None,
-    }
+    };
 
     let key = TraceKey {
         function,
         entry_pc: pc as u32,
+        floats,
     };
     let exit = try_run_hot_tagged(
         ctx,
@@ -111,8 +119,9 @@ fn try_jit_step_runtime(
     let register_count = vm.current_num_registers()?;
 
     let mut slots = vec![0i64; slot_capacity(vm)];
-    match sync_slots_from_vm(vm, &mut slots) {
-        SyncSlotsResult::Ok => {}
+    let floats = match sync_slots_from_vm(vm, &mut slots) {
+        SyncSlotsResult::Ok => false,
+        SyncSlotsResult::Float => true,
         SyncSlotsResult::Deopt => {
             if let Some(m) = metrics {
                 crate::scheduler::RuntimeMetrics::inc(&m.jit_deopts);
@@ -120,11 +129,12 @@ fn try_jit_step_runtime(
             return None;
         }
         SyncSlotsResult::Unavailable => return None,
-    }
+    };
 
     let key = TraceKey {
         function,
         entry_pc: pc as u32,
+        floats,
     };
     let exit = try_run_hot_runtime_tagged(
         runtime,
@@ -258,6 +268,8 @@ fn run_compiled_trace_with_tags(
         as_unit: [0; 4],
         entry_as_bool: tags.as_bool,
         entry_as_unit: tags.as_unit,
+        as_float: [0; 4],
+        entry_as_float: tags.as_float,
     };
     unsafe { (entry)(&mut frame) };
     JitReturn {
@@ -267,6 +279,7 @@ fn run_compiled_trace_with_tags(
         written: frame.written,
         as_bool: frame.as_bool,
         as_unit: frame.as_unit,
+        as_float: frame.as_float,
     }
 }
 
@@ -462,6 +475,8 @@ fn sync_slots_tagged(vm: &mut Vm, slots: &[i64], ret: &JitReturn) -> Result<(), 
             Value::Unit
         } else if tag_bit(&ret.as_bool, index) {
             Value::Bool(slot != 0)
+        } else if tag_bit(&ret.as_float, index) {
+            Value::Float(f64::from_bits(slot as u64))
         } else {
             Value::Int(slot)
         };
@@ -571,15 +586,33 @@ pub fn sync_slots_from_vm(vm: &Vm, slots: &mut [i64]) -> SyncSlotsResult {
     let Some(regs) = vm.top_registers() else {
         return SyncSlotsResult::Unavailable;
     };
-    for (slot, value) in slots.iter_mut().zip(regs.iter()) {
+    let mut saw_float = false;
+    let mut saw_int = false;
+    for value in regs.iter().take(slots.len()) {
         match value {
-            Value::Int(i) => *slot = *i,
-            Value::Bool(b) => *slot = i64::from(*b),
-            Value::Unit => *slot = 0,
+            Value::Int(_) => saw_int = true,
+            Value::Float(_) => saw_float = true,
+            Value::Bool(_) | Value::Unit => {}
             _ => return SyncSlotsResult::Deopt,
         }
     }
-    SyncSlotsResult::Ok
+    if saw_int && saw_float {
+        return SyncSlotsResult::Deopt;
+    }
+    for (slot, value) in slots.iter_mut().zip(regs.iter()) {
+        *slot = match value {
+            Value::Int(i) => *i,
+            Value::Bool(b) => i64::from(*b),
+            Value::Unit => 0,
+            Value::Float(n) => n.to_bits() as i64,
+            _ => 0,
+        };
+    }
+    if saw_float {
+        SyncSlotsResult::Float
+    } else {
+        SyncSlotsResult::Ok
+    }
 }
 
 /// Write JIT shadow slots back into the active VM register file.
@@ -643,6 +676,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
 
@@ -659,6 +694,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let trace = ctx
@@ -685,6 +722,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut slots = vec![0i64; 3];
         force_compile(&mut ctx, &chunk, key)?;
@@ -719,6 +758,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let trace = ctx
@@ -759,6 +800,8 @@ mod tests {
                 TraceKey {
                     function,
                     entry_pc: entry,
+
+                    floats: false,
                 },
             )?;
             let mut vm = Vm::new(chunk.clone(), NativeTable::empty(), function, &[])?;
@@ -774,13 +817,165 @@ mod tests {
     }
 
     #[test]
-    fn sync_slots_deopts_on_float() -> TestResult {
+    fn sync_slots_accepts_a_float_register() -> TestResult {
         let chunk = add_chunk();
         let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
         vm.set_register(0, Value::Float(1.0))?;
         let mut slots = vec![0i64; 3];
-        assert_eq!(sync_slots_from_vm(&vm, &mut slots), SyncSlotsResult::Deopt);
+        assert_eq!(sync_slots_from_vm(&vm, &mut slots), SyncSlotsResult::Float);
+        assert_eq!(f64::from_bits(slots[0] as u64), 1.0);
         Ok(())
+    }
+
+    #[test]
+    fn float_trace_matches_the_interpreter() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-float");
+        let zero = b.const_(Value::Float(0.0));
+        let one = b.const_(Value::Float(1.0));
+        let limit = b.const_(Value::Float(4.0));
+        b.begin_function("main", 0, 4);
+        b.emit_load_const(0, zero);
+        b.emit_load_const(1, one);
+        b.emit_load_const(2, limit);
+        let head = b.new_label();
+        let done = b.new_label();
+        b.bind_label(head);
+        b.emit_binop(Opcode::Add, 0, 0, 1);
+        b.emit_binop(Opcode::Lt, 3, 0, 2);
+        b.emit_branch(3, done);
+        b.emit_jump(head);
+        b.bind_label(done);
+        b.emit_return(0);
+        let chunk = Arc::new(b.finish());
+        let mut plain = Vm::new(Arc::clone(&chunk), NativeTable::empty(), 0, &[])?;
+        let interpreted = plain.run(100);
+        let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+        ctx.hot_threshold = 1;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let compiled = run_vm_with_jit(&mut vm, 100, &mut ctx);
+        if !ctx.cache.has_float_trace() {
+            return Err("float add loop was not compiled".into());
+        }
+        match (interpreted, compiled) {
+            (VmResult::Complete(Value::Float(a)), VmResult::Complete(Value::Float(b)))
+                if a == b && a == 4.0 =>
+            {
+                Ok(())
+            }
+            (left, right) => Err(format!("float trace {right:?} interpreter {left:?}").into()),
+        }
+    }
+
+    fn run_float_chunk(
+        chunk: Arc<Chunk>,
+        budget: u32,
+    ) -> Result<(VmResult, VmResult, JitContext), Box<dyn std::error::Error>> {
+        let mut plain = Vm::new(Arc::clone(&chunk), NativeTable::empty(), 0, &[])?;
+        let interpreted = plain.run(budget);
+        let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+        ctx.hot_threshold = 1;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let compiled = run_vm_with_jit(&mut vm, budget, &mut ctx);
+        Ok((interpreted, compiled, ctx))
+    }
+
+    #[test]
+    fn float_trace_edges_match_the_interpreter() -> TestResult {
+        let mut nan_lt = ChunkBuilder::new("jit-nan-lt");
+        let nan = nan_lt.const_(Value::Float(f64::NAN));
+        let zero = nan_lt.const_(Value::Float(0.0));
+        nan_lt.begin_function("main", 0, 3);
+        nan_lt.emit_load_const(0, nan);
+        nan_lt.emit_load_const(1, zero);
+        let head = nan_lt.new_label();
+        nan_lt.bind_label(head);
+        nan_lt.emit_binop(Opcode::Lt, 2, 0, 1);
+        nan_lt.emit_return(2);
+        let nan_chunk = Arc::new(nan_lt.finish());
+        let (interpreted, compiled, ctx) = run_float_chunk(Arc::clone(&nan_chunk), 20)?;
+        if !ctx.cache.has_float_trace() {
+            return Err("NaN comparison was not compiled".into());
+        }
+        match (interpreted, compiled) {
+            (VmResult::Complete(Value::Bool(false)), VmResult::Complete(Value::Bool(false))) => {}
+            (left, right) => {
+                return Err(format!("nan lt {right:?} interpreter {left:?}").into());
+            }
+        }
+
+        let mut inf_add = ChunkBuilder::new("jit-inf-add");
+        let pos = inf_add.const_(Value::Float(f64::INFINITY));
+        let neg = inf_add.const_(Value::Float(f64::NEG_INFINITY));
+        inf_add.begin_function("main", 0, 3);
+        inf_add.emit_load_const(0, pos);
+        inf_add.emit_load_const(1, neg);
+        let head = inf_add.new_label();
+        inf_add.bind_label(head);
+        inf_add.emit_binop(Opcode::Add, 2, 0, 1);
+        inf_add.emit_return(2);
+        let inf_chunk = Arc::new(inf_add.finish());
+        let (interpreted, compiled, ctx) = run_float_chunk(Arc::clone(&inf_chunk), 20)?;
+        if !ctx.cache.has_float_trace() {
+            return Err("infinity add was not compiled".into());
+        }
+        match (interpreted, compiled) {
+            (VmResult::Complete(Value::Float(a)), VmResult::Complete(Value::Float(b)))
+                if a.is_nan() && b.is_nan() => {}
+            (left, right) => {
+                return Err(format!("inf add {right:?} interpreter {left:?}").into());
+            }
+        }
+
+        let mut zeros = ChunkBuilder::new("jit-signed-zero");
+        let neg_zero = zeros.const_(Value::Float(-0.0));
+        zeros.begin_function("main", 0, 1);
+        zeros.emit_load_const(0, neg_zero);
+        let head = zeros.new_label();
+        zeros.bind_label(head);
+        zeros.emit_add_imm(0, 0, 0);
+        zeros.emit_return(0);
+        let zero_chunk = Arc::new(zeros.finish());
+        let (interpreted, compiled, ctx) = run_float_chunk(Arc::clone(&zero_chunk), 20)?;
+        if !ctx.cache.has_float_trace() {
+            return Err("signed-zero add was not compiled".into());
+        }
+        match (interpreted, compiled) {
+            (VmResult::Complete(Value::Float(a)), VmResult::Complete(Value::Float(b)))
+                if a.to_bits() == 0.0f64.to_bits() && b.to_bits() == 0.0f64.to_bits() => {}
+            (left, right) => {
+                return Err(format!("signed zero {right:?} interpreter {left:?}").into());
+            }
+        }
+
+        let mut countdown = ChunkBuilder::new("jit-sub-imm");
+        let start = countdown.const_(Value::Float(4.0));
+        countdown.begin_function("main", 0, 2);
+        countdown.emit_load_const(0, start);
+        let head = countdown.new_label();
+        let body = countdown.new_label();
+        let done = countdown.new_label();
+        countdown.bind_label(head);
+        countdown.emit_lt_imm(1, 0, 1);
+        countdown.emit_branch(1, body);
+        countdown.emit_jump(done);
+        countdown.bind_label(body);
+        countdown.emit_sub_imm(0, 0, 1);
+        countdown.emit_jump(head);
+        countdown.bind_label(done);
+        countdown.emit_return(0);
+        let sub_chunk = Arc::new(countdown.finish());
+        let (interpreted, compiled, ctx) = run_float_chunk(Arc::clone(&sub_chunk), 40)?;
+        if !ctx.cache.has_float_trace() {
+            return Err("float SubImm loop was not compiled".into());
+        }
+        match (interpreted, compiled) {
+            (VmResult::Complete(Value::Float(a)), VmResult::Complete(Value::Float(b)))
+                if a == 0.0 && b == 0.0 =>
+            {
+                Ok(())
+            }
+            (left, right) => Err(format!("sub imm {right:?} interpreter {left:?}").into()),
+        }
     }
 
     #[test]
@@ -790,6 +985,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut slots = vec![0i64; 3];
         let exit = try_run_hot_runtime(&runtime, &chunk, key, &mut slots, 10_000, 3, None)
@@ -813,6 +1010,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let trace = ctx
@@ -854,6 +1053,8 @@ mod tests {
             .get(&TraceKey {
                 function: 0,
                 entry_pc: head_pc,
+
+                floats: false,
             })
             .is_some());
         Ok(())
@@ -866,6 +1067,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut slots = vec![0i64; 3];
         let exit = try_run_hot_runtime(&runtime, &chunk, key, &mut slots, 10_000, 3, None)
@@ -895,6 +1098,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let trace = ctx
@@ -932,6 +1137,8 @@ mod tests {
             TraceKey {
                 function: main,
                 entry_pc: entry,
+
+                floats: false,
             },
         )?;
         let mut vm = Vm::new(chunk, NativeTable::empty(), main, &[])?;
@@ -976,6 +1183,8 @@ mod tests {
                 TraceKey {
                     function,
                     entry_pc: entry,
+
+                    floats: false,
                 },
             )?;
             let mut vm = Vm::new(chunk.clone(), NativeTable::empty(), function, args)?;
@@ -1015,6 +1224,8 @@ mod tests {
         let key = TraceKey {
             function: main,
             entry_pc: entry,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let trace = ctx
@@ -1079,6 +1290,8 @@ mod tests {
                 TraceKey {
                     function,
                     entry_pc: entry,
+
+                    floats: false,
                 },
             )?;
             let mut vm = Vm::new(chunk.clone(), NativeTable::empty(), function, args)?;

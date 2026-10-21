@@ -278,6 +278,42 @@ impl<'a> Fn<'a> {
         self.b.emit_add_imm(dst.0, dst.0, imm);
     }
 
+    /// `dst -= imm` in place. One [`Opcode::SubImm`].
+    pub fn sub_imm(&mut self, dst: Reg, imm: i32) {
+        self.b.emit_sub_imm(dst.0, dst.0, imm);
+    }
+
+    /// `lhs < imm` as `Bool`, in a fresh local. One [`Opcode::LtImm`].
+    pub fn lt_imm(&mut self, lhs: Reg, imm: i32) -> Reg {
+        let dst = self.local();
+        self.b.emit_lt_imm(dst.0, lhs.0, imm);
+        dst
+    }
+
+    /// Pack `items` into a new list local. `items` must already be contiguous
+    /// registers (`rN, rN+1, …`) and at most 32 long.
+    pub fn list_pack(&mut self, items: &[Reg]) -> Reg {
+        let dst = self.local();
+        let base = match items.first() {
+            Some(reg) => reg.0,
+            None => 0,
+        };
+        self.b.emit_list_pack(dst.0, base, items.len() as i32);
+        dst
+    }
+
+    pub fn list_get(&mut self, list: Reg, index: i32) -> Reg {
+        let dst = self.local();
+        self.b.emit_list_get(dst.0, list.0, index);
+        dst
+    }
+
+    pub fn list_len(&mut self, list: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_list_len(dst.0, list.0);
+        dst
+    }
+
     pub fn sub(&mut self, lhs: Reg, rhs: Reg) -> Reg {
         self.binop(Opcode::Sub, lhs, rhs)
     }
@@ -338,6 +374,10 @@ impl<'a> Fn<'a> {
 
     pub fn bind(&mut self, label: Label) {
         self.b.bind_label(label);
+    }
+
+    pub fn move_reg(&mut self, dst: Reg, src: Reg) {
+        self.b.emit_move(dst.0, src.0);
     }
 
     pub fn jump(&mut self, label: Label) {
@@ -641,7 +681,7 @@ impl<'a> Fn<'a> {
         msg
     }
 
-    /// Wait for a hop whose `payload.wire_tag() == kind` (`0..=8`, FIFO skip).
+    /// Wait for a hop whose `payload.wire_tag() == kind` (`0..=9`, FIFO skip).
     pub fn receive_match_kind(&mut self, kind: u8) -> Reg {
         let msg = self.local();
         self.b.emit_receive_match_kind(msg.0, kind);

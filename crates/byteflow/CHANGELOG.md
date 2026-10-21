@@ -2,6 +2,22 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.18] — 2026-10-21
+
+### Added
+
+- **Lists:** `Value::List` holds at most 32 elements. `ListPack`,
+  `ListGet` and `ListLen` are opcodes `0x77`–`0x79`. A module that
+  stores a list encodes as ABI 6. Modules without a list stay on
+  ABI 5 and still decode. Tag 9 in a v5 buffer is rejected.
+- **Immediates:** `SubImm` (`0x75`) and `LtImm` (`0x76`) follow
+  `AddImm`: wrapping integers, and floats with the immediate
+  converted to `f64`. A NaN does not compare less.
+- **JIT:** a trace is specialized as integers or as floats from the
+  registers live at entry. Release builds set Cranelift `opt_level`
+  to `speed`. List opcodes and effects stay in the interpreter, so
+  a failed guard cannot run them twice.
+
 ## [0.9.17] — 2026-10-18
 
 ### Fixed

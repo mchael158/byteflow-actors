@@ -382,6 +382,91 @@ impl Vm {
         self.set_reg(dst, result)
     }
 
+    fn sub_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        let subtrahend = i64::from(imm);
+        let result = match src_val {
+            Value::Int(x) => Value::Int(x.wrapping_sub(subtrahend)),
+            Value::Float(x) => Value::Float(x - (subtrahend as f64)),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn lt_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        let rhs = i64::from(imm);
+        let result = match src_val {
+            Value::Int(x) => Value::Bool(x < rhs),
+            Value::Float(x) => Value::Bool(x < (rhs as f64)),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn list_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
+        if !(0..=crate::bytecode::MAX_LIST_LEN as i32).contains(&count) {
+            return Err(Fault::TypeMismatch {
+                expected: "list length 0..=32",
+                got: "imm-out-of-range",
+            });
+        }
+        let mut items = Vec::with_capacity(count as usize);
+        for offset in 0..count {
+            let reg = reg_at(base, offset as u16)?;
+            items.push(self.get_reg(reg)?);
+        }
+        let list = match Value::try_list(items) {
+            Some(list) => list,
+            None => return Err(Fault::QuotaExceeded("value nesting exceeds limit".into())),
+        };
+        self.set_reg(dst, list)
+    }
+
+    fn list_get(&mut self, dst: u8, src: u8, index: i32) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::List(items) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "list",
+                got: value.type_name(),
+            });
+        };
+        if index < 0 {
+            return Err(Fault::TypeMismatch {
+                expected: "list index",
+                got: "negative-int",
+            });
+        }
+        match items.get(index as usize) {
+            Some(item) => self.set_reg(dst, item.clone()),
+            None => Err(Fault::TypeMismatch {
+                expected: "list index",
+                got: "out-of-range",
+            }),
+        }
+    }
+
+    fn list_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::List(items) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "list",
+                got: value.type_name(),
+            });
+        };
+        self.set_reg(dst, Value::Int(items.len() as i64))
+    }
+
     fn numeric_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) -> Result<(), Fault> {
         let a = self.get_reg(lhs)?;
         let b = self.get_reg(rhs)?;
@@ -609,6 +694,21 @@ impl Vm {
                 }
                 Opcode::AddImm => {
                     trap!(self.add_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::SubImm => {
+                    trap!(self.sub_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::LtImm => {
+                    trap!(self.lt_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::ListPack => {
+                    trap!(self.list_pack(instr.a, instr.b, instr.imm));
+                }
+                Opcode::ListGet => {
+                    trap!(self.list_get(instr.a, instr.b, instr.imm));
+                }
+                Opcode::ListLen => {
+                    trap!(self.list_len(instr.a, instr.b));
                 }
                 Opcode::Move => {
                     let v = trap!(self.get_reg(instr.b));
@@ -866,17 +966,28 @@ impl Vm {
                     let key = trap!(self.int_from_reg(instr.b));
                     let value = trap!(self.get_reg(instr.c));
                     let new_bytes = trap!(dict_owned_bytes(&value));
-                    let old_bytes = match self.dict.as_ref().and_then(|d| d.get(&key)) {
-                        Some(prev) => trap!(dict_owned_bytes(prev)),
-                        None => 0,
-                    };
-                    trap!(self.adjust_dict_quota(old_bytes, new_bytes));
-                    let dict = self.dict.get_or_insert_with(HashMap::new);
-                    let old = match dict.insert(key, value) {
+                    let previous = match self.dict.as_ref().and_then(|d| d.get(&key).cloned()) {
                         Some(prev) => prev,
                         None => Value::Unit,
                     };
-                    trap!(self.set_reg(instr.a, old));
+                    let old_bytes = trap!(dict_owned_bytes(&previous));
+                    // Charge first, write the register second, and only then
+                    // replace the slot. `set_reg` of the previous value can
+                    // refuse (the old buffer moves into `ra` while `rc` and
+                    // the dictionary both still hold the new one). Rolling
+                    // the charge back leaves the slot untouched.
+                    if let Err(fault) = self.adjust_dict_quota(old_bytes, new_bytes) {
+                        return VmResult::Trap(fault);
+                    }
+                    if let Err(fault) = self.set_reg(instr.a, previous) {
+                        if let Err(rollback) = self.adjust_dict_quota(new_bytes, old_bytes) {
+                            return VmResult::Trap(rollback);
+                        }
+                        return VmResult::Trap(fault);
+                    }
+                    self.dict
+                        .get_or_insert_with(HashMap::new)
+                        .insert(key, value);
                 }
                 Opcode::DictGet => {
                     let key = trap!(self.int_from_reg(instr.b));
@@ -888,6 +999,8 @@ impl Vm {
                 }
                 Opcode::DictErase => {
                     let key = trap!(self.int_from_reg(instr.b));
+                    // A bad destination must not drop the entry on the way out.
+                    trap!(self.get_reg(instr.a));
                     let old = match self.dict.as_mut().and_then(|d| d.remove(&key)) {
                         Some(v) => v,
                         None => Value::Unit,
@@ -994,10 +1107,10 @@ impl Vm {
                     // Selective receive by payload wire-tag (`Value::wire_tag`,
                     // 0..=8). Non-matching hops stay queued (FIFO skip).
                     let kind = match u8::try_from(instr.imm) {
-                        Ok(k) if k <= 8 => k,
+                        Ok(k) if k <= 9 => k,
                         _ => {
                             return VmResult::Trap(Fault::TypeMismatch {
-                                expected: "payload kind 0..=8",
+                                expected: "payload kind 0..=9",
                                 got: "imm-out-of-range",
                             })
                         }
@@ -1315,6 +1428,22 @@ fn heap_charge_of(value: &Value) -> Result<usize, Fault> {
             Value::Str(s) => Ok(s.len()),
             Value::Bytes(b) => Ok(b.len()),
             Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
+            Value::List(items) => {
+                let mut sum = items
+                    .len()
+                    .checked_mul(std::mem::size_of::<Value>())
+                    .ok_or_else(|| Fault::QuotaExceeded("heap charge does not fit".into()))?;
+                for item in items.iter() {
+                    let part = walk(item, depth + 1)?;
+                    sum = match sum.checked_add(part) {
+                        Some(total) => total,
+                        None => {
+                            return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                        }
+                    };
+                }
+                Ok(sum)
+            }
             Value::Unit
             | Value::Bool(_)
             | Value::Int(_)
@@ -1958,6 +2087,35 @@ mod tests {
     }
 
     #[test]
+    fn dict_replace_that_cannot_park_the_old_string_keeps_it() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let first = b.const_(Value::Str("a".repeat(100).into()));
+        let second = b.const_(Value::Str("b".repeat(80).into()));
+        b.begin_function("main", 0, 4);
+        b.emit_load_const(0, first);
+        b.emit_load_imm(1, 1);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(0, 0);
+        b.emit_load_const(0, second);
+        b.emit_dict_put(3, 1, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        // 200 admits the original string in both the register and the
+        // dictionary. Returning that string to r3 while r0 and the
+        // dictionary both hold the 80-byte replacement needs 260.
+        let quota = Arc::new(FlowQuota::new(10_000, 200, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(30) {
+            VmResult::Trap(Fault::QuotaExceeded(_)) => {
+                // r0 still holds 80 and the dictionary still holds 100.
+                assert_eq!(quota.mem_used(), 180);
+                Ok(())
+            }
+            other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
+        }
+    }
+
+    #[test]
     fn dict_erase_moves_the_charge_back_to_the_register() -> TestResult {
         let mut b = ChunkBuilder::new("t");
         let text = b.const_(Value::Str("y".repeat(80).into()));
@@ -2107,6 +2265,100 @@ mod tests {
                 got: "str",
             }) => Ok(()),
             other => Err(format!("str sleep: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn sub_imm_and_lt_imm_follow_integer_and_float_rules() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, 10);
+        b.emit_sub_imm(1, 0, 3);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(7)) => {}
+            other => return Err(format!("10 - 3: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let big = b.const_(Value::Int(i64::MAX));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, big);
+        b.emit_sub_imm(1, 0, -1);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(n)) if n == i64::MIN => {}
+            other => return Err(format!("wrap: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let flag = b.const_(Value::Bool(true));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, flag);
+        b.emit_sub_imm(1, 0, 1);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int or float",
+                got: "bool",
+            }) => {}
+            other => return Err(format!("bool sub: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let num = b.const_(Value::Float(1.5));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, num);
+        b.emit_lt_imm(1, 0, 2);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Bool(true)) => {}
+            other => return Err(format!("1.5 < 2: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let nan = b.const_(Value::Float(f64::NAN));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, nan);
+        b.emit_lt_imm(1, 0, 0);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Bool(false)) => Ok(()),
+            other => Err(format!("nan < 0: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn list_pack_get_len_and_quota() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 4);
+        b.emit_load_imm(0, 7);
+        b.emit_load_imm(1, 8);
+        b.emit_list_pack(2, 0, 2);
+        b.emit_list_get(3, 2, 1);
+        b.emit_return(3);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(20) {
+            VmResult::Complete(Value::Int(8)) => {}
+            other => return Err(format!("list get: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let text = b.const_(Value::Str("z".repeat(100).into()));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, text);
+        b.emit_list_pack(1, 0, 1);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 1_000, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        let slot = std::mem::size_of::<Value>();
+        match vm.run(10) {
+            VmResult::Complete(_) => {
+                assert_eq!(quota.mem_used(), 100 + slot + 100);
+                Ok(())
+            }
+            other => Err(format!("list quota: {other:?}").into()),
         }
     }
 

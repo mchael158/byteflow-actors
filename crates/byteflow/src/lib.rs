@@ -264,8 +264,8 @@ pub use bytecode::{
     decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId, CapIdError,
     CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef, Instruction,
     Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow, RestartPolicy,
-    RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION, MAGIC, TAG_SYS_DOWN,
-    TAG_SYS_EXIT,
+    RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION, ABI_VERSION_LISTS,
+    MAGIC, TAG_SYS_DOWN, TAG_SYS_EXIT,
 };
 pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot};
 pub use natives::{

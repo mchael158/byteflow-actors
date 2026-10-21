@@ -118,5 +118,59 @@ fn atomic_hop_ask(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, spawn_join, atomic_hop_ask);
+fn countdown_chunk(immediate: bool) -> byteflow::Chunk {
+    let mut program = Program::new(if immediate { "sub-imm" } else { "sub-pair" });
+    program.function("main", 0, |f| {
+        let n = f.load_i32(2_000);
+        let head = f.label();
+        let body = f.label();
+        let done = f.label();
+        f.bind(head);
+        let finished = f.lt_imm(n, 1);
+        f.branch_if_falsy(finished, body);
+        f.jump(done);
+        f.bind(body);
+        if immediate {
+            f.sub_imm(n, 1);
+        } else {
+            let one = f.load_i32(1);
+            let next = f.sub(n, one);
+            f.move_reg(n, next);
+        }
+        f.jump(head);
+        f.bind(done);
+        f.return_(n);
+    });
+    program.build()
+}
+
+fn sub_immediate(c: &mut Criterion) {
+    let immediate = std::sync::Arc::new(countdown_chunk(true));
+    let paired = std::sync::Arc::new(countdown_chunk(false));
+    let mut group = c.benchmark_group("sub_immediate");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(400));
+    for (name, chunk) in [("sub_imm", immediate), ("load_imm_plus_sub", paired)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut vm = match byteflow::Vm::new(
+                    std::sync::Arc::clone(&chunk),
+                    byteflow::NativeTable::empty(),
+                    0,
+                    &[],
+                ) {
+                    Ok(vm) => vm,
+                    Err(e) => panic!("vm: {e}"),
+                };
+                match vm.run(20_000) {
+                    byteflow::VmResult::Complete(Value::Int(0)) => {}
+                    other => panic!("countdown: {other:?}"),
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, spawn_join, atomic_hop_ask, sub_immediate);
 criterion_main!(benches);

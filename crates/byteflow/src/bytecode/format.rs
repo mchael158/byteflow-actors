@@ -1,4 +1,4 @@
-use super::chunk::{Chunk, FunctionDef, ABI_VERSION, MAGIC};
+use super::chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, MAGIC};
 use super::instruction::Instruction;
 use super::opcode::Opcode;
 use super::value::Value;
@@ -74,7 +74,12 @@ impl std::error::Error for FormatError {}
 pub fn encode(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&ABI_VERSION.to_le_bytes());
+    let abi = if constants_contain_list(&chunk.constants) {
+        ABI_VERSION_LISTS
+    } else {
+        ABI_VERSION
+    };
+    out.extend_from_slice(&abi.to_le_bytes());
     write_string(&mut out, &chunk.name);
     out.extend_from_slice(&(chunk.constants.len() as u32).to_le_bytes());
     for value in &chunk.constants {
@@ -116,14 +121,14 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         return Err(FormatError::BadMagic { found: magic });
     }
     let abi = r.read_u32()?;
-    if abi != ABI_VERSION {
+    if abi != ABI_VERSION && abi != ABI_VERSION_LISTS {
         return Err(FormatError::UnsupportedAbi(abi));
     }
     let name = r.read_string()?;
     let n_const = r.read_count("constants")?;
     let mut constants = Vec::with_capacity(n_const as usize);
     for _ in 0..n_const {
-        constants.push(r.read_value(trust, 0)?);
+        constants.push(r.read_value(trust, 0, abi)?);
     }
     let n_fn = r.read_count("functions")?;
     let mut functions = Vec::with_capacity(n_fn as usize);
@@ -207,7 +212,25 @@ fn write_value(out: &mut Vec<u8>, value: &Value) {
             out.push(8);
             write_blob(out, b);
         }
+        Value::List(items) => {
+            out.push(9);
+            out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            for item in items.iter() {
+                write_value(out, item);
+            }
+        }
     }
+}
+
+fn constants_contain_list(constants: &[Value]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::List(_) => true,
+            Value::Message(message) => walk(message.payload.as_ref()),
+            _ => false,
+        }
+    }
+    constants.iter().any(walk)
 }
 
 fn write_blob(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -293,7 +316,12 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| FormatError::BadUtf8)
     }
 
-    fn read_value(&mut self, trust: TrustLevel, depth: u32) -> Result<Value, FormatError> {
+    fn read_value(
+        &mut self,
+        trust: TrustLevel,
+        depth: u32,
+        abi: u32,
+    ) -> Result<Value, FormatError> {
         if depth > MAX_VALUE_DEPTH {
             return Err(FormatError::ValueTooNested);
         }
@@ -320,7 +348,7 @@ impl<'a> Reader<'a> {
                 let reply_cap = super::cap::CapId::from_raw(self.read_u128()?);
                 let request_id = self.read_u64()?;
                 let tag = self.read_u16()?;
-                let payload = self.read_value(trust, depth + 1)?;
+                let payload = self.read_value(trust, depth + 1, abi)?;
                 Ok(Value::Message(
                     super::value::Message::new(sender, request_id, tag, payload)
                         .authenticate(sender, reply_cap),
@@ -340,6 +368,23 @@ impl<'a> Reader<'a> {
                 Ok(Value::str(s))
             }
             8 => Ok(Value::bytes(self.read_blob("bytes")?)),
+            9 => {
+                if abi < ABI_VERSION_LISTS {
+                    return Err(FormatError::UnknownValueTag(9));
+                }
+                let n = self.read_u32()?;
+                if n > super::value::MAX_LIST_LEN as u32 {
+                    return Err(FormatError::LimitExceeded {
+                        what: "list",
+                        got: n,
+                    });
+                }
+                let mut items = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    items.push(self.read_value(trust, depth + 1, abi)?);
+                }
+                Value::try_list(items).ok_or(FormatError::ValueTooNested)
+            }
             tag => Err(FormatError::UnknownValueTag(tag)),
         }
     }
@@ -451,5 +496,47 @@ mod tests {
             decode(&bytes),
             Err(FormatError::Trailing { leftover: 1 })
         ));
+    }
+
+    #[test]
+    fn list_constant_roundtrips_as_abi_v6_and_v5_rejects_the_tag() -> Result<(), FormatError> {
+        let list = match Value::try_list(vec![Value::Int(1), Value::Int(2)]) {
+            Some(list) => list,
+            None => return Err(FormatError::ValueTooNested),
+        };
+        let mut b = ChunkBuilder::new("list");
+        b.begin_function("main", 0, 1);
+        let k = b.const_(list);
+        b.emit_load_const(0, k);
+        b.emit_return(0);
+        let original = b.finish();
+        let bytes = encode(&original);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4])),
+            6
+        );
+        let decoded = decode(&bytes)?;
+        assert_eq!(decoded.constants, original.constants);
+        let mut v5 = bytes.clone();
+        v5[4..8].copy_from_slice(&5u32.to_le_bytes());
+        assert!(matches!(decode(&v5), Err(FormatError::UnknownValueTag(9))));
+        let wide = Value::List(std::sync::Arc::from(vec![Value::Int(1); 33]));
+        let mut wide_chunk = Chunk {
+            name: "wide".into(),
+            ..Chunk::default()
+        };
+        wide_chunk.constants.push(wide);
+        wide_chunk.functions.push(FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        wide_chunk.code.push(Instruction::nullary(Opcode::Return));
+        assert!(matches!(
+            decode(&encode(&wide_chunk)),
+            Err(FormatError::LimitExceeded { what: "list", .. })
+        ));
+        Ok(())
     }
 }

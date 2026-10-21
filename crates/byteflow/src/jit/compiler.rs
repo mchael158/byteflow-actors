@@ -14,8 +14,9 @@ use crate::{Chunk, Instruction, Opcode, Value};
 use super::error::CompileError;
 use super::exit::{JIT_BUDGET, JIT_CONTINUE, JIT_RETURN, JIT_TRAP};
 use super::frame::{
-    JitEntry, OFF_AS_BOOL, OFF_AS_UNIT, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK, OFF_ENTRY_BOOL,
-    OFF_ENTRY_UNIT, OFF_EXIT_KIND, OFF_PC, OFF_RETURN_REG, OFF_WRITTEN,
+    JitEntry, OFF_AS_BOOL, OFF_AS_FLOAT, OFF_AS_UNIT, OFF_BUDGET, OFF_CALL_DEPTH, OFF_CALL_STACK,
+    OFF_ENTRY_BOOL, OFF_ENTRY_FLOAT, OFF_ENTRY_UNIT, OFF_EXIT_KIND, OFF_PC, OFF_RETURN_REG,
+    OFF_WRITTEN,
 };
 use super::trace::{CompiledTrace, TraceKey, TraceSpan, MAX_TRACE_LENGTH};
 
@@ -28,6 +29,7 @@ use super::trace::{CompiledTrace, TraceKey, TraceSpan, MAX_TRACE_LENGTH};
 enum SlotTag {
     Int,
     Bool,
+    Float,
     Inherited(u8),
 }
 
@@ -64,6 +66,10 @@ impl RegisterMap {
 
     pub fn set_bool(&mut self, reg: usize, value: ClifValue) {
         self.define(reg, value, SlotTag::Bool);
+    }
+
+    pub fn set_float(&mut self, reg: usize, value: ClifValue) {
+        self.define(reg, value, SlotTag::Float);
     }
 
     fn define(&mut self, reg: usize, value: ClifValue, tag: SlotTag) {
@@ -264,6 +270,7 @@ impl<'a> TraceCompiler<'a> {
                     call_depth_ptr,
                     call_stack_ptr,
                     supports_calls,
+                    floats: key.floats,
                     continuations: &continuations,
                 };
                 emit_instruction(&mut emit_ctx, *pc, instr)?;
@@ -375,7 +382,102 @@ struct EmitContext<'a, 'b> {
     call_depth_ptr: ClifValue,
     call_stack_ptr: ClifValue,
     supports_calls: bool,
+    floats: bool,
     continuations: &'a HashMap<u32, Block>,
+}
+
+enum FloatImmOp {
+    Add,
+    Sub,
+    Lt,
+}
+
+fn f64_bits(builder: &mut FunctionBuilder<'_>, bits: ClifValue) -> ClifValue {
+    builder.ins().bitcast(types::F64, MachMemFlags::new(), bits)
+}
+
+fn i64_bits(builder: &mut FunctionBuilder<'_>, num: ClifValue) -> ClifValue {
+    builder.ins().bitcast(types::I64, MachMemFlags::new(), num)
+}
+
+fn float_imm_op(
+    builder: &mut FunctionBuilder<'_>,
+    lhs_bits: ClifValue,
+    imm: i32,
+    op: FloatImmOp,
+) -> ClifValue {
+    let lhs = f64_bits(builder, lhs_bits);
+    let rhs = builder.ins().f64const(f64::from(imm));
+    match op {
+        FloatImmOp::Add => {
+            let sum = builder.ins().fadd(lhs, rhs);
+            i64_bits(builder, sum)
+        }
+        FloatImmOp::Sub => {
+            let diff = builder.ins().fsub(lhs, rhs);
+            i64_bits(builder, diff)
+        }
+        FloatImmOp::Lt => {
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::LessThan,
+                lhs,
+                rhs,
+            );
+            bool_as_i64(builder, cmp)
+        }
+    }
+}
+
+fn float_binop(
+    builder: &mut FunctionBuilder<'_>,
+    op: Opcode,
+    lhs_bits: ClifValue,
+    rhs_bits: ClifValue,
+) -> ClifValue {
+    let lhs = f64_bits(builder, lhs_bits);
+    let rhs = f64_bits(builder, rhs_bits);
+    match op {
+        Opcode::Add => {
+            let sum = builder.ins().fadd(lhs, rhs);
+            i64_bits(builder, sum)
+        }
+        Opcode::Sub => {
+            let diff = builder.ins().fsub(lhs, rhs);
+            i64_bits(builder, diff)
+        }
+        Opcode::Mul => {
+            let prod = builder.ins().fmul(lhs, rhs);
+            i64_bits(builder, prod)
+        }
+        Opcode::Div => {
+            let quot = builder.ins().fdiv(lhs, rhs);
+            i64_bits(builder, quot)
+        }
+        Opcode::Eq => {
+            let cmp =
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, lhs, rhs);
+            bool_as_i64(builder, cmp)
+        }
+        Opcode::Lt => {
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::LessThan,
+                lhs,
+                rhs,
+            );
+            bool_as_i64(builder, cmp)
+        }
+        Opcode::Le => {
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                lhs,
+                rhs,
+            );
+            bool_as_i64(builder, cmp)
+        }
+        _ => i64_bits(builder, lhs),
+    }
 }
 
 fn emit_instruction(
@@ -403,9 +505,46 @@ fn emit_instruction(
         }
         Opcode::AddImm => {
             let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
-            let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
-            let result = builder.ins().iadd(lhs, imm);
-            registers.set(instr.a as usize, result);
+            let result = if ctx.floats {
+                float_imm_op(builder, lhs, instr.imm, FloatImmOp::Add)
+            } else {
+                let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+                builder.ins().iadd(lhs, imm)
+            };
+            if ctx.floats {
+                registers.set_float(instr.a as usize, result);
+            } else {
+                registers.set(instr.a as usize, result);
+            }
+        }
+        Opcode::SubImm => {
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let result = if ctx.floats {
+                float_imm_op(builder, lhs, instr.imm, FloatImmOp::Sub)
+            } else {
+                let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+                builder.ins().isub(lhs, imm)
+            };
+            if ctx.floats {
+                registers.set_float(instr.a as usize, result);
+            } else {
+                registers.set(instr.a as usize, result);
+            }
+        }
+        Opcode::LtImm => {
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let result = if ctx.floats {
+                float_imm_op(builder, lhs, instr.imm, FloatImmOp::Lt)
+            } else {
+                let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+                let cmp = builder.ins().icmp(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+                    lhs,
+                    imm,
+                );
+                bool_as_i64(builder, cmp)
+            };
+            registers.set_bool(instr.a as usize, result);
         }
         Opcode::LoadConst => {
             let idx = instr.imm as u32;
@@ -421,6 +560,10 @@ fn emit_instruction(
                 Value::Bool(b) => {
                     let v = builder.ins().iconst(types::I64, i64::from(*b));
                     registers.set_bool(instr.a as usize, v);
+                }
+                Value::Float(x) if ctx.floats => {
+                    let v = builder.ins().iconst(types::I64, x.to_bits() as i64);
+                    registers.set_float(instr.a as usize, v);
                 }
                 _ => {
                     return Err(CompileError::UnsupportedOpcode {
@@ -441,43 +584,62 @@ fn emit_instruction(
             let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
             let produces_bool = matches!(instr.op, Opcode::Eq | Opcode::Lt | Opcode::Le);
-            let result = match instr.op {
-                Opcode::Add => builder.ins().iadd(lhs, rhs),
-                Opcode::Sub => builder.ins().isub(lhs, rhs),
-                Opcode::Mul => builder.ins().imul(lhs, rhs),
-                Opcode::Eq => {
-                    let cmp = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs,
-                        rhs,
-                    );
-                    bool_as_i64(builder, cmp)
+            let result = if ctx.floats {
+                float_binop(builder, instr.op, lhs, rhs)
+            } else {
+                match instr.op {
+                    Opcode::Add => builder.ins().iadd(lhs, rhs),
+                    Opcode::Sub => builder.ins().isub(lhs, rhs),
+                    Opcode::Mul => builder.ins().imul(lhs, rhs),
+                    Opcode::Eq => {
+                        let cmp = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal,
+                            lhs,
+                            rhs,
+                        );
+                        bool_as_i64(builder, cmp)
+                    }
+                    Opcode::Lt => {
+                        let cmp = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+                            lhs,
+                            rhs,
+                        );
+                        bool_as_i64(builder, cmp)
+                    }
+                    Opcode::Le => {
+                        let cmp = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+                            lhs,
+                            rhs,
+                        );
+                        bool_as_i64(builder, cmp)
+                    }
+                    _ => unreachable!(),
                 }
-                Opcode::Lt => {
-                    let cmp = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                        lhs,
-                        rhs,
-                    );
-                    bool_as_i64(builder, cmp)
-                }
-                Opcode::Le => {
-                    let cmp = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-                        lhs,
-                        rhs,
-                    );
-                    bool_as_i64(builder, cmp)
-                }
-                _ => unreachable!(),
             };
             if produces_bool {
                 registers.set_bool(instr.a as usize, result);
+            } else if ctx.floats {
+                registers.set_float(instr.a as usize, result);
             } else {
                 registers.set(instr.a as usize, result);
             }
         }
         Opcode::Div | Opcode::Mod => {
+            if ctx.floats && instr.op == Opcode::Div {
+                let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+                let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
+                let result = float_binop(builder, Opcode::Div, lhs, rhs);
+                registers.set_float(instr.a as usize, result);
+                return Ok(());
+            }
+            if ctx.floats {
+                return Err(CompileError::UnsupportedOpcode {
+                    opcode: instr.op,
+                    pc,
+                });
+            }
             let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
             let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
             flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
@@ -539,8 +701,15 @@ fn emit_instruction(
         }
         Opcode::Neg => {
             let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
-            let zero = builder.ins().iconst(types::I64, 0);
-            registers.set(instr.a as usize, builder.ins().isub(zero, v));
+            if ctx.floats {
+                let num = f64_bits(builder, v);
+                let neg = builder.ins().fneg(num);
+                let bits = i64_bits(builder, neg);
+                registers.set_float(instr.a as usize, bits);
+            } else {
+                let zero = builder.ins().iconst(types::I64, 0);
+                registers.set(instr.a as usize, builder.ins().isub(zero, v));
+            }
         }
         Opcode::Jump => {
             flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
@@ -717,10 +886,14 @@ fn collect_trace_region(chunk: &Chunk, key: TraceKey) -> Result<TraceRegion, Com
             }
             if instr.op == Opcode::LoadConst {
                 let idx = instr.imm as u32;
-                match chunk.constant(idx) {
-                    Some(Value::Int(_) | Value::Bool(_)) => {}
+                match (key.floats, chunk.constant(idx)) {
+                    (false, Some(Value::Int(_) | Value::Bool(_))) => {}
+                    (true, Some(Value::Float(_))) => {}
                     _ => break,
                 }
+            }
+            if key.floats && matches!(instr.op, Opcode::LoadImm | Opcode::Call | Opcode::Mod) {
+                break;
             }
             pcs.push(pc);
             total += 1;
@@ -805,6 +978,9 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::ReceiveMatchKind
             | Opcode::RegisterName
             | Opcode::Whereis
+            | Opcode::ListPack
+            | Opcode::ListGet
+            | Opcode::ListLen
             | Opcode::Trap
             | Opcode::Halt
     )
@@ -836,13 +1012,20 @@ fn store_slot(
     builder.ins().store(MachMemFlags::new(), value, addr, 0);
     set_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, reg, true);
     match tag {
-        SlotTag::Int => {
-            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
-            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
-        }
         SlotTag::Bool => {
             set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, true);
             set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_FLOAT, reg, false);
+        }
+        SlotTag::Float => {
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_FLOAT, reg, true);
+        }
+        SlotTag::Int => {
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, false);
+            set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_FLOAT, reg, false);
         }
         SlotTag::Inherited(src) => {
             let as_bool = inherited_bit(
@@ -863,6 +1046,22 @@ fn store_slot(
             );
             set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, as_bool);
             set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, as_unit);
+            let as_float = inherited_bit(
+                builder,
+                frame_ptr,
+                pointer_type,
+                src,
+                OFF_AS_FLOAT,
+                OFF_ENTRY_FLOAT,
+            );
+            set_reg_bit_value(
+                builder,
+                frame_ptr,
+                pointer_type,
+                OFF_AS_FLOAT,
+                reg,
+                as_float,
+            );
         }
     }
 }
@@ -1107,6 +1306,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut compiler = TraceCompiler::new(ctx.module_mut());
         let trace = compiler.compile_trace(&chunk, key)?;
@@ -1134,6 +1335,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut compiler = TraceCompiler::new(ctx.module_mut());
         let trace = compiler.compile_trace(&chunk, key)?;
@@ -1167,6 +1370,8 @@ mod tests {
         let key = TraceKey {
             function: 0,
             entry_pc: 0,
+
+            floats: false,
         };
         let mut compiler = TraceCompiler::new(ctx.module_mut());
         let trace = compiler.compile_trace(&chunk, key)?;
@@ -1197,6 +1402,8 @@ mod tests {
         let key = TraceKey {
             function: 1,
             entry_pc: chunk.functions[1].entry,
+
+            floats: false,
         };
         force_compile(&mut ctx, &chunk, key)?;
         let mut vm = Vm::new(chunk, NativeTable::empty(), key.function, &[])?;

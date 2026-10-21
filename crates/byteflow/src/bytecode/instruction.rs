@@ -57,6 +57,17 @@ impl fmt::Display for Instruction {
                 write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
             }
             Opcode::AddImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
+            Opcode::SubImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
+            Opcode::LtImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
+            Opcode::ListPack => {
+                write!(
+                    f,
+                    "{} r{}, r{}, count={}",
+                    self.op, self.a, self.b, self.imm
+                )
+            }
+            Opcode::ListGet => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
+            Opcode::ListLen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Neg => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
             Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),

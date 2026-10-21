@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use cranelift_codegen::settings::Configurable;
+
 use crate::Chunk;
 
 use super::frame::JitEntry;
@@ -16,6 +18,9 @@ pub const HOT_THRESHOLD: u32 = 1_000;
 pub struct TraceKey {
     pub function: u32,
     pub entry_pc: u32,
+    /// `true` when every live register at entry was `Float`, `Bool`, or
+    /// `Unit`. Arithmetic in the trace is IEEE `f64`, not wrapping `i64`.
+    pub floats: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +56,11 @@ impl TraceCache {
 
     pub fn clear(&mut self) {
         self.traces.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_float_trace(&self) -> bool {
+        self.traces.keys().any(|key| key.floats)
     }
 }
 
@@ -89,11 +99,19 @@ pub struct JitContext {
     module: cranelift_jit::JITModule,
 }
 
+pub(crate) fn cranelift_flags() -> cranelift_codegen::settings::Flags {
+    let mut flag_builder = cranelift_codegen::settings::builder();
+    if !cfg!(debug_assertions) {
+        // Debug compiles stay at Cranelift's default (`none`). Release
+        // traces pay for the speed pipeline once per hot region.
+        let _ = flag_builder.set("opt_level", "speed");
+    }
+    cranelift_codegen::settings::Flags::new(flag_builder)
+}
+
 impl JitContext {
     pub fn new(chunk: Arc<Chunk>) -> Result<Self, super::error::CompileError> {
-        use cranelift_codegen::settings;
-
-        let flags = settings::Flags::new(settings::builder());
+        let flags = cranelift_flags();
         let isa = cranelift_native::builder()
             .map_err(|e| super::error::CompileError::Backend(e.to_string()))?
             .finish(flags)

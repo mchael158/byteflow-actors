@@ -102,6 +102,10 @@ impl Message {
     }
 }
 
+/// Most elements a [`Value::List`] may hold. Wider sequences are rejected
+/// by the decoder, `ListPack`, and [`Value::try_list`].
+pub const MAX_LIST_LEN: usize = 32;
+
 /// Shared stand-in so [`Drop`] can detach a payload without allocating.
 fn discarded_payload() -> Arc<Value> {
     static EMPTY: std::sync::OnceLock<Arc<Value>> = std::sync::OnceLock::new();
@@ -165,10 +169,13 @@ pub enum Value {
     Str(Arc<str>),
     /// Opaque byte buffer (constant pool, natives, host).
     Bytes(Arc<[u8]>),
+    /// Bounded sequence (ABI v6 wire tag `9`). At most [`MAX_LIST_LEN`]
+    /// elements; nesting shares [`super::MAX_VALUE_DEPTH`] with `Message`.
+    List(Arc<[Value]>),
 }
 
 impl Value {
-    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`).
+    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`).
     ///
     /// Used by [`crate::Opcode::ReceiveMatchKind`] selective receive.
     #[inline]
@@ -183,6 +190,22 @@ impl Value {
             Value::Cap(_) => 6,
             Value::Str(_) => 7,
             Value::Bytes(_) => 8,
+            Value::List(_) => 9,
+        }
+    }
+
+    /// Build a [`Value::List`]. Fails when `items` is longer than
+    /// [`MAX_LIST_LEN`] or the nested `Message` / `List` depth exceeds the
+    /// decoder ceiling.
+    pub fn try_list(items: Vec<Value>) -> Option<Self> {
+        if items.len() > MAX_LIST_LEN {
+            return None;
+        }
+        let value = Value::List(Arc::from(items));
+        if value.within_nesting_limit() {
+            Some(value)
+        } else {
+            None
         }
     }
 
@@ -209,6 +232,7 @@ impl Value {
             }
             match value {
                 Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
+                Value::List(items) => items.iter().all(|item| walk(item, depth + 1)),
                 _ => true,
             }
         }
@@ -216,13 +240,15 @@ impl Value {
     }
 
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
-    /// `Int(0)`, empty [`Value::Str`], and empty [`Value::Bytes`].
+    /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], and empty
+    /// [`Value::List`].
     #[inline]
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Unit | Value::Bool(false) | Value::Int(0) => false,
             Value::Str(s) if s.is_empty() => false,
             Value::Bytes(b) if b.is_empty() => false,
+            Value::List(items) if items.is_empty() => false,
             _ => true,
         }
     }
@@ -316,29 +342,43 @@ impl Value {
     /// Iterative on purpose: `Mailbox::push` asks for this size, and a
     /// recursive walk of a long chain overflowed the caller's stack.
     fn heap_size_limited(&self) -> Option<usize> {
-        let mut extra = 0usize;
-        let mut depth = 0u32;
-        let mut cursor = self;
-        loop {
-            match cursor {
-                Value::Message(message) => {
-                    if depth >= super::MAX_VALUE_DEPTH {
-                        return None;
+        fn walk(value: &Value, depth: u32) -> Option<usize> {
+            let mut extra = 0usize;
+            let mut cursor = value;
+            let mut depth = depth;
+            loop {
+                match cursor {
+                    Value::Message(message) => {
+                        if depth >= super::MAX_VALUE_DEPTH {
+                            return None;
+                        }
+                        extra = extra.checked_add(std::mem::size_of::<Value>())?;
+                        cursor = message.payload.as_ref();
+                        depth += 1;
                     }
-                    extra = extra.checked_add(std::mem::size_of::<Value>())?;
-                    cursor = message.payload.as_ref();
-                    depth += 1;
+                    Value::List(items) => {
+                        if depth >= super::MAX_VALUE_DEPTH {
+                            return None;
+                        }
+                        let slots = items.len().checked_mul(std::mem::size_of::<Value>())?;
+                        extra = extra.checked_add(slots)?;
+                        for item in items.iter() {
+                            extra = extra.checked_add(walk(item, depth + 1)?)?;
+                        }
+                        return Some(extra);
+                    }
+                    Value::Str(s) => return extra.checked_add(s.len()),
+                    Value::Bytes(b) => return extra.checked_add(b.len()),
+                    Value::Unit
+                    | Value::Bool(_)
+                    | Value::Int(_)
+                    | Value::Float(_)
+                    | Value::Pid(_)
+                    | Value::Cap(_) => return Some(extra),
                 }
-                Value::Str(s) => return extra.checked_add(s.len()),
-                Value::Bytes(b) => return extra.checked_add(b.len()),
-                Value::Unit
-                | Value::Bool(_)
-                | Value::Int(_)
-                | Value::Float(_)
-                | Value::Pid(_)
-                | Value::Cap(_) => return Some(extra),
             }
         }
+        walk(self, 0)
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -352,6 +392,7 @@ impl Value {
             Value::Cap(_) => "cap",
             Value::Str(_) => "str",
             Value::Bytes(_) => "bytes",
+            Value::List(_) => "list",
         }
     }
 }
@@ -368,6 +409,16 @@ impl fmt::Display for Value {
             Value::Cap(c) => write!(f, "{c}"),
             Value::Str(s) => write!(f, "{s}"),
             Value::Bytes(b) => write!(f, "bytes[{}]", b.len()),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

@@ -13,7 +13,15 @@ pub const MAGIC: [u8; 4] = *b"BFV0";
 /// v3: `Message.reply_cap`; [`Value::Cap`] wire tag `6` (FlowCap).
 /// v4: [`Value::Str`] tag `7`, [`Value::Bytes`] tag `8`.
 /// v5: CapId is 128-bit; `Message.payload` is a nested [`Value`].
+/// v6: [`Value::List`] wire tag `9`. Modules without a list still encode
+/// as v5 so an older reader keeps accepting them. A list constant is
+/// written only as v6; v5 decoders reject tag `9`.
 pub const ABI_VERSION: u32 = 5;
+
+/// ABI that introduces [`Value::List`]. [`encode`](super::encode) emits this
+/// only when the chunk contains a list. [`decode`](super::decode) accepts
+/// both v5 and v6.
+pub const ABI_VERSION_LISTS: u32 = 6;
 
 /// A callable entry point inside a [`Chunk`]: either bytecode-defined or a
 /// slot reserved for a native (Rust) function registered with the runtime

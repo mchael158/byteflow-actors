@@ -46,7 +46,7 @@ pub enum VmResult {
         match_tag: Option<u16>,
         match_request_id: Option<u64>,
         /// When set, wait for a hop whose `payload.wire_tag()` equals this
-        /// BFV0 tag (`0..=8`). Independent of [`Self::Receive::match_tag`].
+        /// BFV0 tag (`0..=9`). Independent of [`Self::Receive::match_tag`].
         match_payload_kind: Option<u8>,
         /// When set together with [`Self::Receive::match_tag`], the hop's
         /// payload must be that `Int` (term equality, not a full pattern).

@@ -9,9 +9,7 @@ thread_local! {
 }
 
 fn create_module() -> Result<cranelift_jit::JITModule, CompileError> {
-    use cranelift_codegen::settings;
-
-    let flags = settings::Flags::new(settings::builder());
+    let flags = super::trace::cranelift_flags();
     let isa = cranelift_native::builder()
         .map_err(|e| CompileError::Backend(e.to_string()))?
         .finish(flags)
