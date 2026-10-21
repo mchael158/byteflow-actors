@@ -33,7 +33,7 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `receive … after T` | `Fn::receive_match_imm_timeout(tag, ms)` / `Fn::receive_timeout` | Match + timeout writes `Unit` (hops stay queued) |
 | `is_process_alive(Pid)` | `Fn::is_alive(cap)` | Held Cap → live flow? `false` if revoked / not held |
 | `exit(Pid, Reason)` | `Fn::exit_signal(cap, reason)` | Needs `LINK`. `Normal` ignored. `Killed` untrappable |
-| `put` / `get` / `erase` | `Fn::dict_put` / `dict_get` / `dict_erase` | Per-flow dict, `Int` keys, scalar values |
+    | process dictionary `put` / `get` / `erase` | `Fn::dict_put` / `dict_get` / `dict_erase` | Per-flow dict, `Int` keys, scalars plus `Str` / `Bytes` |
 | `supervisor:start_child` | `Fn::start_child(fn, policy)` | Caller must already be a supervised child |
 | `gen_server:call` | `Fn::ask(cap, hop)` / `Fn::ask_timeout` | `Ask` / `AskTimeout` |
 | `gen_server:cast` | `Fn::send(cap, hop)` | fire-and-forget |
@@ -109,7 +109,7 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 | **capability pass** | `Fn::delegate` / `Cap::attenuate` (AND of rights + native mask) |
 | **confined spawn** | `Fn::spawn_confined` (child rights `NONE`) |
 | **`child_spec` restart** | `Fn::set_restart_policy` + host `ChildSpec`. `Fn::start_child` adds a sibling under the host supervisor that started this flow |
-| **process dictionary** | `Fn::dict_put` / `dict_get` / `dict_erase` — `Int` keys, scalar values only |
+| **process dictionary** | `Fn::dict_put` / `dict_get` / `dict_erase` — `Int` keys, scalars plus `Str` / `Bytes` |
 
 ## What BEAM has that Byteflow does not (yet)
 

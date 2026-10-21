@@ -10,11 +10,19 @@ use super::frame::Frame;
 use super::native::{check_native_gate, NativeGate, NativeTable};
 use super::result::VmResult;
 
-fn dict_scalar(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_)
-    )
+/// Bytes a dictionary slot owns. Scalars are free. `Str` / `Bytes` charge
+/// their length even when a register still holds the same `Arc`: the
+/// dictionary keeps the buffer after that register is overwritten.
+fn dict_owned_bytes(value: &Value) -> Result<usize, Fault> {
+    match value {
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) => Ok(0),
+        Value::Str(s) => Ok(s.len()),
+        Value::Bytes(b) => Ok(b.len()),
+        other => Err(Fault::TypeMismatch {
+            expected: "dict value (scalar, str, or bytes)",
+            got: other.type_name(),
+        }),
+    }
 }
 
 /// Hard limit on call nesting. Frames are heap-allocated, so
@@ -54,6 +62,10 @@ pub struct Vm {
     /// BEAM process dictionary. Allocated on first `DictPut` so the common
     /// flow that never touches the dict pays nothing.
     dict: Option<HashMap<i64, Value>>,
+    /// Heap bytes charged for `Str` / `Bytes` stored in [`Self::dict`].
+    /// Separate from frame charges: overwriting the source register must not
+    /// free a buffer the dictionary still owns.
+    dict_bytes: usize,
 }
 
 impl Vm {
@@ -99,6 +111,7 @@ impl Vm {
             memory: None,
             paranoid_jumps: false,
             dict: None,
+            dict_bytes: 0,
         })
     }
 
@@ -135,6 +148,10 @@ impl Vm {
             };
             per_frame.push(bytes);
         }
+        total = match total.checked_add(self.dict_bytes) {
+            Some(sum) => sum,
+            None => return Err(Fault::QuotaExceeded("heap charge does not fit".into())),
+        };
         charge_pair(&quota, self.memory.as_deref(), total)?;
         for (frame, bytes) in self.frames.iter_mut().zip(per_frame) {
             frame.set_heap_charge(bytes);
@@ -478,16 +495,44 @@ impl Vm {
         Ok(args)
     }
 
-    /// Same policy as `Sleep`: non-negative `Int` only; never silent clamp.
-    #[inline]
+    /// Move `old_bytes` of dictionary charge to `new_bytes`.
+    ///
+    /// The counter is not the register frame. `pop_frame` must not release it.
+    fn adjust_dict_quota(&mut self, old_bytes: usize, new_bytes: usize) -> Result<(), Fault> {
+        if new_bytes > old_bytes {
+            let delta = new_bytes - old_bytes;
+            if let Some(quota) = self.quota.as_ref() {
+                charge_pair(quota, self.memory.as_deref(), delta)?;
+            }
+            self.dict_bytes = match self.dict_bytes.checked_add(delta) {
+                Some(next) => next,
+                None => {
+                    if let Some(quota) = self.quota.as_ref() {
+                        release_pair(quota, self.memory.as_deref(), delta);
+                    }
+                    return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                }
+            };
+        } else if old_bytes > new_bytes {
+            let delta = old_bytes - new_bytes;
+            if let Some(quota) = self.quota.as_ref() {
+                release_pair(quota, self.memory.as_deref(), delta);
+            }
+            self.dict_bytes = self.dict_bytes.saturating_sub(delta);
+        }
+        Ok(())
+    }
+
+    /// Non-negative `Int` only. `Bool` is not a duration.
     fn duration_millis_from_reg(&self, reg: u8) -> Result<Duration, Fault> {
         let millis = self.get_reg(reg)?;
-        match millis.as_int() {
-            Some(ms) if ms >= 0 => Ok(Duration::from_millis(ms as u64)),
-            _ => Err(Fault::TypeMismatch {
+        match require_int(&millis) {
+            Ok(ms) if ms >= 0 => Ok(Duration::from_millis(ms as u64)),
+            Ok(_) => Err(Fault::TypeMismatch {
                 expected: "non-negative int",
-                got: millis.type_name(),
+                got: "negative-int",
             }),
+            Err(fault) => Err(fault),
         }
     }
 
@@ -820,12 +865,12 @@ impl Vm {
                 Opcode::DictPut => {
                     let key = trap!(self.int_from_reg(instr.b));
                     let value = trap!(self.get_reg(instr.c));
-                    if !dict_scalar(&value) {
-                        return VmResult::Trap(Fault::TypeMismatch {
-                            expected: "dict scalar (unit/bool/int/float)",
-                            got: "heap-or-cap",
-                        });
-                    }
+                    let new_bytes = trap!(dict_owned_bytes(&value));
+                    let old_bytes = match self.dict.as_ref().and_then(|d| d.get(&key)) {
+                        Some(prev) => trap!(dict_owned_bytes(prev)),
+                        None => 0,
+                    };
+                    trap!(self.adjust_dict_quota(old_bytes, new_bytes));
                     let dict = self.dict.get_or_insert_with(HashMap::new);
                     let old = match dict.insert(key, value) {
                         Some(prev) => prev,
@@ -847,6 +892,8 @@ impl Vm {
                         Some(v) => v,
                         None => Value::Unit,
                     };
+                    let old_bytes = trap!(dict_owned_bytes(&old));
+                    trap!(self.adjust_dict_quota(old_bytes, 0));
                     trap!(self.set_reg(instr.a, old));
                 }
                 Opcode::ReceiveMatchEq => {
@@ -1347,33 +1394,38 @@ fn tag_from_imm(imm: i32) -> Result<u16, Fault> {
     }
 }
 
+/// `Int` only. [`Value::as_int`] still coerces `Bool` for natives.
+fn require_int(v: &Value) -> Result<i64, Fault> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        other => Err(Fault::TypeMismatch {
+            expected: "int",
+            got: other.type_name(),
+        }),
+    }
+}
+
 fn tag_from_value(v: &Value) -> Result<u16, Fault> {
-    match v.as_int() {
-        Some(i) if (0..=i64::from(u16::MAX)).contains(&i) => Ok(i as u16),
-        Some(_) => Err(Fault::TypeMismatch {
+    match require_int(v) {
+        Ok(i) if (0..=i64::from(u16::MAX)).contains(&i) => Ok(i as u16),
+        Ok(_) => Err(Fault::TypeMismatch {
             expected: "tag u16",
             got: "int-out-of-range",
         }),
-        None => Err(Fault::TypeMismatch {
-            expected: "int",
-            got: v.type_name(),
-        }),
+        Err(fault) => Err(fault),
     }
 }
 
 /// Decode a `request_id` from a register (`Int` in `0..=i64::MAX`).
 #[inline]
 fn request_id_from_value(v: &Value) -> Result<u64, Fault> {
-    match v.as_int() {
-        Some(i) if i >= 0 => Ok(i as u64),
-        Some(_) => Err(Fault::TypeMismatch {
+    match require_int(v) {
+        Ok(i) if i >= 0 => Ok(i as u64),
+        Ok(_) => Err(Fault::TypeMismatch {
             expected: "request_id u64",
             got: "negative-int",
         }),
-        None => Err(Fault::TypeMismatch {
-            expected: "int",
-            got: v.type_name(),
-        }),
+        Err(fault) => Err(fault),
     }
 }
 
@@ -1759,6 +1811,303 @@ mod tests {
         let inflight = in_flight_hop_charge(&hop);
         assert_eq!(inflight + 200, hop.memory_size());
         assert!(inflight < hop.memory_size());
+    }
+
+    #[test]
+    fn sleep_rejects_a_bool() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let flag = b.const_(Value::Bool(true));
+        b.begin_function("main", 0, 1);
+        b.emit_load_const(0, flag);
+        b.emit_sleep(0);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "bool",
+            }) => Ok(()),
+            other => Err(format!("expected TypeMismatch(bool), got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn tag_and_request_id_reject_a_bool() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let flag = b.const_(Value::Bool(false));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, flag);
+        b.emit_receive_match(1, 0);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "bool",
+            }) => {}
+            other => return Err(format!("tag bool: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let flag = b.const_(Value::Bool(true));
+        b.begin_function("main", 0, 3);
+        b.emit_load_imm(0, 1);
+        b.emit_load_const(1, flag);
+        b.emit_receive_match_corr(2, 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "bool",
+            }) => Ok(()),
+            other => Err(format!("request_id bool: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn sleep_accepts_zero_and_rejects_a_float() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_load_imm(0, 0);
+        b.emit_sleep(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Sleep(d) if d.is_zero() => {}
+            other => return Err(format!("expected Sleep(0), got {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let n = b.const_(Value::Float(1.0));
+        b.begin_function("main", 0, 1);
+        b.emit_load_const(0, n);
+        b.emit_sleep(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "float",
+            }) => Ok(()),
+            other => Err(format!("expected float rejection, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_str_stays_charged_after_the_register_is_cleared() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let text = b.const_(Value::Str("x".repeat(100).into()));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, text);
+        b.emit_load_imm(1, 7);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(0, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 500, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(20) {
+            VmResult::Complete(_) => {
+                assert_eq!(quota.mem_used(), 100);
+                Ok(())
+            }
+            other => Err(format!("expected Complete, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_bytes_round_trip_charges_the_buffer() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let blob = b.const_(Value::bytes(vec![1u8; 60]));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, blob);
+        b.emit_load_imm(1, 4);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(0, 0);
+        b.emit_dict_get(0, 1);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 500, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(30) {
+            VmResult::Complete(Value::Bytes(buf)) if buf.len() == 60 => {
+                // Register and dictionary each hold the buffer.
+                assert_eq!(quota.mem_used(), 120);
+                Ok(())
+            }
+            other => Err(format!("expected bytes, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_put_rejects_a_second_copy_that_does_not_fit() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let text = b.const_(Value::Str("x".repeat(100).into()));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, text);
+        b.emit_load_imm(1, 1);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 150, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(20) {
+            VmResult::Trap(Fault::QuotaExceeded(_)) => {
+                assert_eq!(quota.mem_used(), 100);
+                Ok(())
+            }
+            other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_erase_moves_the_charge_back_to_the_register() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let text = b.const_(Value::Str("y".repeat(80).into()));
+        b.begin_function("main", 0, 4);
+        b.emit_load_const(0, text);
+        b.emit_load_imm(1, 3);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(0, 0);
+        b.emit_dict_erase(0, 1);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 1_000, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(30) {
+            VmResult::Complete(Value::Str(s)) if s.len() == 80 => {
+                assert_eq!(quota.mem_used(), 80);
+                Ok(())
+            }
+            other => Err(format!("expected the erased string, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_rejects_a_message_and_an_empty_string_is_free() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let hop = b.const_(Value::Message(crate::bytecode::Message::new(0, 1, 1, 1i64)));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, hop);
+        b.emit_load_imm(1, 1);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "dict value (scalar, str, or bytes)",
+                got: "message",
+            }) => {}
+            other => return Err(format!("message dict: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let empty = b.const_(Value::Str("".into()));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, empty);
+        b.emit_load_imm(1, 1);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 64, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(20) {
+            VmResult::Complete(_) => {
+                assert_eq!(quota.mem_used(), 0);
+                Ok(())
+            }
+            other => Err(format!("empty str: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dict_replace_releases_the_previous_string() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let first = b.const_(Value::Str("a".repeat(100).into()));
+        let second = b.const_(Value::Str("b".repeat(40).into()));
+        b.begin_function("main", 0, 4);
+        b.emit_load_const(0, first);
+        b.emit_load_imm(1, 1);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(0, 0);
+        b.emit_load_const(0, second);
+        b.emit_dict_put(2, 1, 0);
+        b.emit_load_imm(2, 0);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 1_000, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        match vm.run(40) {
+            VmResult::Complete(_) => {
+                // r0 still holds the 40-byte replacement; the dict holds the
+                // same buffer; the 100-byte previous value was overwritten.
+                assert_eq!(quota.mem_used(), 80);
+                Ok(())
+            }
+            other => Err(format!("expected Complete, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn dictionaries_are_isolated_between_vms() -> TestResult {
+        let mut writer = ChunkBuilder::new("t");
+        writer.begin_function("main", 0, 3);
+        writer.emit_load_imm(0, 9);
+        writer.emit_load_imm(1, 1);
+        writer.emit_dict_put(2, 1, 0);
+        writer.emit_halt();
+        let mut vm = Vm::new(Arc::new(writer.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(20) {
+            VmResult::Complete(_) => {}
+            other => return Err(format!("writer: {other:?}").into()),
+        }
+        let mut reader = ChunkBuilder::new("t");
+        reader.begin_function("main", 0, 2);
+        reader.emit_load_imm(1, 1);
+        reader.emit_dict_get(0, 1);
+        reader.emit_halt();
+        let mut other_vm = Vm::new(Arc::new(reader.finish()), NativeTable::empty(), 0, &[])?;
+        match other_vm.run(20) {
+            VmResult::Complete(Value::Unit) => Ok(()),
+            other => Err(format!("reader saw {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn tag_bounds_and_non_integers_stay_strict() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, i32::from(u16::MAX));
+        b.emit_receive_match(1, 0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Receive {
+                match_tag: Some(tag),
+                ..
+            } if tag == u16::MAX => {}
+            other => return Err(format!("u16::MAX tag: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, i32::from(u16::MAX) + 1);
+        b.emit_receive_match(1, 0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "tag u16",
+                got: "int-out-of-range",
+            }) => {}
+            other => return Err(format!("tag overflow: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        let text = b.const_(Value::str("nope"));
+        b.begin_function("main", 0, 1);
+        b.emit_load_const(0, text);
+        b.emit_sleep(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "str",
+            }) => Ok(()),
+            other => Err(format!("str sleep: {other:?}").into()),
+        }
     }
 
     #[test]

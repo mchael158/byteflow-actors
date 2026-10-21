@@ -102,6 +102,36 @@ impl Message {
     }
 }
 
+/// Shared stand-in so [`Drop`] can detach a payload without allocating.
+fn discarded_payload() -> Arc<Value> {
+    static EMPTY: std::sync::OnceLock<Arc<Value>> = std::sync::OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(Value::Unit)))
+}
+
+impl Drop for Message {
+    fn drop(&mut self) {
+        // Leaf payloads fall through to the field drop. A nested `Message`
+        // is a chain: the default drop recurses one frame per hop and
+        // overflowed the stack on a long chain (the same failure `push`
+        // used to hit while sizing).
+        if !matches!(self.payload.as_ref(), Value::Message(_)) {
+            return;
+        }
+        let payload = std::mem::replace(&mut self.payload, discarded_payload());
+        let mut current = match Arc::into_inner(payload) {
+            Some(value) => value,
+            None => return,
+        };
+        while let Value::Message(mut message) = current {
+            let inner = std::mem::replace(&mut message.payload, discarded_payload());
+            current = match Arc::into_inner(inner) {
+                Some(value) => value,
+                None => return,
+            };
+        }
+    }
+}
+
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -197,6 +227,11 @@ impl Value {
         }
     }
 
+    /// `Int`, or `Bool` as `0` / `1`.
+    ///
+    /// This coercion is for host natives ([`crate::vm::expect_int`]). Opcode
+    /// operands that require an integer (`Sleep`, tags, `request_id`) do not
+    /// use it — a `Bool` there is a type error.
     #[inline]
     pub fn as_int(&self) -> Option<i64> {
         match self {
@@ -253,25 +288,56 @@ impl Value {
     /// [`Value::Str`] / [`Value::Bytes`] / hop payloads are `Arc`-shared: the
     /// same buffer cloned into N mailboxes exists once in memory, but each
     /// mailbox is charged the full length. That over-counts on purpose.
+    ///
+    /// A `Message` chain deeper than [`super::MAX_VALUE_DEPTH`] does not
+    /// walk the tail. The returned size is [`usize::MAX`], which no mailbox
+    /// budget can admit.
     #[inline]
     pub fn memory_size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.heap_size()
+        match self.heap_size_limited() {
+            Some(heap) => std::mem::size_of::<Self>().saturating_add(heap),
+            None => usize::MAX,
+        }
     }
 
     /// Heap bytes owned (transitively) by this value, excluding the enum
     /// itself.
+    ///
+    /// One `Arc` inside this value is counted once. A chain past the decoder
+    /// ceiling yields [`usize::MAX`] instead of recursing.
     #[inline]
     pub fn heap_size(&self) -> usize {
-        match self {
-            Value::Str(s) => s.len(),
-            Value::Bytes(b) => b.len(),
-            Value::Message(m) => m.payload.memory_size(),
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Pid(_)
-            | Value::Cap(_) => 0,
+        self.heap_size_limited().unwrap_or(usize::MAX)
+    }
+
+    /// `None` when the `Message` chain is deeper than the decoder ceiling or
+    /// the byte sum does not fit in `usize`.
+    ///
+    /// Iterative on purpose: `Mailbox::push` asks for this size, and a
+    /// recursive walk of a long chain overflowed the caller's stack.
+    fn heap_size_limited(&self) -> Option<usize> {
+        let mut extra = 0usize;
+        let mut depth = 0u32;
+        let mut cursor = self;
+        loop {
+            match cursor {
+                Value::Message(message) => {
+                    if depth >= super::MAX_VALUE_DEPTH {
+                        return None;
+                    }
+                    extra = extra.checked_add(std::mem::size_of::<Value>())?;
+                    cursor = message.payload.as_ref();
+                    depth += 1;
+                }
+                Value::Str(s) => return extra.checked_add(s.len()),
+                Value::Bytes(b) => return extra.checked_add(b.len()),
+                Value::Unit
+                | Value::Bool(_)
+                | Value::Int(_)
+                | Value::Float(_)
+                | Value::Pid(_)
+                | Value::Cap(_) => return Some(extra),
+            }
         }
     }
 
@@ -406,6 +472,35 @@ mod tests {
     fn str_payload_is_charged_on_the_hop() {
         let hop = Value::Message(Message::new(1, 1, 1, Value::str("hello")));
         assert!(hop.heap_size() >= 5);
+    }
+
+    #[test]
+    fn nested_message_heap_counts_each_envelope_until_the_ceiling() {
+        let word = std::mem::size_of::<Value>();
+        let mut value = Value::str("hello");
+        for _ in 0..16 {
+            value = Value::Message(Message::new(0, 1, 1, value));
+        }
+        assert!(value.within_nesting_limit());
+        assert_eq!(value.heap_size(), 16 * word + 5);
+        assert_eq!(value.memory_size(), word + 16 * word + 5);
+        let blob = Value::Message(Message::new(0, 1, 1, Value::bytes(vec![0u8; 50_000])));
+        assert_eq!(blob.heap_size(), word + 50_000);
+        value = Value::Message(Message::new(0, 1, 1, value));
+        assert!(!value.within_nesting_limit());
+        assert_eq!(value.heap_size(), usize::MAX);
+        assert_eq!(value.memory_size(), usize::MAX);
+    }
+
+    #[test]
+    fn a_long_message_chain_sizes_without_recursing_off_the_stack() {
+        let mut value = Value::Int(1);
+        for _ in 0..10_000 {
+            value = Value::Message(Message::new(0, 1, 1, value));
+        }
+        assert!(!value.within_nesting_limit());
+        assert_eq!(value.heap_size(), usize::MAX);
+        assert_eq!(value.memory_size(), usize::MAX);
     }
 
     #[test]

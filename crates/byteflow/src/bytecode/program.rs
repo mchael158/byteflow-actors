@@ -548,7 +548,8 @@ impl<'a> Fn<'a> {
     }
 
     /// Process dictionary `put/2`. Returns the previous value or `Unit`.
-    /// Value must be a scalar (Unit, Bool, Int, Float).
+    /// The value is a scalar, `Str`, or `Bytes`. Heap values stay charged
+    /// after the source register is overwritten.
     pub fn dict_put(&mut self, key: Reg, value: Reg) -> Reg {
         let dst = self.local();
         self.b.emit_dict_put(dst.0, key.0, value.0);

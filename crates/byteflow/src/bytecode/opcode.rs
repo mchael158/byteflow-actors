@@ -212,8 +212,9 @@ pub enum Opcode {
     /// Append-only (`0x6A`).
     ExitSignal = 0x6A,
     /// `DictPut ra, rb, rc` → process dictionary: `r[a] = old`, key `r[b]`
-    /// (`Int`), value `r[c]` (scalar: Unit/Bool/Int/Float). Missing old → `Unit`.
-    /// Append-only (`0x6B`).
+    /// (`Int`), value `r[c]` (scalar, `Str`, or `Bytes`). `Str` / `Bytes`
+    /// are charged on the flow quota for as long as the dictionary holds
+    /// them. Missing old → `Unit`. Append-only (`0x6B`).
     DictPut = 0x6B,
     /// `DictGet ra, rb` → `r[a] = dict[r[b]]` or `Unit`. Append-only (`0x6C`).
     DictGet = 0x6C,

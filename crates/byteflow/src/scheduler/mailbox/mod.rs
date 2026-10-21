@@ -357,6 +357,13 @@ impl Mailbox {
     ///
     /// Mutex poison → [`RuntimeError`] (fail-closed).
     pub fn push(&self, value: Value) -> Result<Result<Delivery, MailboxFull>, RuntimeError> {
+        // Reject before matching or sizing. Both used to recurse through the
+        // payload, so a long `Message` chain overflowed this thread.
+        if !value.within_nesting_limit() {
+            return Ok(Err(MailboxFull {
+                reason: MailboxFullReason::ByteLimit,
+            }));
+        }
         let mut inner = sync_lock::lock(&self.inner, "Mailbox::push")?;
         if inner.closed {
             return Ok(Err(MailboxFull {
@@ -679,6 +686,23 @@ mod tests {
     use std::sync::Arc;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn a_long_message_chain_is_rejected_without_blowing_the_stack() -> TestResult {
+        let mb = Mailbox::new();
+        let mut value = Value::Int(1);
+        for _ in 0..10_000 {
+            value = Value::Message(Message::new(0, 1, 1, value));
+        }
+        match mb.push(value)? {
+            Ok(_) => Err("a chain past the decoder ceiling must not be queued".into()),
+            Err(full) => {
+                assert_eq!(full.reason(), MailboxFullReason::ByteLimit);
+                assert!(mb.try_pop()?.is_none());
+                Ok(())
+            }
+        }
+    }
 
     fn dummy_flow() -> Result<Box<Flow>, Box<dyn std::error::Error>> {
         let mut b = ChunkBuilder::new("mb");

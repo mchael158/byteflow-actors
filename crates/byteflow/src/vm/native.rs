@@ -235,16 +235,18 @@ pub fn expect_message(
 
 /// Coerce `args[index]` to `u64` from `Int` (≥ 0) or `Pid`.
 ///
-/// Used by `make_msg` for unsigned envelope fields (`request_id`, `tag`);
-/// accepts a non-negative `Int` or a `Pid` without an extra conversion.
-/// Negative ints are rejected — those fields are unsigned on the wire.
+/// Used by `make_msg` for unsigned envelope fields (`request_id`, `tag`).
+/// `Bool` is not an integer here. Negative ints are rejected — those fields
+/// are unsigned on the wire.
 pub fn expect_u64(args: &[Value], index: usize, fn_name: &str) -> Result<u64, Fault> {
     let v = expect_arg(args, index, fn_name)?;
     if let Some(p) = v.as_pid() {
         return Ok(p);
     }
-    if let Some(i) = v.as_int().filter(|&n| n >= 0) {
-        return Ok(i as u64);
+    if let Value::Int(i) = v {
+        if *i >= 0 {
+            return Ok(*i as u64);
+        }
     }
     Err(Fault::NativeError(format!(
         "{fn_name}: argument {index} is not a non-negative int/pid (got {})",
@@ -347,6 +349,18 @@ pub fn check_native_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expect_u64_rejects_bool_and_keeps_non_negative_ints() {
+        let flag = [Value::Bool(true)];
+        assert!(expect_u64(&flag, 0, "make_msg").is_err());
+        let negative = [Value::Int(-1)];
+        assert!(expect_u64(&negative, 0, "make_msg").is_err());
+        let zero = [Value::Int(0)];
+        assert_eq!(expect_u64(&zero, 0, "make_msg").ok(), Some(0));
+        let pid = [Value::Pid(7)];
+        assert_eq!(expect_u64(&pid, 0, "make_msg").ok(), Some(7));
+    }
 
     #[test]
     fn register_at_leaves_holes_as_none() -> Result<(), Box<dyn std::error::Error>> {

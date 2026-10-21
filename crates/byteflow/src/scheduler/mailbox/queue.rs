@@ -71,11 +71,16 @@ impl MailboxQueue {
     /// `Reject` would accept `value` right now. On `Err` the value is
     /// returned, so a caller can park it instead of dropping the hop.
     pub(crate) fn try_enqueue_reject(&mut self, value: Value) -> Result<(), Value> {
+        if !value.within_nesting_limit() {
+            return Err(value);
+        }
         let cost = value.memory_size();
         if self.is_full() || self.would_exceed_bytes(cost) || !self.reserve_for_push(self.limit) {
             return Err(value);
         }
-        self.bytes = self.bytes.saturating_add(cost);
+        if !self.charge_bytes(cost) {
+            return Err(value);
+        }
         self.push_back(value);
         Ok(())
     }
@@ -87,7 +92,20 @@ impl MailboxQueue {
 
     #[inline]
     fn would_exceed_bytes(&self, cost: usize) -> bool {
-        self.bytes.saturating_add(cost) > self.byte_limit
+        match self.bytes.checked_add(cost) {
+            Some(next) => next > self.byte_limit,
+            None => true,
+        }
+    }
+
+    fn charge_bytes(&mut self, cost: usize) -> bool {
+        match self.bytes.checked_add(cost) {
+            Some(next) => {
+                self.bytes = next;
+                true
+            }
+            None => false,
+        }
     }
 
     #[inline]
@@ -185,12 +203,17 @@ impl MailboxQueue {
         value: Value,
         policy: OverflowPolicy,
     ) -> Result<EnqueueEffect, MailboxFullReason> {
+        if !value.within_nesting_limit() {
+            return Err(MailboxFullReason::ByteLimit);
+        }
         let cost = value.memory_size();
         if !self.is_full() && !self.would_exceed_bytes(cost) {
             if !self.reserve_for_push(self.limit) {
                 return Err(MailboxFullReason::MessageLimit);
             }
-            self.bytes = self.bytes.saturating_add(cost);
+            if !self.charge_bytes(cost) {
+                return Err(MailboxFullReason::ByteLimit);
+            }
             self.push_back(value);
             return Ok(EnqueueEffect::Enqueued);
         }
@@ -221,7 +244,9 @@ impl MailboxQueue {
                 if !self.reserve_for_push(self.limit) {
                     return Err(MailboxFullReason::MessageLimit);
                 }
-                self.bytes = self.bytes.saturating_add(cost);
+                if !self.charge_bytes(cost) {
+                    return Err(MailboxFullReason::ByteLimit);
+                }
                 self.push_back(value);
                 Ok(if dropped {
                     EnqueueEffect::DroppedOldest
@@ -237,6 +262,9 @@ impl MailboxQueue {
     /// A single hop larger than the whole budget still over-charges —
     /// losing DOWN is worse.
     pub(crate) fn force_push(&mut self, value: Value) {
+        if !value.within_nesting_limit() {
+            return;
+        }
         let cost = value.memory_size();
         while (self.is_full() || self.would_exceed_bytes(cost)) && !self.is_empty() {
             if let Some(old) = self.pop_front() {
@@ -245,7 +273,9 @@ impl MailboxQueue {
         }
         let cap = self.limit.max(self.len.saturating_add(1));
         let _ = self.reserve_for_push(cap);
-        self.bytes = self.bytes.saturating_add(cost);
+        if !self.charge_bytes(cost) {
+            return;
+        }
         self.push_back(value);
     }
 
