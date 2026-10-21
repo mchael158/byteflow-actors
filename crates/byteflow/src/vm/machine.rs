@@ -119,8 +119,20 @@ impl Vm {
         let mut per_frame: Vec<usize> = Vec::with_capacity(self.frames.len());
         let mut total = 0usize;
         for frame in &self.frames {
-            let bytes: usize = frame.registers().iter().map(heap_charge_of).sum();
-            total = total.saturating_add(bytes);
+            let mut bytes = 0usize;
+            for value in frame.registers() {
+                let part = heap_charge_of(value)?;
+                bytes = match bytes.checked_add(part) {
+                    Some(sum) => sum,
+                    None => {
+                        return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                    }
+                };
+            }
+            total = match total.checked_add(bytes) {
+                Some(sum) => sum,
+                None => return Err(Fault::QuotaExceeded("heap charge does not fit".into())),
+            };
             per_frame.push(bytes);
         }
         charge_pair(&quota, self.memory.as_deref(), total)?;
@@ -276,8 +288,8 @@ impl Vm {
             .ok_or(Fault::RegisterOutOfRange { reg, frame_size })?;
 
         // `old` is `&Value`; keep both sides as references for the helper.
-        let old_bytes = heap_charge_of(old);
-        let new_bytes = heap_charge_of(&value);
+        let old_bytes = heap_charge_of(old)?;
+        let new_bytes = heap_charge_of(&value)?;
 
         match (&value, old) {
             (Value::Str(s), Value::Str(prev)) if Arc::ptr_eq(s, prev) => return Ok(()),
@@ -295,7 +307,13 @@ impl Vm {
 
         let frame = self.current()?;
         if new_bytes > old_bytes {
-            frame.add_heap_charge(new_bytes - old_bytes);
+            let delta = new_bytes - old_bytes;
+            if !frame.try_add_heap_charge(delta) {
+                if let Some(quota) = self.quota.as_ref() {
+                    release_pair(quota, self.memory.as_deref(), delta);
+                }
+                return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+            }
         } else if old_bytes > new_bytes {
             frame.sub_heap_charge(old_bytes - new_bytes);
         }
@@ -1102,6 +1120,15 @@ impl Vm {
     /// return value on the outermost `Complete` path, which stays charged
     /// until flow finalize — matching prior MemoryBudget semantics).
     fn pop_frame(&mut self, value: Value) -> Result<Option<VmResult>, Fault> {
+        let escaping = self
+            .frames
+            .last()
+            .ok_or(Fault::Invariant("pop_frame on empty stack"))?
+            .dest_reg()
+            .is_none();
+        // Charge the escaping value before the pop, so a chain past the
+        // decoder ceiling fails without dropping the frame first.
+        let keep = if escaping { heap_charge_of(&value)? } else { 0 };
         let finished = self
             .frames
             .pop()
@@ -1116,7 +1143,6 @@ impl Vm {
             }
             None => {
                 if let Some(quota) = self.quota.as_ref() {
-                    let keep = heap_charge_of(&value);
                     let release = finished.heap_charge().saturating_sub(keep);
                     release_pair(quota, self.memory.as_deref(), release);
                 }
@@ -1136,7 +1162,7 @@ impl Vm {
         let frame_size = frame.registers().len() as u8;
         let mut charged = 0usize;
         for (i, a) in args.into_iter().enumerate().take(arity as usize) {
-            let bytes = heap_charge_of(&a);
+            let bytes = heap_charge_of(&a)?;
             if bytes > 0 {
                 if let Some(quota) = self.quota.as_ref() {
                     if let Err(e) = charge_pair(quota, self.memory.as_deref(), bytes) {
@@ -1147,8 +1173,22 @@ impl Vm {
                         return Err(e);
                     }
                 }
-                charged = charged.saturating_add(bytes);
-                frame.add_heap_charge(bytes);
+                let Some(next) = charged.checked_add(bytes) else {
+                    if let Some(quota) = self.quota.as_ref() {
+                        release_pair(quota, self.memory.as_deref(), charged);
+                        release_pair(quota, self.memory.as_deref(), bytes);
+                    }
+                    frame.set_heap_charge(0);
+                    return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                };
+                if !frame.try_add_heap_charge(bytes) {
+                    if let Some(quota) = self.quota.as_ref() {
+                        release_pair(quota, self.memory.as_deref(), next);
+                    }
+                    frame.set_heap_charge(0);
+                    return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                }
+                charged = next;
             }
             match frame.registers_mut().get_mut(i) {
                 Some(slot) => *slot = a,
@@ -1213,13 +1253,42 @@ fn reg_at(base: u8, offset: u16) -> Result<u8, Fault> {
     }
 }
 
-/// Bytes charged for a register-resident heap value (`Str` / `Bytes` len).
+/// Bytes charged for a register-resident heap value.
+///
+/// `Str` / `Bytes` charge their length. A [`Value::Message`] charges the
+/// payload, down to the same ceiling as the `.bf` decoder. Stopping at that
+/// ceiling and still storing the value would leave the tail unpaid.
 #[inline]
-fn heap_charge_of(value: &Value) -> usize {
-    match value {
-        Value::Str(s) => s.len(),
-        Value::Bytes(b) => b.len(),
-        _ => 0,
+fn heap_charge_of(value: &Value) -> Result<usize, Fault> {
+    fn walk(value: &Value, depth: u32) -> Result<usize, Fault> {
+        if depth > crate::bytecode::MAX_VALUE_DEPTH {
+            return Err(Fault::QuotaExceeded("value nesting exceeds limit".into()));
+        }
+        match value {
+            Value::Str(s) => Ok(s.len()),
+            Value::Bytes(b) => Ok(b.len()),
+            Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Pid(_)
+            | Value::Cap(_) => Ok(0),
+        }
+    }
+    walk(value, 0)
+}
+
+/// Bytes to reserve on the sender quota while `value` is in flight.
+///
+/// The hop is still in a register, and that register already pays for the
+/// `Str` / `Bytes` inside it. Charging [`Value::memory_size`] on top of that
+/// counts the same buffers twice and rejects a send the quota can hold.
+#[inline]
+pub(crate) fn in_flight_hop_charge(value: &Value) -> usize {
+    match heap_charge_of(value) {
+        Ok(held) => value.memory_size().saturating_sub(held),
+        Err(_) => value.memory_size(),
     }
 }
 
@@ -1610,6 +1679,86 @@ mod tests {
             }
             other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn message_payload_counts_against_the_heap_quota() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 64, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        let hop = Value::Message(crate::bytecode::Message::new(
+            0,
+            1,
+            1,
+            Value::str("x".repeat(200)),
+        ));
+        match vm.set_register(0, hop) {
+            Err(Fault::QuotaExceeded(_)) => {
+                assert_eq!(quota.mem_used(), 0);
+                Ok(())
+            }
+            other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn overwriting_a_message_releases_the_payload_charge() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 10_000, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        vm.set_register(
+            0,
+            Value::Message(crate::bytecode::Message::new(
+                0,
+                1,
+                1,
+                Value::str("x".repeat(200)),
+            )),
+        )?;
+        assert_eq!(quota.mem_used(), 200);
+        vm.set_register(0, Value::Int(1))?;
+        assert_eq!(quota.mem_used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_message_past_the_decoder_ceiling_is_not_stored() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        let quota = Arc::new(FlowQuota::new(10_000, 10_000, 1, 1, 1, 1));
+        vm.set_quota(Arc::clone(&quota))?;
+        let mut value = Value::str("x".repeat(200));
+        for _ in 0..17 {
+            value = Value::Message(crate::bytecode::Message::new(0, 1, 1, value));
+        }
+        match vm.set_register(0, value) {
+            Err(Fault::QuotaExceeded(_)) => {
+                assert_eq!(quota.mem_used(), 0);
+                Ok(())
+            }
+            other => Err(format!("expected QuotaExceeded, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn in_flight_hop_does_not_recount_the_held_payload() {
+        let hop = Value::Message(crate::bytecode::Message::new(
+            0,
+            1,
+            1,
+            Value::str("x".repeat(200)),
+        ));
+        let inflight = in_flight_hop_charge(&hop);
+        assert_eq!(inflight + 200, hop.memory_size());
+        assert!(inflight < hop.memory_size());
     }
 
     #[test]

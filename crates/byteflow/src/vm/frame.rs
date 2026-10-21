@@ -75,9 +75,17 @@ impl Frame {
         self.heap_charge = bytes;
     }
 
+    /// `false` when `delta` does not fit. The counter stays unchanged so a
+    /// later release cannot free fewer bytes than the quota was charged.
     #[inline]
-    pub(crate) fn add_heap_charge(&mut self, delta: usize) {
-        self.heap_charge = self.heap_charge.saturating_add(delta);
+    pub(crate) fn try_add_heap_charge(&mut self, delta: usize) -> bool {
+        match self.heap_charge.checked_add(delta) {
+            Some(next) => {
+                self.heap_charge = next;
+                true
+            }
+            None => false,
+        }
     }
 
     #[inline]

@@ -1457,6 +1457,61 @@ mod tests {
     }
 
     #[test]
+    fn send_does_not_charge_a_held_payload_twice() -> Result<(), Box<dyn std::error::Error>> {
+        let payload_len = 200usize;
+        let hop = Value::Message(Message::new(0, 1, 1, Value::str("x".repeat(payload_len))));
+        let inflight = crate::vm::in_flight_hop_charge(&hop);
+        // `hop_fresh` keeps the source string and a copy in the make_msg
+        // window, then the message itself. Peak is those three. After the
+        // source is overwritten, the window copy and the message remain.
+        let peak = payload_len * 3;
+        let held_at_send = payload_len * 2;
+        let limit = peak.max(held_at_send + inflight);
+        assert!(
+            held_at_send + hop.memory_size() > limit,
+            "limit must reject a send that charges the payload a second time"
+        );
+
+        let mut p = Program::new("send-charge");
+        let child = p.function("child", 0, |f| {
+            let _msg = f.receive();
+            let one = f.load_i32(1);
+            f.return_(one);
+        });
+        p.function("main", 0, |f| {
+            let to = f.spawn(child, &[]);
+            let payload = f.load_str("x".repeat(payload_len));
+            let msg = f.hop_fresh(1, payload);
+            let zero = f.load_i32(0);
+            f.mov(payload, zero);
+            f.send(to, msg);
+            let one = f.load_i32(1);
+            f.return_(one);
+        });
+        let mut quota = QuotaConfig::permissive();
+        quota.mem_limit = limit;
+        let rt = Runtime::with_natives_and_config(
+            p.build(),
+            std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 10_000,
+                mailbox: crate::MailboxConfig::DEFAULT,
+                quota,
+                ..Default::default()
+            },
+        )?;
+        let main = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(main, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(1))),
+            "send of a held payload must fit, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn host_send_stamps_sender_zero() -> Result<(), Box<dyn std::error::Error>> {
         let mut p = Program::new("host-send-sender");
         p.function("main", 0, |f| {

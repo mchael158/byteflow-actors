@@ -19,6 +19,7 @@ mod native;
 mod result;
 
 pub use fault::{Fault, NativeCallError};
+pub(crate) use machine::in_flight_hop_charge;
 pub use machine::{Vm, MAX_CALL_DEPTH};
 pub use native::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

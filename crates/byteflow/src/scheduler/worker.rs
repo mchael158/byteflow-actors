@@ -557,7 +557,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                             return;
                         }
                     };
-                let hop_cost = stamped.memory_size();
+                let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
                 if let Err(e) = flow.quota.alloc(hop_cost) {
                     finish_failed(shared, *flow, e.to_string());
                     return;
@@ -697,7 +697,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 };
                 let request_id = stamped_msg.request_id;
                 let stamped = Value::Message(stamped_msg);
-                let hop_cost = stamped.memory_size();
+                let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
                 if let Err(e) = flow.quota.alloc(hop_cost) {
                     finish_failed(shared, *flow, e.to_string());
                     return;
@@ -1552,7 +1552,7 @@ fn park_waiting_send(
     pending: PendingSend,
 ) -> Option<Box<Flow>> {
     flow.pending_send = Some(pending);
-    flow.hop_charge = stamped.memory_size();
+    flow.hop_charge = crate::vm::in_flight_hop_charge(&stamped);
     if let Err(e) = shared.waiting_send_at.insert(flow.id, target) {
         report_fault(e);
         finalize_flow(

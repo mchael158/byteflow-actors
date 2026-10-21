@@ -107,7 +107,9 @@ pub enum Fault {
     /// Broken VM invariant (e.g. empty frame stack while running). Category D
     /// in the error model — surfaced as a Flow fault, never as `unwrap`.
     Invariant(&'static str),
-    /// Per-flow heap quota refused a `Str` / `Bytes` register write.
+    /// Per-flow heap quota refused a register write (`Str` / `Bytes`, including
+    /// those nested in a `Message`), or the value is nested past the decoder
+    /// ceiling and cannot be charged.
     QuotaExceeded(String),
     /// Relative `Jump` / `Branch` target outside the code.
     ///
