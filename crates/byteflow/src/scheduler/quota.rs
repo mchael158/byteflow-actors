@@ -293,12 +293,41 @@ impl FlowQuota {
     }
 
     /// Reachable only after `check_admin` against `CapTarget::Scheduler`.
+    ///
+    /// A non-positive credit is ignored. A credit that does not fit stops at
+    /// `i64::MAX`: wrapping would make `remaining_cpu` look exhausted and
+    /// kill the flow the admin just tried to extend.
     pub fn top_up_cpu(&self, extra: i64) {
-        self.cpu_budget.fetch_add(extra, Ordering::Relaxed);
+        if extra <= 0 {
+            return;
+        }
+        loop {
+            let cur = self.cpu_budget.load(Ordering::Relaxed);
+            let new = cur.saturating_add(extra);
+            if self
+                .cpu_budget
+                .compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
+    /// Raise the heap ceiling. A sum that does not fit stops at `usize::MAX`
+    /// instead of wrapping the limit down to a handful of bytes.
     pub fn top_up_mem(&self, extra: usize) {
-        self.mem_limit.fetch_add(extra, Ordering::Relaxed);
+        loop {
+            let cur = self.mem_limit.load(Ordering::Relaxed);
+            let new = cur.saturating_add(extra);
+            if self
+                .mem_limit
+                .compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     pub fn top_up_send(&self, extra: i64) {
@@ -388,6 +417,16 @@ mod tests {
         assert!(s.mem_limit < p.mem_limit);
         assert!(s.send_burst < p.send_burst);
         assert_eq!(QuotaConfig::default().cpu_budget, p.cpu_budget);
+    }
+
+    #[test]
+    fn top_up_does_not_wrap_a_budget_that_is_already_at_the_top() {
+        let q = FlowQuota::new(i64::MAX, usize::MAX, 1, 1, 1, 1);
+        q.top_up_cpu(5);
+        q.top_up_cpu(-5);
+        q.top_up_mem(1);
+        assert_eq!(q.remaining_cpu(), i64::MAX);
+        assert!(q.alloc(1).is_ok());
     }
 
     #[test]
