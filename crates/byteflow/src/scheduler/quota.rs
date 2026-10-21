@@ -208,8 +208,16 @@ impl FlowQuota {
     pub fn alloc(&self, bytes: usize) -> Result<(), QuotaError> {
         loop {
             let cur = self.mem_used.load(Ordering::Relaxed);
-            let next = cur.saturating_add(bytes);
             let limit = self.mem_limit.load(Ordering::Relaxed);
+            // `saturating_add` would record a smaller charge than `bytes`
+            // when the sum overflows, and then accept it if the limit is
+            // `usize::MAX`. Fail closed: the bytes were not accounted for.
+            let Some(next) = cur.checked_add(bytes) else {
+                return Err(QuotaError::MemoryExhausted {
+                    requested: bytes,
+                    limit,
+                });
+            };
             if next > limit {
                 return Err(QuotaError::MemoryExhausted {
                     requested: bytes,
@@ -334,6 +342,14 @@ mod tests {
         assert!(q.alloc(60).is_err());
         q.free(60);
         assert!(q.alloc(60).is_ok());
+    }
+
+    #[test]
+    fn alloc_rejects_a_charge_that_would_overflow_the_counter() {
+        let q = FlowQuota::new(1000, usize::MAX, 1, 1, 1, 1);
+        assert!(q.alloc(usize::MAX - 10).is_ok());
+        assert!(q.alloc(20).is_err());
+        assert_eq!(q.mem_used(), usize::MAX - 10);
     }
 
     #[test]
