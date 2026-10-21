@@ -76,15 +76,40 @@ pub struct TimerWheel {
     shutdown: Mutex<bool>,
 }
 
-/// `Instant + Duration` can overflow (far-future delays). Never panic.
+/// `Instant + Duration` can overflow (far-future delays). Never panic, and
+/// never turn a delay that does not fit into a deadline of `now` — that
+/// wakes the flow immediately. The old 30-year clamp did the same kind of
+/// shortening for every `Duration` past that mark.
 fn deadline_from_now(delay: Duration) -> Instant {
     let now = Instant::now();
     match now.checked_add(delay) {
         Some(deadline) => deadline,
-        None => match now.checked_add(Duration::from_secs(60 * 60 * 24 * 365 * 30)) {
-            Some(deadline) => deadline,
-            None => now,
-        },
+        None => farthest_deadline(now),
+    }
+}
+
+/// Latest `Instant` that can still be added onto `now`.
+fn farthest_deadline(now: Instant) -> Instant {
+    let mut lo = 0u64;
+    let mut hi = u64::MAX;
+    let mut best = 0u64;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if now.checked_add(Duration::from_nanos(mid)).is_some() {
+            best = mid;
+            if mid == u64::MAX {
+                break;
+            }
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    match now.checked_add(Duration::from_nanos(best)) {
+        Some(deadline) => deadline,
+        None => now,
     }
 }
 
@@ -286,5 +311,26 @@ impl TimerWheel {
             Ok(_guard) => shared.notify.1.notify_all(),
             Err(e) => report_fault(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_delay_that_does_not_fit_stays_far_in_the_future() {
+        let before = Instant::now();
+        let deadline = deadline_from_now(Duration::MAX);
+        let thirty_years = Duration::from_secs(60 * 60 * 24 * 365 * 30);
+        let capped = match before.checked_add(thirty_years) {
+            Some(t) => t,
+            None => before,
+        };
+        assert!(deadline > Instant::now());
+        assert!(
+            deadline > capped,
+            "a delay past 30 years must not collapse to that clamp"
+        );
     }
 }
