@@ -5,10 +5,12 @@
 //! sender here and queues the hop on [`DistributionBridge`]; the embedder
 //! drains that queue and delivers it however it wants.
 //!
-//! Payload `Cap` tokens are not re-granted to the remote node. They stay
-//! opaque bytes the host must not treat as local authority on another
-//! process. `reply_cap` is [`crate::CapId::NONE`] — there is no local flow
-//! to mint a reply address for.
+//! Payload `Cap` tokens do not leave the node. A live cap, including one
+//! nested in a list or in another hop's `reply_cap`, fails the send before
+//! a send-quota token is spent. A nested envelope whose `sender` is still
+//! `0` is stamped with this flow. `reply_cap` on the outbound hop itself
+//! is [`crate::CapId::NONE`] — there is no local flow to mint a reply
+//! address for.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -111,13 +113,25 @@ pub(crate) fn deliver(
     let Some(mut msg) = message.as_message().cloned() else {
         return Err("send_remote: value is not a hop".into());
     };
+    if !msg.payload.within_nesting_limit() {
+        return Err("send_remote: payload too nested".into());
+    }
+    if msg.payload.contains_live_cap(0) {
+        return Err("send_remote: payload contains a local capability".into());
+    }
     if let Err(e) = flow.quota.check_send() {
         return Err(e.to_string());
     }
     if msg.request_id == 0 {
         msg.request_id = flow.vm.fresh_request_id();
     }
-    let stamped = stamp(msg, flow.id);
+    let Some(payload) = msg
+        .payload
+        .stamp_unset_envelopes(0, flow.id.as_u64(), &mut || flow.vm.fresh_request_id())
+    else {
+        return Err("send_remote: payload too nested".into());
+    };
+    let stamped = stamp(msg.with_payload(payload), flow.id);
     bridge.push(OutboundHop {
         sender: flow.id,
         node,
@@ -173,6 +187,83 @@ mod tests {
         }
         if !matches!(hop.message.payload.as_ref(), Value::Int(41)) {
             return Err(format!("payload {:?}", hop.message.payload).into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_cap_in_the_payload_does_not_leave_the_node() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bridge = DistributionBridge::new();
+        let mut program = Program::new("remote-cap");
+        program.function("main", 0, |f| {
+            let node = f.load_i32(7);
+            let name = f.load_str("svc");
+            let me = f.self_cap();
+            let msg = f.hop_fresh(3, me);
+            f.send_remote(node, name, msg);
+            f.return_(node);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                distribution: Some(Arc::clone(&bridge)),
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Failed(reason) if reason.contains("local capability") => {}
+            other => return Err(format!("expected a refused remote cap, got {other:?}").into()),
+        }
+        if bridge.try_recv()?.is_some() {
+            return Err("bridge accepted a hop that carried a capability".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remote_nested_envelope_is_stamped_with_the_flow() -> Result<(), Box<dyn std::error::Error>> {
+        let bridge = DistributionBridge::new();
+        let mut program = Program::new("remote-nested");
+        program.function("main", 0, |f| {
+            let node = f.load_i32(7);
+            let name = f.load_str("svc");
+            let body = f.load_i32(1);
+            let inner = f.hop_fresh(1, body);
+            let outer = f.hop_fresh(2, inner);
+            f.send_remote(node, name, outer);
+            f.return_(node);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                distribution: Some(Arc::clone(&bridge)),
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        if !matches!(outcome, FlowOutcome::Completed(Value::Int(7))) {
+            return Err(format!("remote nested send failed: {outcome:?}").into());
+        }
+        let hop = match bridge.recv_timeout(Duration::from_secs(1))? {
+            Some(hop) => hop,
+            None => return Err("bridge empty".into()),
+        };
+        let Some(inner) = hop.message.payload.as_message() else {
+            return Err(format!("payload {:?}", hop.message.payload).into());
+        };
+        if inner.sender != hop.sender.as_u64() {
+            return Err(format!("nested sender {} hop {}", inner.sender, hop.sender).into());
+        }
+        if !inner.reply_cap.is_none() {
+            return Err("remote nested hop minted a local reply cap".into());
         }
         Ok(())
     }

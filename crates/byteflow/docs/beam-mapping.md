@@ -29,12 +29,12 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `spawn(fun)` | `Fn::spawn(fn, &[args])` | `Spawn` → Cap |
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
-| selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` | Tag, payload wire-tag, or tag + `Int` payload — not arbitrary term patterns |
+| selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` / `Fn::receive_match_value(tag, value)` | Tag, payload wire-tag (`0..=9`), tag + `Int`, or tag + any `Value`. No guards, tuples, or maps |
 | `receive … after T` | `Fn::receive_match_imm_timeout(tag, ms)` / `Fn::receive_timeout` | Match + timeout writes `Unit` (hops stay queued) |
 | `is_process_alive(Pid)` | `Fn::is_alive(cap)` | Held Cap → live flow? `false` if revoked / not held |
 | `exit(Pid, Reason)` | `Fn::exit_signal(cap, reason)` | Needs `LINK`. `Normal` ignored. `Killed` untrappable |
-    | process dictionary `put` / `get` / `erase` | `Fn::dict_put` / `dict_get` / `dict_erase` | Per-flow dict, `Int` keys, scalars plus `Str` / `Bytes` |
-| `supervisor:start_child` | `Fn::start_child(fn, policy)` | Caller must already be a supervised child |
+| process dictionary `put` / `get` / `erase` | `Fn::dict_put` / `dict_get` / `dict_erase` | Per-flow dict, `Int` keys, scalars plus `Str` / `Bytes` |
+| `supervisor:start_child` | `Fn::start_supervisor(strategy)` then `Fn::start_child(fn, policy)` | `StartSupervisor` (`0x72`) owns the strategy. Without it, `StartChild` uses the host supervisor that started the caller |
 | `gen_server:call` | `Fn::ask(cap, hop)` / `Fn::ask_timeout` | `Ask` / `AskTimeout` |
 | `gen_server:cast` | `Fn::send(cap, hop)` | fire-and-forget |
 | host async I/O (no BEAM equiv.) | `Fn::host_await(op, args)` + [`HostAwaitBridge`](../src/scheduler/host_await.rs) | `HostAwait` — see [`host-await.md`](host-await.md) |
@@ -50,8 +50,9 @@ BEAM messages are arbitrary terms. Byteflow **Atomic Hop** is a fixed envelope:
 Message { sender, reply_cap, request_id, tag, payload }
 ```
 
-- `payload` is a nested [`Value`](../src/bytecode/value.rs) (ABI v5) — scalars,
-  `Str` / `Bytes`, or another hop.
+- `payload` is a nested [`Value`](../src/bytecode/value.rs) — scalars,
+  `Str` / `Bytes`, a `List` of at most 32 elements (ABI v6), or another hop.
+  A module with no list constant stays on ABI v5.
 - `sender` is **authenticated by the runtime** on bytecode `Send` / `Ask`.
   `make_msg` has no sender operand (3-arg: request_id, tag, payload). A
   leftover 4-arg encoding is ignored — see
@@ -108,7 +109,7 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 | **`process_flag(trap_exit, …)`** | `Fn::set_trap_exit` / `Runtime::set_trap_exit` → `TAG_SYS_EXIT` hop (**done**) |
 | **capability pass** | `Fn::delegate` / `Cap::attenuate` (AND of rights + native mask) |
 | **confined spawn** | `Fn::spawn_confined` (child rights `NONE`) |
-| **`child_spec` restart** | `Fn::set_restart_policy` + host `ChildSpec`. `Fn::start_child` adds a sibling under the host supervisor that started this flow |
+| **`child_spec` restart** | `Fn::start_supervisor` chooses `OneForOne` / `OneForAll` / `RestForOne`. `Fn::start_child` attaches to that supervisor, or to the host supervisor that started this flow. `Fn::set_restart_policy` overrides this flow's own restart at exit |
 | **process dictionary** | `Fn::dict_put` / `dict_get` / `dict_erase` — `Int` keys, scalars plus `Str` / `Bytes` |
 
 ## What BEAM has that Byteflow does not (yet)
@@ -116,9 +117,8 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 | BEAM / OTP | Byteflow today |
 |------------|----------------|
 | **distribution** | Single node on purpose. The host owns I/O; Byteflow does not open sockets or speak EPMD |
-| **arbitrary term patterns** | Tag, payload kind, `Int` equality (`ReceiveMatchEq`), and `after`. No guards, tuples, or maps |
+| **arbitrary term patterns** | Tag, payload kind (`0..=9`), `Int` equality (`ReceiveMatchEq`), structural equality (`ReceiveMatchValue`), and `after`. No guards, tuples, or maps |
 | **ETS** | No |
-| **supervisor strategy in bytecode** | `StartChild` (`0x6F`) only extends the host `Supervisor` that started the caller. `OneForOne` / `OneForAll` / `RestForOne` stay on that Rust supervisor |
 
 Failures without `trap_exit` / monitors surface as `FlowOutcome::Failed` on
 `join`, not as mailbox messages.
@@ -136,15 +136,18 @@ Failures without `trap_exit` / monitors surface as `FlowOutcome::Failed` on
 |------|-------|
 | spawn top-level flows | `Runtime::spawn` |
 | trusted host send | `Runtime::send(FlowId, Value::Message)` |
-| restart policy | `Supervisor` (Rust) |
+| restart policy | `Fn::start_supervisor`, or host `Supervisor` |
 | protocol in flows | `Program` / `Fn` bytecode |
 
 The supervisor thread is host Rust ([`Supervisor`](../src/scheduler/supervisor.rs) /
-[`ChildSpec`](../src/scheduler/supervisor.rs)). A flow started that way may
-call [`Fn::start_child`](../src/bytecode/program.rs) to add another child to
-the **same** supervisor (`samples::supervised_tree`). `SetRestartPolicy`
-still overrides that flow's own restart decision at exit. A flow started
-with `Runtime::spawn` has no supervisor, so `StartChild` fails that flow.
+[`ChildSpec`](../src/scheduler/supervisor.rs)), or a supervisor this flow
+started with [`Fn::start_supervisor`](../src/bytecode/program.rs).
+`StartChild` attaches to the flow's own supervisor when one exists, and
+otherwise to the host supervisor that started the caller
+(`samples::supervised_tree`). `SetRestartPolicy` still overrides that
+flow's own restart decision at exit. A flow started with `Runtime::spawn`
+that has not called `StartSupervisor` has no supervisor, so `StartChild`
+fails that flow.
 
 ## Quick equivalence cheat sheet
 
@@ -156,7 +159,7 @@ receive … after     →  receive_match_imm_timeout(TAG, ms) / receive_timeout(
 is_process_alive    →  is_alive(cap)
 exit(Pid, Reason)   →  exit_signal(cap, reason)   // reason = FlowExitReason as Int
 put/get/erase       →  dict_put / dict_get / dict_erase
-start_child         →  start_child(fn, RestartPolicy)  // inside a supervised flow
+start_child         →  start_supervisor(strategy) then start_child(fn, RestartPolicy)
 actor loop          →  actor_loop(TAG, \|f, req\| { … })
 cast                →  cast(cap, hop(...))   // alias of send
 call                →  ask(cap, hop(...)) / ask_timeout(cap, hop, ms)

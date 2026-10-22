@@ -128,7 +128,6 @@ pub struct Fn<'a> {
     b: &'a mut ChunkBuilder,
     function: FuncId,
     next_reg: u8,
-    scratch: Option<Reg>,
 }
 
 impl<'a> Fn<'a> {
@@ -149,7 +148,6 @@ impl<'a> Fn<'a> {
             b,
             function,
             next_reg: num_registers,
-            scratch: None,
         }
     }
 
@@ -262,12 +260,6 @@ impl<'a> Fn<'a> {
         dst
     }
 
-    fn binop_imm(&mut self, op: Opcode, lhs: Reg, imm: i32) -> Reg {
-        let rhs = self.temp();
-        self.b.emit_load_imm(rhs.0, imm);
-        self.binop(op, lhs, rhs)
-    }
-
     /// `dst = lhs + rhs` into a new local.
     pub fn add(&mut self, lhs: Reg, rhs: Reg) -> Reg {
         self.binop(Opcode::Add, lhs, rhs)
@@ -287,6 +279,56 @@ impl<'a> Fn<'a> {
     pub fn lt_imm(&mut self, lhs: Reg, imm: i32) -> Reg {
         let dst = self.local();
         self.b.emit_lt_imm(dst.0, lhs.0, imm);
+        dst
+    }
+
+    /// `dst *= imm` in place. One [`Opcode::MulImm`]. Integer multiply wraps.
+    pub fn mul_imm(&mut self, dst: Reg, imm: i32) {
+        self.b.emit_mul_imm(dst.0, dst.0, imm);
+    }
+
+    /// `lhs <= imm` as `Bool`, in a fresh local. One [`Opcode::LeImm`].
+    pub fn le_imm(&mut self, lhs: Reg, imm: i32) -> Reg {
+        let dst = self.local();
+        self.b.emit_le_imm(dst.0, lhs.0, imm);
+        dst
+    }
+
+    /// `lhs & rhs` into a new local. Both operands must be `Int` at runtime.
+    pub fn bit_and(&mut self, lhs: Reg, rhs: Reg) -> Reg {
+        self.bitop(Opcode::BitAnd, lhs, rhs)
+    }
+
+    /// `lhs | rhs` into a new local.
+    pub fn bit_or(&mut self, lhs: Reg, rhs: Reg) -> Reg {
+        self.bitop(Opcode::BitOr, lhs, rhs)
+    }
+
+    /// `lhs ^ rhs` into a new local.
+    pub fn bit_xor(&mut self, lhs: Reg, rhs: Reg) -> Reg {
+        self.bitop(Opcode::BitXor, lhs, rhs)
+    }
+
+    /// `!src` into a new local.
+    pub fn bit_not(&mut self, src: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_bit_not(dst.0, src.0);
+        dst
+    }
+
+    /// `lhs << rhs` into a new local. The count keeps its low 6 bits.
+    pub fn shl(&mut self, lhs: Reg, rhs: Reg) -> Reg {
+        self.bitop(Opcode::Shl, lhs, rhs)
+    }
+
+    /// Arithmetic `lhs >> rhs` into a new local. The count keeps its low 6 bits.
+    pub fn shr(&mut self, lhs: Reg, rhs: Reg) -> Reg {
+        self.bitop(Opcode::Shr, lhs, rhs)
+    }
+
+    fn bitop(&mut self, op: Opcode, lhs: Reg, rhs: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_bit_binop(op, dst.0, lhs.0, rhs.0);
         dst
     }
 
@@ -340,8 +382,13 @@ impl<'a> Fn<'a> {
         self.binop(Opcode::Eq, lhs, rhs)
     }
 
+    /// `lhs == imm` as `Bool`, in a fresh local. One [`Opcode::EqImm`].
+    ///
+    /// The immediate is an `Int`. A float in `lhs` compares unequal.
     pub fn eq_imm(&mut self, lhs: Reg, imm: i32) -> Reg {
-        self.binop_imm(Opcode::Eq, lhs, imm)
+        let dst = self.local();
+        self.b.emit_eq_imm(dst.0, lhs.0, imm);
+        dst
     }
 
     pub fn lt(&mut self, lhs: Reg, rhs: Reg) -> Reg {
@@ -931,15 +978,6 @@ impl<'a> Fn<'a> {
         self.native_n(w.base(), native_index, 4);
         w.base()
     }
-
-    fn temp(&mut self) -> Reg {
-        if let Some(scratch) = self.scratch {
-            return scratch;
-        }
-        let scratch = self.local();
-        self.scratch = Some(scratch);
-        scratch
-    }
 }
 
 #[cfg(test)]
@@ -1015,6 +1053,32 @@ mod tests {
         assert_eq!(chunk.code[1].a, 0);
         assert_eq!(chunk.code[1].b, 0);
         assert_eq!(chunk.code[1].imm, 41);
+        let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), 0, &[])?;
+        assert!(matches!(vm.run(10_000), VmResult::Complete(Value::Int(42))));
+        Ok(())
+    }
+
+    #[test]
+    fn eq_imm_and_bitwise_are_single_instructions() -> TestResult {
+        let mut program = Program::new("bits");
+        program.function("main", 0, |f| {
+            let n = f.load_i32(6);
+            f.mul_imm(n, 7);
+            let _same = f.eq_imm(n, 42);
+            let one = f.load_i32(1);
+            let shifted = f.shl(n, one);
+            let _mask = f.bit_and(shifted, n);
+            f.return_(n);
+        });
+        let chunk = program.build();
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::MulImm));
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::EqImm));
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::Shl));
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::BitAnd));
+        assert!(!chunk
+            .code
+            .iter()
+            .any(|instr| instr.op == Opcode::LoadImm && instr.imm == 42));
         let mut vm = Vm::new(std::sync::Arc::new(chunk), NativeTable::empty(), 0, &[])?;
         assert!(matches!(vm.run(10_000), VmResult::Complete(Value::Int(42))));
         Ok(())

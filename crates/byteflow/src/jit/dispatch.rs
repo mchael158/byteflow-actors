@@ -711,6 +711,53 @@ mod tests {
     }
 
     #[test]
+    fn mul_imm_eq_imm_and_shifts_match_the_interpreter() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-bits");
+        b.begin_function("main", 0, 4);
+        b.emit_load_imm(0, 6);
+        b.emit_mul_imm(1, 0, 7);
+        b.emit_load_imm(2, 1);
+        b.emit_bit_binop(Opcode::Shl, 3, 1, 2);
+        b.emit_bit_binop(Opcode::Shr, 1, 3, 2);
+        b.emit_return(1);
+        let chunk = Arc::new(b.finish());
+        let mut interpreted = Vm::new(chunk.clone(), NativeTable::empty(), 0, &[])?;
+        assert!(matches!(
+            interpreted.run(20),
+            VmResult::Complete(Value::Int(42))
+        ));
+        let mut ctx = JitContext::new(chunk.clone())?;
+        let key = TraceKey {
+            function: 0,
+            entry_pc: 0,
+            floats: false,
+        };
+        force_compile(&mut ctx, &chunk, key)?;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let result = run_vm_with_jit(&mut vm, 20, &mut ctx);
+        assert!(matches!(result, VmResult::Complete(Value::Int(42))));
+
+        let mut b = ChunkBuilder::new("jit-eq-imm");
+        b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, 42);
+        b.emit_eq_imm(1, 0, 42);
+        b.emit_le_imm(0, 0, 41);
+        b.emit_return(1);
+        let chunk = Arc::new(b.finish());
+        let mut interpreted = Vm::new(chunk.clone(), NativeTable::empty(), 0, &[])?;
+        assert!(matches!(
+            interpreted.run(20),
+            VmResult::Complete(Value::Bool(true))
+        ));
+        let mut ctx = JitContext::new(chunk.clone())?;
+        force_compile(&mut ctx, &chunk, key)?;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let result = run_vm_with_jit(&mut vm, 20, &mut ctx);
+        assert!(matches!(result, VmResult::Complete(Value::Bool(true))));
+        Ok(())
+    }
+
+    #[test]
     fn jit_matches_interpreter_on_scalar_add() -> TestResult {
         let chunk = add_chunk();
         let rt = Runtime::new((*chunk).clone())?;

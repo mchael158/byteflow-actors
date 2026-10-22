@@ -269,6 +269,40 @@ pub enum Opcode {
     ListGet = 0x78,
     /// `ListLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x79`).
     ListLen = 0x79,
+    /// `MulImm ra, rb, imm` → `r[a] = r[b] * imm` (`imm` sign-extended to
+    /// `i64`). Integer multiply wraps; a float in `r[b]` multiplies in
+    /// `f64`. Append-only (`0x7A`).
+    MulImm = 0x7A,
+    /// `EqImm ra, rb, imm` → `r[a] = Bool(r[b] == Int(imm))`.
+    ///
+    /// The immediate is an integer. A float, bool, or string in `r[b]`
+    /// compares unequal, the same as [`Self::Eq`] against a `LoadImm`.
+    /// Append-only (`0x7B`).
+    EqImm = 0x7B,
+    /// `LeImm ra, rb, imm` → `r[a] = r[b] <= imm` as `Bool`. Integers
+    /// compare as signed `i64`. Floats compare as `f64` (NaN is not less
+    /// or equal). `Bool` is not a number here. Append-only (`0x7C`).
+    LeImm = 0x7C,
+    /// `BitAnd ra, rb, rc` → `r[a] = r[b] & r[c]`. Both operands must be
+    /// `Int`. Append-only (`0x7D`).
+    BitAnd = 0x7D,
+    /// `BitOr ra, rb, rc` → `r[a] = r[b] | r[c]`. Both operands must be
+    /// `Int`. Append-only (`0x7E`).
+    BitOr = 0x7E,
+    /// `BitXor ra, rb, rc` → `r[a] = r[b] ^ r[c]`. Both operands must be
+    /// `Int`. Append-only (`0x7F`).
+    BitXor = 0x7F,
+    /// `BitNot ra, rb` → `r[a] = !r[b]`. `r[b]` must be `Int`.
+    /// Append-only (`0x80`).
+    BitNot = 0x80,
+    /// `Shl ra, rb, rc` → `r[a] = r[b] << (r[c] & 63)`. Both operands must
+    /// be `Int`. The shift count keeps its low 6 bits, so a negative count
+    /// still names a shift in `0..64`. Append-only (`0x81`).
+    Shl = 0x81,
+    /// `Shr ra, rb, rc` → arithmetic `r[a] = r[b] >> (r[c] & 63)`. Both
+    /// operands must be `Int`. The sign bit fills the vacated bits.
+    /// Append-only (`0x82`).
+    Shr = 0x82,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -352,6 +386,15 @@ impl Opcode {
             0x77 => ListPack,
             0x78 => ListGet,
             0x79 => ListLen,
+            0x7A => MulImm,
+            0x7B => EqImm,
+            0x7C => LeImm,
+            0x7D => BitAnd,
+            0x7E => BitOr,
+            0x7F => BitXor,
+            0x80 => BitNot,
+            0x81 => Shl,
+            0x82 => Shr,
             0x61 => Nop,
             _ => return None,
         })
@@ -377,6 +420,15 @@ impl std::fmt::Display for Opcode {
             Opcode::ListPack => "ListPack",
             Opcode::ListGet => "ListGet",
             Opcode::ListLen => "ListLen",
+            Opcode::MulImm => "MulImm",
+            Opcode::EqImm => "EqImm",
+            Opcode::LeImm => "LeImm",
+            Opcode::BitAnd => "BitAnd",
+            Opcode::BitOr => "BitOr",
+            Opcode::BitXor => "BitXor",
+            Opcode::BitNot => "BitNot",
+            Opcode::Shl => "Shl",
+            Opcode::Shr => "Shr",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",

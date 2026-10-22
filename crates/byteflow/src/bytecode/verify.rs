@@ -50,6 +50,18 @@ fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(
     if trust == TrustLevel::Trusted {
         return Ok(());
     }
+    if !value.within_nesting_limit() {
+        return Err(VerifyError::ForbiddenConstant {
+            index,
+            kind: ConstantKind::Capability,
+        });
+    }
+    reject_untrusted_constant(value, index)
+}
+
+/// `Cap`, `Pid`, and `Message` are rejected at every depth. A list is not
+/// authority by itself, but it must not smuggle those tags past the pool check.
+fn reject_untrusted_constant(value: &Value, index: usize) -> Result<(), VerifyError> {
     match value {
         Value::Cap(_) => Err(VerifyError::ForbiddenConstant {
             index,
@@ -63,6 +75,12 @@ fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(
             index,
             kind: ConstantKind::Message,
         }),
+        Value::List(items) => {
+            for item in items.iter() {
+                reject_untrusted_constant(item, index)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -671,6 +689,49 @@ mod tests {
             ),
         ] {
             let mut b = ChunkBuilder::new("forge");
+            b.begin_function("main", 0, 1);
+            let k = b.const_(value);
+            b.emit_load_const(0, k);
+            b.emit_return(0);
+            let chunk = b.finish();
+            assert_eq!(
+                verify(&chunk),
+                Err(VerifyError::ForbiddenConstant { index: 0, kind })
+            );
+            assert!(verify_with(
+                &chunk,
+                VerifyConfig {
+                    trust: TrustLevel::Trusted
+                }
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn untrusted_rejects_authority_nested_in_a_list() {
+        use crate::bytecode::cap::CapId;
+        use crate::bytecode::value::{Message, Value};
+        let cases = [
+            (
+                Value::try_list(vec![Value::Int(1), Value::Cap(CapId::from_raw(1))]),
+                ConstantKind::Capability,
+            ),
+            (
+                Value::try_list(vec![Value::Pid(7)]),
+                ConstantKind::ProcessId,
+            ),
+            (
+                Value::try_list(vec![Value::Message(Message::new(1, 2, 3, 4u64))]),
+                ConstantKind::Message,
+            ),
+        ];
+        for (value, kind) in cases {
+            assert!(value.is_some());
+            let Some(value) = value else {
+                return;
+            };
+            let mut b = ChunkBuilder::new("nested-forge");
             b.begin_function("main", 0, 1);
             let k = b.const_(value);
             b.emit_load_const(0, k);

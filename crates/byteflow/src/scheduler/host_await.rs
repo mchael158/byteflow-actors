@@ -2,7 +2,9 @@
 //!
 //! The worker parks the flow and hands a [`HostAwaitCompleter`] to the
 //! embedder. Completion is a register writeback (same path as `Receive`),
-//! not a mailbox hop and not a `CallNative` slot.
+//! not a mailbox hop and not a `CallNative` slot. The completed value is
+//! reissued for the parked flow. A cap the table does not know fails that
+//! flow instead of landing in a register.
 //!
 //! The bridge itself must return quickly from [`HostAwaitBridge::submit`];
 //! heavy work belongs on a host thread / Tokio task outside this crate.
@@ -53,6 +55,8 @@ pub enum HostAwaitError {
     Stale,
     /// Infrastructure failure while completing.
     Runtime(RuntimeError),
+    /// The completion value carried a capability the runtime would not grant.
+    Rejected,
 }
 
 impl std::fmt::Display for HostAwaitError {
@@ -60,6 +64,9 @@ impl std::fmt::Display for HostAwaitError {
         match self {
             HostAwaitError::Stale => f.write_str("HostAwait completer is stale"),
             HostAwaitError::Runtime(e) => write!(f, "{e}"),
+            HostAwaitError::Rejected => {
+                f.write_str("HostAwait completion refused a capability grant")
+            }
         }
     }
 }
@@ -123,6 +130,19 @@ fn settle_parked(
     };
     match result {
         Ok(value) => {
+            let flow_id = parked.flow.id;
+            let value = match super::worker::reissue_caps_from_host(&shared, flow_id, value) {
+                Ok(value) => value,
+                Err(_) => {
+                    finalize_flow(
+                        &shared,
+                        *parked.flow,
+                        FlowOutcome::Failed("HostAwait: capability grant refused".into()),
+                        FlowExitReason::Fault,
+                    );
+                    return Err(HostAwaitError::Rejected);
+                }
+            };
             let Some(flow) = resume_or_fail(&shared, parked.flow, parked.dest_reg, value) else {
                 return Ok(());
             };

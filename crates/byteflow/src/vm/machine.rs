@@ -414,6 +414,67 @@ impl Vm {
         self.set_reg(dst, result)
     }
 
+    fn mul_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        let factor = i64::from(imm);
+        let result = match src_val {
+            Value::Int(x) => Value::Int(x.wrapping_mul(factor)),
+            Value::Float(x) => Value::Float(x * (factor as f64)),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn eq_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        self.set_reg(dst, Value::Bool(src_val == Value::Int(i64::from(imm))))
+    }
+
+    fn le_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let src_val = self.get_reg(src)?;
+        let rhs = i64::from(imm);
+        let result = match src_val {
+            Value::Int(x) => Value::Bool(x <= rhs),
+            Value::Float(x) => Value::Bool(x <= (rhs as f64)),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn bit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) -> Result<(), Fault> {
+        let x = self.int_from_reg(lhs)?;
+        let y = self.int_from_reg(rhs)?;
+        let amount = (y as u32) & 63;
+        let result = match op {
+            Opcode::BitAnd => x & y,
+            Opcode::BitOr => x | y,
+            Opcode::BitXor => x ^ y,
+            Opcode::Shl => x.wrapping_shl(amount),
+            Opcode::Shr => x >> amount,
+            _ => {
+                return Err(Fault::Invariant(
+                    "bit_binop called with a non-bitwise opcode",
+                ))
+            }
+        };
+        self.set_reg(dst, Value::Int(result))
+    }
+
+    fn bit_not(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let x = self.int_from_reg(src)?;
+        self.set_reg(dst, Value::Int(!x))
+    }
+
     fn list_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
         if !(0..=crate::bytecode::MAX_LIST_LEN as i32).contains(&count) {
             return Err(Fault::TypeMismatch {
@@ -700,6 +761,21 @@ impl Vm {
                 }
                 Opcode::LtImm => {
                     trap!(self.lt_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::MulImm => {
+                    trap!(self.mul_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::EqImm => {
+                    trap!(self.eq_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::LeImm => {
+                    trap!(self.le_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr => {
+                    trap!(self.bit_binop(instr.op, instr.a, instr.b, instr.c));
+                }
+                Opcode::BitNot => {
+                    trap!(self.bit_not(instr.a, instr.b));
                 }
                 Opcode::ListPack => {
                     trap!(self.list_pack(instr.a, instr.b, instr.imm));
@@ -1105,7 +1181,7 @@ impl Vm {
                 }
                 Opcode::ReceiveMatchKind => {
                     // Selective receive by payload wire-tag (`Value::wire_tag`,
-                    // 0..=8). Non-matching hops stay queued (FIFO skip).
+                    // 0..=9). Non-matching hops stay queued (FIFO skip).
                     let kind = match u8::try_from(instr.imm) {
                         Ok(k) if k <= 9 => k,
                         _ => {
@@ -2326,6 +2402,134 @@ mod tests {
         match vm.run(10) {
             VmResult::Complete(Value::Bool(false)) => Ok(()),
             other => Err(format!("nan < 0: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn mul_eq_le_imm_and_bitwise_follow_the_integer_rules() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        let big = b.const_(Value::Int(i64::MIN));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, big);
+        b.emit_mul_imm(1, 0, -1);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(n)) if n == i64::MIN => {}
+            other => return Err(format!("min * -1: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        let num = b.const_(Value::Float(1.5));
+        b.begin_function("main", 0, 3);
+        b.emit_load_const(0, num);
+        b.emit_mul_imm(1, 0, 2);
+        b.emit_eq_imm(2, 1, 3);
+        b.emit_return(2);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Bool(false)) => {}
+            other => return Err(format!("float eq imm: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 2);
+        b.emit_load_imm(0, 3);
+        b.emit_le_imm(1, 0, 3);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Bool(true)) => {}
+            other => return Err(format!("3 <= 3: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        let nan = b.const_(Value::Float(f64::NAN));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, nan);
+        b.emit_le_imm(1, 0, 1);
+        b.emit_return(1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Bool(false)) => {}
+            other => return Err(format!("nan <= 1: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 4);
+        b.emit_load_imm(0, 0b1100);
+        b.emit_load_imm(1, 0b1010);
+        b.emit_bit_binop(Opcode::BitAnd, 2, 0, 1);
+        b.emit_bit_binop(Opcode::BitOr, 3, 0, 1);
+        b.emit_return(2);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(0b1000)) => {}
+            other => return Err(format!("bitand: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 4);
+        b.emit_load_imm(0, 0b1100);
+        b.emit_load_imm(1, 0b1010);
+        b.emit_bit_binop(Opcode::BitXor, 2, 0, 1);
+        b.emit_bit_not(3, 2);
+        b.emit_return(3);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(n)) if n == !0b0110 => {}
+            other => return Err(format!("bitnot: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 3);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 4);
+        b.emit_bit_binop(Opcode::Shl, 2, 0, 1);
+        b.emit_return(2);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(16)) => {}
+            other => return Err(format!("shl: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 3);
+        b.emit_load_imm(0, -8);
+        b.emit_load_imm(1, 1);
+        b.emit_bit_binop(Opcode::Shr, 2, 0, 1);
+        b.emit_return(2);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(-4)) => {}
+            other => return Err(format!("shr: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 3);
+        b.emit_load_imm(0, 5);
+        b.emit_load_imm(1, -1);
+        b.emit_bit_binop(Opcode::Shl, 2, 0, 1);
+        b.emit_return(2);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Complete(Value::Int(n)) if n == i64::MIN => {}
+            other => return Err(format!("shl mask: {other:?}").into()),
+        }
+
+        let mut b = ChunkBuilder::new("t");
+        let flag = b.const_(Value::Bool(true));
+        b.begin_function("main", 0, 2);
+        b.emit_load_const(0, flag);
+        b.emit_load_imm(1, 1);
+        b.emit_bit_binop(Opcode::BitAnd, 0, 0, 1);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(10) {
+            VmResult::Trap(Fault::TypeMismatch {
+                expected: "int",
+                got: "bool",
+            }) => Ok(()),
+            other => Err(format!("bool bitand: {other:?}").into()),
         }
     }
 

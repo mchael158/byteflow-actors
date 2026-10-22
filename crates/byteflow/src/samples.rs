@@ -11,6 +11,7 @@
 //! | [`atomic_request_reply`] | Tagged REQ/REP + correlated receive |
 //! | [`atomic_actors`] | Server loop + two `Ask` clients + minted `request_id` |
 //! | [`cap_in_payload`] | Cap in hop payload is reissued to the recipient |
+//! | [`cap_in_list`] | Cap nested in a `List` is reissued the same way |
 //! | [`selective_receive`] | `ReceiveMatch` FIFO skip |
 //! | [`selective_receive_timeout`] | BEAM `after`: `ReceiveMatchImmTimeout` → `Unit` |
 //! | [`selective_receive_after`] | `after` still skips junk and hits the tag |
@@ -569,6 +570,31 @@ pub fn cap_in_payload() -> Chunk {
     p.build()
 }
 
+/// Same grant as [`cap_in_payload`], with the cap nested in a list.
+pub fn cap_in_list() -> Chunk {
+    let mut p = Program::new("cap-in-list");
+    let server = p.function("server", 0, |f| {
+        let msg = f.receive();
+        let list = f.hop_payload(msg);
+        let dest = f.list_get(list, 0);
+        let payload = f.load_i32(42);
+        let reply = f.hop_fresh(TAG_REP, payload);
+        f.send(dest, reply);
+        f.exit(payload);
+    });
+    p.function("main", 0, |f| {
+        let server_cap = f.spawn(server, &[]);
+        let me = f.self_cap();
+        let packed = f.list_pack(&[me]);
+        let req = f.hop_fresh(TAG_REQ, packed);
+        f.send(server_cap, req);
+        let reply = f.receive_match_imm(TAG_REP as u16);
+        let out = f.hop_payload(reply);
+        f.return_(out);
+    });
+    p.build()
+}
+
 /// Security regression: forged `make_msg` sender must not survive `Send`.
 pub fn forged_sender_send() -> Chunk {
     let mut p = Program::new("forged-sender-send");
@@ -773,6 +799,21 @@ mod tests {
     #[test]
     fn cap_in_payload_reissues_holder() -> Result<(), Box<dyn std::error::Error>> {
         let chunk = cap_in_payload();
+        assert!(verify(&chunk).is_ok());
+        let rt = tiny_natives(chunk)?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cap_inside_a_list_is_reissued() -> Result<(), Box<dyn std::error::Error>> {
+        let chunk = cap_in_list();
         assert!(verify(&chunk).is_ok());
         let rt = tiny_natives(chunk)?;
         let idx = rt.function_index("main").ok_or("main")?;
@@ -1528,6 +1569,136 @@ mod tests {
         assert!(
             matches!(outcome, FlowOutcome::Completed(Value::Pid(0))),
             "host send must stamp sender=0 (Pid), got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn host_send_keeps_a_nested_sender_at_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("host-nested-sender");
+        p.function("main", 0, |f| {
+            let msg = f.receive();
+            let inner = f.hop_payload(msg);
+            let sender = f.hop_sender(inner);
+            f.return_(sender);
+        });
+        let rt = tiny_natives(p.build())?;
+        let h = rt.spawn(0, &[])?;
+        let inner = Message::request(0, 2, 1);
+        rt.send(h.id(), Value::Message(Message::request(7, 1, inner)))?;
+        let outcome = h.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Pid(0))),
+            "a host nested envelope stays sender 0, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_nested_envelope_is_stamped_with_the_sender() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut p = Program::new("nested-stamp");
+        let server = p.function("server", 0, |f| {
+            let msg = f.receive();
+            let inner = f.hop_payload(msg);
+            let who = f.hop_sender(inner);
+            f.send_reply(msg, 1, who);
+            f.return_(who);
+        });
+        p.function("main", 0, |f| {
+            let server = f.spawn(server, &[]);
+            let body = f.load_i32(1);
+            let inner = f.hop_fresh(1, body);
+            let outer = f.hop_fresh(2, inner);
+            let reply = f.ask(server, outer);
+            let who = f.hop_payload(reply);
+            f.return_(who);
+        });
+        let rt = tiny_natives(p.build())?;
+        let main = rt.function_index("main").ok_or("main")?;
+        let h = rt.spawn(main, &[])?;
+        let me = h.id().as_u64();
+        let outcome = h.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Pid(id)) if id == me),
+            "unset nested sender must become the sending flow, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forwarded_envelope_keeps_its_authenticated_sender() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut p = Program::new("nested-forward");
+        let checker = p.function("checker", 0, |f| {
+            let msg = f.receive();
+            let inner = f.hop_payload(msg);
+            let who = f.hop_sender(inner);
+            f.send_reply(msg, 1, who);
+            f.return_(who);
+        });
+        let relay = p.function("relay", 1, |f| {
+            let checker = f.reg(0);
+            let incoming = f.receive();
+            let wrapped = f.hop_fresh(2, incoming);
+            let reply = f.ask(checker, wrapped);
+            let who = f.hop_payload(reply);
+            f.send_reply(incoming, 1, who);
+            f.return_(who);
+        });
+        p.function("main", 0, |f| {
+            let checker = f.spawn(checker, &[]);
+            let relay = f.spawn(relay, &[checker]);
+            let body = f.load_i32(1);
+            let req = f.hop_fresh(1, body);
+            let reply = f.ask(relay, req);
+            let who = f.hop_payload(reply);
+            f.return_(who);
+        });
+        let rt = tiny_natives(p.build())?;
+        let main = rt.function_index("main").ok_or("main")?;
+        let h = rt.spawn(main, &[])?;
+        let me = h.id().as_u64();
+        let outcome = h.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Pid(id)) if id == me),
+            "forwarding must keep the already stamped sender, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_arg_envelope_is_stamped_with_the_parent() -> Result<(), Box<dyn std::error::Error>> {
+        let mut p = Program::new("spawn-stamp");
+        let child = p.function("child", 2, |f| {
+            let parent = f.reg(0);
+            let msg = f.reg(1);
+            let who = f.hop_sender(msg);
+            let reply = f.hop_fresh(1, who);
+            f.send(parent, reply);
+            f.return_(who);
+        });
+        p.function("main", 0, |f| {
+            let me = f.self_cap();
+            let body = f.load_i32(1);
+            let msg = f.hop_fresh(1, body);
+            let _child = f.spawn(child, &[me, msg]);
+            let got = f.receive();
+            let who = f.hop_payload(got);
+            f.return_(who);
+        });
+        let rt = tiny_natives(p.build())?;
+        let main = rt.function_index("main").ok_or("main")?;
+        let h = rt.spawn(main, &[])?;
+        let me = h.id().as_u64();
+        let outcome = h.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Pid(id)) if id == me),
+            "a spawn argument with sender 0 must become the parent, got {outcome:?}"
         );
         Ok(())
     }

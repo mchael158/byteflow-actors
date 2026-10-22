@@ -2,6 +2,31 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [0.9.19] — 2026-10-21
+
+### Added
+
+- **Immediates:** `MulImm` (`0x7A`), `EqImm` (`0x7B`), and `LeImm` (`0x7C`).
+  `Fn::eq_imm` is one instruction. Equality compares against an `Int`;
+  a float is not equal to that immediate. `LeImm` follows `LtImm`,
+  including NaN.
+- **Bitwise:** `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl`, and `Shr`
+  (`0x7D`–`0x82`). Operands must be `Int`. Shifts keep the low 6 bits
+  of the count. `Shr` is arithmetic. The integer JIT compiles these;
+  a float trace stops before them.
+
+### Fixed
+
+- **Capability grants:** `Send`, `Ask`, host `Runtime::send`, and spawn
+  arguments reissue a `Cap` nested in a `List` or in another hop,
+  including that hop's `reply_cap`. A token the sender does not hold
+  fails the operation. A nested envelope with `sender == 0` is stamped
+  with the flow crossing the boundary; an already stamped sender is
+  kept. `SendRemote` refuses a live cap before spending a send token
+  and stamps a nested `sender == 0`. `HostAwait` completion reissues
+  caps into the parked flow. Untrusted `verify` rejects `Cap`, `Pid`,
+  and `Message` nested in a list constant.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

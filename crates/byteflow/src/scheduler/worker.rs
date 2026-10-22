@@ -85,7 +85,7 @@ fn authenticate_outgoing_message(
     if message.request_id == 0 {
         message.request_id = vm.fresh_request_id();
     }
-    let payload = reissue_caps_in_value(shared, sender, recipient, (*message.payload).clone(), 0)?;
+    let payload = reissue_caps_in_value(shared, sender, recipient, (*message.payload).clone(), vm)?;
     let reply = shared
         .caps
         .mint_or_reuse(recipient, sender, CapRights::SEND)
@@ -98,7 +98,7 @@ fn authenticate_outgoing_message(
 /// Next host correlation id. `0` is reserved as “unset”, so a counter that
 /// lands on zero is skipped. Mapping that zero to `1` without consuming it
 /// made the following id `1` as well.
-fn mint_host_request_id(counter: &AtomicU64) -> u64 {
+pub(crate) fn mint_host_request_id(counter: &AtomicU64) -> u64 {
     loop {
         let id = counter.fetch_add(1, Ordering::Relaxed);
         if id != 0 {
@@ -120,63 +120,81 @@ pub(crate) fn authenticate_host_outgoing_message(
     if message.request_id == 0 {
         message.request_id = mint_host_request_id(&shared.host_next_request_id);
     }
-    let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone(), 0)?;
+    let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone())?;
     Ok(message
         .with_payload(payload)
         .authenticate(FlowId::HOST.as_u64(), CapId::NONE))
 }
 
 /// Host is trusted: re-issue live Caps to `recipient` without a holder check.
-fn reissue_caps_from_host(
+///
+/// A nested envelope keeps `sender` (`0` is the host). An unset `request_id`
+/// is minted. A live `reply_cap` is reissued; `NONE` stays `NONE` because
+/// the host has no mailbox to reply to.
+pub(crate) fn reissue_caps_from_host(
     shared: &Shared,
     recipient: FlowId,
     value: Value,
-    depth: u32,
 ) -> Result<Value, CapError> {
-    if depth == 0 && !value.within_nesting_limit() {
+    if !value.within_nesting_limit() {
         return Err(CapError::TooNested);
     }
-    match value {
-        Value::Cap(id) if id.is_none() => Ok(Value::Cap(id)),
-        Value::Cap(id) => {
-            let new_id = shared.caps.reissue_for(id, recipient)?;
-            Ok(Value::Cap(new_id))
-        }
-        Value::Message(m) => {
-            let inner = (*m.payload).clone();
-            let new_inner = reissue_caps_from_host(shared, recipient, inner, depth + 1)?;
-            Ok(Value::Message(m.with_payload(new_inner)))
-        }
-        other => Ok(other),
-    }
+    value.map_caps(
+        0,
+        &CapError::TooNested,
+        &mut |id| shared.caps.reissue_for(id, recipient),
+        &mut |message| {
+            if message.request_id == 0 {
+                message.request_id = mint_host_request_id(&shared.host_next_request_id);
+            }
+            if !message.reply_cap.is_none() {
+                message.reply_cap = shared.caps.reissue_for(message.reply_cap, recipient)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Re-issue every `Value::Cap` the sender holds so `recipient` becomes holder.
-/// Nested hops are walked. `CapId::NONE` is left alone. Additive — original
-/// tokens stay valid (same reason reply_cap is not one-shot).
+///
+/// Lists and nested hops are walked. A nested envelope whose `sender` is
+/// still `0` is stamped with this flow — `make_msg` cannot write any other
+/// id. A non-zero nested sender was already authenticated and is kept.
+/// `reply_cap` is minted when it is [`CapId::NONE`] and delegated otherwise.
+/// Additive: original tokens stay valid. A cap the sender does not hold
+/// fails the hop instead of copying the token.
 fn reissue_caps_in_value(
     shared: &Shared,
     sender: FlowId,
     recipient: FlowId,
     value: Value,
-    depth: u32,
+    vm: &mut crate::vm::Vm,
 ) -> Result<Value, CapError> {
-    if depth == 0 && !value.within_nesting_limit() {
+    if !value.within_nesting_limit() {
         return Err(CapError::TooNested);
     }
-    match value {
-        Value::Cap(id) if id.is_none() => Ok(Value::Cap(id)),
-        Value::Cap(id) => {
-            let new_id = shared.caps.delegate(id, sender, recipient)?;
-            Ok(Value::Cap(new_id))
-        }
-        Value::Message(m) => {
-            let inner = (*m.payload).clone();
-            let new_inner = reissue_caps_in_value(shared, sender, recipient, inner, depth + 1)?;
-            Ok(Value::Message(m.with_payload(new_inner)))
-        }
-        other => Ok(other),
-    }
+    value.map_caps(
+        0,
+        &CapError::TooNested,
+        &mut |id| shared.caps.delegate(id, sender, recipient),
+        &mut |message| {
+            if message.sender == 0 {
+                message.sender = sender.as_u64();
+            }
+            if message.request_id == 0 {
+                message.request_id = vm.fresh_request_id();
+            }
+            message.reply_cap = if message.reply_cap.is_none() {
+                shared
+                    .caps
+                    .mint_or_reuse(recipient, sender, CapRights::SEND)
+                    .map_err(CapError::from)?
+            } else {
+                shared.caps.delegate(message.reply_cap, sender, recipient)?
+            };
+            Ok(())
+        },
+    )
 }
 
 fn receive_filter(

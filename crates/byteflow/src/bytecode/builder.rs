@@ -98,6 +98,33 @@ impl ChunkBuilder {
         self.emit(Instruction::new(Opcode::LtImm, dst, src, 0, imm));
     }
 
+    /// `r[dst] = r[src] * imm`. Does not allocate a scratch register.
+    pub fn emit_mul_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::MulImm, dst, src, 0, imm));
+    }
+
+    /// `r[dst] = Bool(r[src] == Int(imm))`.
+    pub fn emit_eq_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::EqImm, dst, src, 0, imm));
+    }
+
+    /// `r[dst] = Bool(r[src] <= imm)`.
+    pub fn emit_le_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::LeImm, dst, src, 0, imm));
+    }
+
+    pub fn emit_bit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
+        debug_assert!(matches!(
+            op,
+            Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr
+        ));
+        self.emit(Instruction::abc(op, dst, lhs, rhs));
+    }
+
+    pub fn emit_bit_not(&mut self, dst: u8, src: u8) {
+        self.emit(Instruction::abc(Opcode::BitNot, dst, src, 0));
+    }
+
     pub fn emit_list_pack(&mut self, dst: u8, base: u8, count: i32) {
         self.emit(Instruction::new(Opcode::ListPack, dst, base, 0, count));
     }

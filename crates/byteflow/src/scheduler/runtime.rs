@@ -1188,19 +1188,40 @@ fn grant_caps_in_args(
 ) -> Result<Vec<Value>, SpawnError> {
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
-        match arg {
-            Value::Cap(id) => {
-                let granted = match parent {
-                    None => shared.caps.reissue_for(*id, child),
-                    Some(p) => shared.caps.delegate(*id, p, child),
-                };
-                match granted {
-                    Ok(cap) => out.push(Value::Cap(cap)),
-                    Err(_) => return Err(SpawnError::InvalidCapability),
-                }
-            }
-            other => out.push(other.clone()),
+        if !arg.within_nesting_limit() {
+            return Err(SpawnError::InvalidCapability);
         }
+        let granted = arg.map_caps(
+            0,
+            &SpawnError::InvalidCapability,
+            &mut |id| {
+                let next = match parent {
+                    None => shared.caps.reissue_for(id, child),
+                    Some(holder) => shared.caps.delegate(id, holder, child),
+                };
+                next.map_err(|_| SpawnError::InvalidCapability)
+            },
+            &mut |message| {
+                if let Some(holder) = parent {
+                    if message.sender == 0 {
+                        message.sender = holder.as_u64();
+                    }
+                }
+                if message.request_id == 0 {
+                    message.request_id =
+                        super::worker::mint_host_request_id(&shared.host_next_request_id);
+                }
+                if !message.reply_cap.is_none() {
+                    message.reply_cap = match parent {
+                        None => shared.caps.reissue_for(message.reply_cap, child),
+                        Some(holder) => shared.caps.delegate(message.reply_cap, holder, child),
+                    }
+                    .map_err(|_| SpawnError::InvalidCapability)?;
+                }
+                Ok(())
+            },
+        )?;
+        out.push(granted);
     }
     Ok(out)
 }

@@ -389,7 +389,9 @@ struct EmitContext<'a, 'b> {
 enum FloatImmOp {
     Add,
     Sub,
+    Mul,
     Lt,
+    Le,
 }
 
 fn f64_bits(builder: &mut FunctionBuilder<'_>, bits: ClifValue) -> ClifValue {
@@ -417,9 +419,21 @@ fn float_imm_op(
             let diff = builder.ins().fsub(lhs, rhs);
             i64_bits(builder, diff)
         }
+        FloatImmOp::Mul => {
+            let prod = builder.ins().fmul(lhs, rhs);
+            i64_bits(builder, prod)
+        }
         FloatImmOp::Lt => {
             let cmp = builder.ins().fcmp(
                 cranelift_codegen::ir::condcodes::FloatCC::LessThan,
+                lhs,
+                rhs,
+            );
+            bool_as_i64(builder, cmp)
+        }
+        FloatImmOp::Le => {
+            let cmp = builder.ins().fcmp(
+                cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
                 lhs,
                 rhs,
             );
@@ -545,6 +559,83 @@ fn emit_instruction(
                 bool_as_i64(builder, cmp)
             };
             registers.set_bool(instr.a as usize, result);
+        }
+        Opcode::MulImm => {
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let result = if ctx.floats {
+                float_imm_op(builder, lhs, instr.imm, FloatImmOp::Mul)
+            } else {
+                let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+                builder.ins().imul(lhs, imm)
+            };
+            if ctx.floats {
+                registers.set_float(instr.a as usize, result);
+            } else {
+                registers.set(instr.a as usize, result);
+            }
+        }
+        Opcode::EqImm => {
+            if ctx.floats {
+                return Err(CompileError::UnsupportedOpcode {
+                    opcode: Opcode::EqImm,
+                    pc,
+                });
+            }
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+            let cmp = builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, imm);
+            registers.set_bool(instr.a as usize, bool_as_i64(builder, cmp));
+        }
+        Opcode::LeImm => {
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let result = if ctx.floats {
+                float_imm_op(builder, lhs, instr.imm, FloatImmOp::Le)
+            } else {
+                let imm = builder.ins().iconst(types::I64, i64::from(instr.imm));
+                let cmp = builder.ins().icmp(
+                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+                    lhs,
+                    imm,
+                );
+                bool_as_i64(builder, cmp)
+            };
+            registers.set_bool(instr.a as usize, result);
+        }
+        Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr => {
+            if ctx.floats {
+                return Err(CompileError::UnsupportedOpcode {
+                    opcode: instr.op,
+                    pc,
+                });
+            }
+            let lhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            let rhs = load_reg(builder, registers, slots_ptr, pointer_type, instr.c, pc)?;
+            let result = match instr.op {
+                Opcode::BitAnd => builder.ins().band(lhs, rhs),
+                Opcode::BitOr => builder.ins().bor(lhs, rhs),
+                Opcode::BitXor => builder.ins().bxor(lhs, rhs),
+                Opcode::Shl => builder.ins().ishl(lhs, rhs),
+                Opcode::Shr => builder.ins().sshr(lhs, rhs),
+                _ => {
+                    return Err(CompileError::UnsupportedOpcode {
+                        opcode: instr.op,
+                        pc,
+                    })
+                }
+            };
+            registers.set(instr.a as usize, result);
+        }
+        Opcode::BitNot => {
+            if ctx.floats {
+                return Err(CompileError::UnsupportedOpcode {
+                    opcode: Opcode::BitNot,
+                    pc,
+                });
+            }
+            let v = load_reg(builder, registers, slots_ptr, pointer_type, instr.b, pc)?;
+            registers.set(instr.a as usize, builder.ins().bnot(v));
         }
         Opcode::LoadConst => {
             let idx = instr.imm as u32;
@@ -892,7 +983,21 @@ fn collect_trace_region(chunk: &Chunk, key: TraceKey) -> Result<TraceRegion, Com
                     _ => break,
                 }
             }
-            if key.floats && matches!(instr.op, Opcode::LoadImm | Opcode::Call | Opcode::Mod) {
+            if key.floats
+                && matches!(
+                    instr.op,
+                    Opcode::LoadImm
+                        | Opcode::Call
+                        | Opcode::Mod
+                        | Opcode::EqImm
+                        | Opcode::BitAnd
+                        | Opcode::BitOr
+                        | Opcode::BitXor
+                        | Opcode::BitNot
+                        | Opcode::Shl
+                        | Opcode::Shr
+                )
+            {
                 break;
             }
             pcs.push(pc);

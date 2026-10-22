@@ -239,7 +239,7 @@ FlowId** behind the target Cap — never to a CapId.
 
 ---
 
-## 7. FlowCap — Current Version (0.9.17)
+## 7. FlowCap
 
 Bytecode `Send` / `Ask` require [`Value::Cap`](crate::Value::Cap). A [`CapId`](crate::CapId)
 is an opaque **128-bit CSPRNG token** — not a counter, not a [`FlowId`](crate::FlowId).
@@ -285,6 +285,26 @@ By default, [`verify`](crate::verify) and [`decode`](crate::decode) reject
 ([`TrustLevel::Untrusted`](crate::TrustLevel::Untrusted)). Only host assemblers that intentionally embed
 authority-bearing constants should pass [`TrustLevel::Trusted`](crate::TrustLevel::Trusted).
 
+A `Value::Cap` that crosses a flow boundary is reissued for the recipient,
+including when it sits inside a `List` or inside another hop's payload.
+Copying the token is not a grant. The sender must hold the cap; otherwise
+`Send`, `Ask`, and spawn fail. The same walk covers a nested hop's
+`reply_cap`. On a local hop, `NONE` is replaced with the pair's SEND cap.
+Spawn passes an existing `reply_cap` through and does not mint one that
+was not there.
+
+A nested envelope whose `sender` is still `0` is stamped with the flow
+that crosses the boundary (`make_msg` cannot write another id). A
+non-zero nested sender was already stamped and is kept, so forwarding
+does not rewrite it. Host `Runtime::send` leaves nested `sender == 0`
+alone: that id is the host. `SendRemote` stamps `sender == 0` the same
+way and fails the flow, without spending a send token, when the payload
+still contains a live cap. `HostAwait` completion reissues caps into the
+parked flow and fails that flow when the grant is refused.
+
+Untrusted [`verify`](crate::verify) applies the constant-pool ban inside
+lists. A `List` of `Cap`, `Pid`, or `Message` does not pass.
+
 ---
 
 ## 8. Message Construction
@@ -293,13 +313,17 @@ The current `make_msg` native does not take a sender. A 4-arg legacy encoding
 is accepted only to ignore the first operand — it is never copied into
 `Message.sender`.
 
-For outgoing Send and Ask operations:
+For the outer envelope of a bytecode `Send` or `Ask`:
 
 ```text
 runtime_sender = current_flow.id
 ```
 
-always wins.
+always wins. The field the bytecode wrote is ignored.
+
+A nested envelope is data, not that outer hop. `sender == 0` is still
+unset, so the same flow id is written. Any other nested sender is a
+previous stamp and stays. Host delivery does not rewrite a nested `0`.
 
 ---
 

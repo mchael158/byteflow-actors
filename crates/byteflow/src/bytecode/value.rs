@@ -239,6 +239,106 @@ impl Value {
         walk(self, 0)
     }
 
+    /// Rewrite every live [`CapId`](crate::CapId) stored as [`Value::Cap`].
+    ///
+    /// [`CapId::NONE`](crate::CapId::NONE) stays put until `on_message`
+    /// decides what a nested hop's `reply_cap` becomes. A [`Value::List`] is
+    /// walked element by element, so a token cannot hide in a sequence and
+    /// cross a flow boundary unchanged. `on_message` runs after the payload
+    /// has been rewritten, from the inside out.
+    pub(crate) fn map_caps<E: Clone>(
+        &self,
+        depth: u32,
+        too_nested: &E,
+        on_cap: &mut impl FnMut(CapId) -> Result<CapId, E>,
+        on_message: &mut impl FnMut(&mut Message) -> Result<(), E>,
+    ) -> Result<Value, E> {
+        if depth > super::MAX_VALUE_DEPTH {
+            return Err(too_nested.clone());
+        }
+        match self {
+            Value::Cap(id) if id.is_none() => Ok(Value::Cap(*id)),
+            Value::Cap(id) => Ok(Value::Cap(on_cap(*id)?)),
+            Value::Message(message) => {
+                let payload =
+                    message
+                        .payload
+                        .map_caps(depth + 1, too_nested, on_cap, on_message)?;
+                let mut next = message.clone().with_payload(payload);
+                on_message(&mut next)?;
+                Ok(Value::Message(next))
+            }
+            Value::List(items) => {
+                let mut next = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    next.push(item.map_caps(depth + 1, too_nested, on_cap, on_message)?);
+                }
+                Value::try_list(next).ok_or_else(|| too_nested.clone())
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// Stamp envelopes that `make_msg` left unset (`sender == 0`,
+    /// `request_id == 0`). A non-zero sender was already authenticated and
+    /// is kept. `reply_cap` is not minted here — the caller decides whether
+    /// a reply grant exists on this boundary.
+    ///
+    /// `None` means the value is nested past the decoder ceiling.
+    pub(crate) fn stamp_unset_envelopes(
+        &self,
+        depth: u32,
+        sender_if_unset: u64,
+        mint: &mut impl FnMut() -> u64,
+    ) -> Option<Value> {
+        if depth > super::MAX_VALUE_DEPTH {
+            return None;
+        }
+        match self {
+            Value::Message(message) => {
+                let payload =
+                    message
+                        .payload
+                        .stamp_unset_envelopes(depth + 1, sender_if_unset, mint)?;
+                let mut next = message.clone().with_payload(payload);
+                if next.sender == 0 && sender_if_unset != 0 {
+                    next.sender = sender_if_unset;
+                }
+                if next.request_id == 0 {
+                    next.request_id = mint();
+                }
+                Some(Value::Message(next))
+            }
+            Value::List(items) => {
+                let mut next = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    next.push(item.stamp_unset_envelopes(depth + 1, sender_if_unset, mint)?);
+                }
+                Value::try_list(next)
+            }
+            other => Some(other.clone()),
+        }
+    }
+
+    /// A live capability token appears anywhere in this value, including a
+    /// nested hop's `reply_cap` and the elements of a list.
+    ///
+    /// Past the decoder ceiling the answer is `true`: the caller must fail
+    /// closed instead of shipping a value it could not inspect.
+    pub(crate) fn contains_live_cap(&self, depth: u32) -> bool {
+        if depth > super::MAX_VALUE_DEPTH {
+            return true;
+        }
+        match self {
+            Value::Cap(id) => !id.is_none(),
+            Value::Message(message) => {
+                !message.reply_cap.is_none() || message.payload.contains_live_cap(depth + 1)
+            }
+            Value::List(items) => items.iter().any(|item| item.contains_live_cap(depth + 1)),
+            _ => false,
+        }
+    }
+
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
     /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], and empty
     /// [`Value::List`].

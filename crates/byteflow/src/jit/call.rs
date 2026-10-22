@@ -65,6 +65,11 @@ pub(super) fn leaf_body(chunk: &Chunk, function: u32) -> Option<LeafBody> {
             Opcode::LoadImm
             | Opcode::Move
             | Opcode::AddImm
+            | Opcode::SubImm
+            | Opcode::MulImm
+            | Opcode::EqImm
+            | Opcode::LtImm
+            | Opcode::LeImm
             | Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
@@ -74,6 +79,12 @@ pub(super) fn leaf_body(chunk: &Chunk, function: u32) -> Option<LeafBody> {
             | Opcode::Eq
             | Opcode::Lt
             | Opcode::Le
+            | Opcode::BitAnd
+            | Opcode::BitOr
+            | Opcode::BitXor
+            | Opcode::BitNot
+            | Opcode::Shl
+            | Opcode::Shr
             | Opcode::Nop => pc += 1,
             Opcode::LoadConst => match chunk.constant(instr.imm as u32) {
                 Some(Value::Int(_) | Value::Bool(_)) => pc += 1,

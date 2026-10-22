@@ -74,8 +74,9 @@ untrappable `Killed` path and do not need a Cap. Sample:
 ## Process dictionary (`0x6B`–`0x6D`)
 
 Per-flow, on the VM (not the scheduler). Keys are `Int`. Values are
-scalars only (`Unit`, `Bool`, `Int`, `Float`) so a dict entry cannot
-outlive a register heap charge. Missing key → `Unit`.
+`Unit`, `Bool`, `Int`, `Float`, `Str`, or `Bytes`. `Str` and `Bytes`
+stay charged on the flow heap quota while the dictionary holds them.
+`List`, `Message`, `Cap`, and `Pid` are rejected. Missing key → `Unit`.
 
 | Opcode | `Fn` | BEAM |
 |--------|------|------|
@@ -85,15 +86,20 @@ outlive a register heap charge. Missing key → `Unit`.
 
 Sample: [`samples::process_dict`](../src/samples.rs) (no natives).
 
-## Bytecode `StartChild` (`0x6F`)
+## Bytecode supervisor (`StartSupervisor` `0x72`, `StartChild` `0x6F`)
 
+[`Fn::start_supervisor`](../src/bytecode/program.rs)`(strategy)` starts a
+supervisor owned by this flow. The immediate is `0` one-for-one, `1`
+one-for-all, `2` rest-for-one. Later
 [`Fn::start_child`](../src/bytecode/program.rs)`(function, RestartPolicy)`
-spawns a child on the **same** host [`Supervisor`](../src/scheduler/supervisor.rs)
-that started the caller, and writes an addressing Cap. The restart
-strategy (`OneForOne` / `OneForAll` / `RestForOne`) is the supervisor's,
-not an opcode. A flow from `Runtime::spawn` has no supervisor link, so
-`StartChild` fails that flow. Sample: [`samples::supervised_tree`](../src/samples.rs)
-(host `Supervisor::start_child` on `root`, then bytecode `start_child`).
+calls attach to it and write an addressing Cap.
+
+Without `StartSupervisor`, `StartChild` uses the host
+[`Supervisor`](../src/scheduler/supervisor.rs) that started the caller.
+A flow from `Runtime::spawn` that has not called `StartSupervisor` has
+no supervisor, so `StartChild` fails that flow. Sample:
+[`samples::supervised_tree`](../src/samples.rs) (host
+`Supervisor::start_child` on `root`, then bytecode `start_child`).
 
 ## Registry
 

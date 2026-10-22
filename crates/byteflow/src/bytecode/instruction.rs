@@ -53,12 +53,22 @@ impl fmt::Display for Instruction {
             | Opcode::Mod
             | Opcode::Eq
             | Opcode::Lt
-            | Opcode::Le => {
+            | Opcode::Le
+            | Opcode::BitAnd
+            | Opcode::BitOr
+            | Opcode::BitXor
+            | Opcode::Shl
+            | Opcode::Shr => {
                 write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
             }
-            Opcode::AddImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
-            Opcode::SubImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
-            Opcode::LtImm => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
+            Opcode::AddImm
+            | Opcode::SubImm
+            | Opcode::MulImm
+            | Opcode::EqImm
+            | Opcode::LtImm
+            | Opcode::LeImm => {
+                write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm)
+            }
             Opcode::ListPack => {
                 write!(
                     f,
@@ -68,7 +78,7 @@ impl fmt::Display for Instruction {
             }
             Opcode::ListGet => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
             Opcode::ListLen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
-            Opcode::Neg => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::Neg | Opcode::BitNot => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
             Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
             Opcode::Call => {

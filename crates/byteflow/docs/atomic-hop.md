@@ -33,10 +33,12 @@ Message { sender, reply_cap, request_id, tag, payload }
 - **payload** — arbitrary [`Value`](../src/bytecode/value.rs) (nested scalars, blobs, etc.)
 
 **Authenticated sender (security S1):** bytecode `Send` / `Ask` overwrite
-`Message.sender` and attach `reply_cap` before delivery.
+the outer `Message.sender` and attach `reply_cap` before delivery. A
+nested envelope with `sender == 0` is stamped with that same flow. A
+nested envelope that already has a sender keeps it.
 Host `Runtime::send` uses the same choke-point: `sender = FlowId::HOST`
 (`0`), `reply_cap = CapId::NONE` (host has no mailbox), and an unset
-`request_id` is minted. The `make_msg` native has **no sender operand**
+`request_id` is minted. A nested `sender == 0` stays `0` on that path. The `make_msg` native has **no sender operand**
 (3-arg: request_id, tag, payload). A 4-arg legacy form discards the first
 register and still writes `sender = 0` until the hop is authenticated —
 see [`security.md`](security.md).
@@ -62,11 +64,12 @@ by a matching hop; junk is queued behind the same lock.
 | `FreshRequestId` `0x5C` | `ra` — next per-flow correlation id |
 | `ReceiveMatchCorr` `0x5D` | `ra, rb, rc` — `tag == r[b]` and `request_id == r[c]` |
 | `ReceiveMatchCorrImm` `0x5E` | `ra, rb, imm` — immediate tag + `request_id` from `r[b]` |
-| `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=8`) |
+| `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=9`; `List` is `9`) |
 | `ReceiveMatchTimeout` `0x67` | `ra, rb, rc` — tag from `r[b]`, `after r[c]` ms → `Unit` |
 | `ReceiveMatchImmTimeout` `0x68` | `ra, rb, imm` — immediate tag, timeout `r[b]` |
 | `IsAlive` `0x69` | `ra, rb` — `Bool`: held Cap `r[b]` still names a live flow |
 | `ReceiveMatchEq` `0x6E` | `ra, rb, rc` — `tag == r[b]` and payload `Int == r[c]` |
+| `ReceiveMatchValue` `0x70` | `ra, rb, rc` — `tag == r[b]` and payload equal to `r[c]` (any `Value`) |
 | `SetTrapExit` `0x5F` | `ra` — BEAM `trap_exit` from truthy `r[a]` (see [`lifecycle.md`](lifecycle.md)) |
 | `SetRestartPolicy` `0x65` | `imm` — `0` Always / `1` OnFailure / `2` Never (supervisor exit decision) |
 | `HostAwait` `0x66` | `ra, rb, imm` — park; host bridge completes into `r[a]` (see [`host-await.md`](host-await.md)) |
@@ -76,9 +79,11 @@ Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_
 [`samples::receive_match_eq`](../src/samples.rs) (same tag, payload `0` then `41`);
 [`samples::selective_receive_timeout`](../src/samples.rs) (`after` → `Unit`).
 
-Tag, kind, and `Int` equality are still **not** arbitrary BEAM term patterns.
-`exit/2`, the process dictionary, and `StartChild` are lifecycle opcodes —
-see [`lifecycle.md`](lifecycle.md) and [`beam-mapping.md`](beam-mapping.md).
+Tag, kind (`0..=9`), `Int` equality, and structural payload equality are
+still **not** arbitrary BEAM term patterns: no guards, tuples, or maps.
+`exit/2`, the process dictionary, `StartSupervisor`, and `StartChild` are
+lifecycle opcodes — see [`lifecycle.md`](lifecycle.md) and
+[`beam-mapping.md`](beam-mapping.md).
 
 ### HostAwait — async bridge (`0x66`)
 
@@ -108,8 +113,12 @@ as `ReceiveTimeout`). If the **target exits** first, dest is a
 [`samples::ask_target_exits`](../src/samples.rs).
 
 **Cap in payload:** any `Value::Cap` the sender *holds* is reissued so the
-recipient becomes the new holder (`CapTable::delegate`). `NONE` is left
-alone. This is additive (the sender keeps their token).
+recipient becomes the new holder (`CapTable::delegate`). The walk includes
+a `List`, a nested hop's payload, and that hop's `reply_cap`. On a local
+hop a nested `reply_cap` of `NONE` is minted for the pair. This is
+additive (the sender keeps their token). A cap the sender does not hold
+fails the hop. `SendRemote` refuses a live cap before spending a send
+token.
 
 That is the deliberate difference vs classic actor runtimes that allow any value on send.
 
