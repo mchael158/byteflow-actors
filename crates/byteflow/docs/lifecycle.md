@@ -156,8 +156,8 @@ restart, not the sibling kills.
 [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) (`0` = unlimited)
 is checked on every host and bytecode `spawn`. Over the cap →
 `SpawnError::FlowLimit`. Outstanding Ask waiters are capped by
-[`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs); HostAwait
-parkers by [`max_host_awaits`](../src/scheduler/runtime.rs); live links /
+[`RuntimeConfig::max_ask_waits`](../src/scheduler/runtime.rs); outstanding
+HostAwait operations by [`max_host_awaits`](../src/scheduler/runtime.rs); live links /
 monitors / registry names by [`max_links`](../src/scheduler/runtime.rs) /
 [`max_monitors`](../src/scheduler/runtime.rs) /
 [`max_registry_names`](../src/scheduler/runtime.rs) (`0` = unlimited;

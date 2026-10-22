@@ -20,6 +20,7 @@
 
 mod capability;
 mod delegate;
+mod deterministic;
 mod directory;
 mod distribution;
 mod error;

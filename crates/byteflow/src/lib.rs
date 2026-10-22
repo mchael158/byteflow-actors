@@ -254,7 +254,7 @@ pub mod docs {
     #[doc = include_str!("../docs/properties.md")]
     pub mod properties {}
 
-    /// HostAwait: park a flow, complete from host threads (std-only bridge).
+    /// HostAwait: several host ops per flow; completion is a `TAG_SYS_AWAIT` hop.
     #[doc = include_str!("../docs/host-await.md")]
     pub mod host_await {}
 }
@@ -265,7 +265,7 @@ pub use bytecode::{
     CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef, Instruction,
     Label, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow, RestartPolicy,
     RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION, ABI_VERSION_LISTS,
-    MAGIC, TAG_SYS_DOWN, TAG_SYS_EXIT,
+    MAGIC, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT,
 };
 pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot};
 pub use natives::{

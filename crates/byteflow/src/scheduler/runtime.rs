@@ -202,10 +202,15 @@ pub struct Shared {
     pub(crate) trap_exits: super::finalize::TrapExitFlags,
     pub(crate) waiting_send_at: super::finalize::WaitingSendIndex,
     pub(crate) ask_waits: super::finalize::AskWaitIndex,
-    /// Flows parked on `Opcode::HostAwait` awaiting host completion.
+    /// In-flight `Opcode::HostAwait` tickets. The flow stays on a worker
+    /// or in its mailbox; completion arrives as a host hop.
     pub(crate) host_awaits: super::host_await::HostAwaitIndex,
     /// Host async bridge (`None` ⇒ HostAwait fails closed).
     pub(crate) host_await_bridge: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
+    /// Recorded order for host completions. `None` delivers immediately.
+    pub(crate) host_replay: Mutex<Option<super::deterministic::HostReplayGate>>,
+    /// Host `fail` text the worker reads before committing a success.
+    pub(crate) host_await_failures: super::host_await::HostAwaitFailures,
     /// `SendRemote` queue. `None` fails the opcode.
     pub(crate) distribution: Option<Arc<super::distribution::DistributionBridge>>,
     /// Supervisors started by bytecode `StartSupervisor`. Joined from
@@ -356,6 +361,8 @@ impl Runtime {
             ask_waits: super::finalize::AskWaitIndex::new(config.max_ask_waits),
             host_awaits: super::host_await::HostAwaitIndex::new(config.max_host_awaits),
             host_await_bridge: config.host_await.clone(),
+            host_replay: Mutex::new(None),
+            host_await_failures: super::host_await::HostAwaitFailures::new(),
             distribution: config.distribution.clone(),
             flow_supervisors: Mutex::new(Vec::new()),
             host_next_request_id: AtomicU64::new(1),
@@ -869,6 +876,45 @@ impl Runtime {
         }
     }
 
+    /// Install the test-only host-completion replay gate.
+    ///
+    /// Production leaves the gate unset and delivers each completion at once.
+    /// Sequence numbers come from the test, not from arrival order.
+    #[cfg(test)]
+    pub(crate) fn enable_host_await_replay(&self) -> Result<(), super::error::RuntimeError> {
+        let mut gate = super::sync_lock::lock(
+            &self.shared.host_replay,
+            "Runtime::enable_host_await_replay",
+        )?;
+        *gate = Some(super::deterministic::HostReplayGate::default());
+        Ok(())
+    }
+
+    /// Bind a host-await ticket to a recorded sequence and deliver every
+    /// completion that is now the next event.
+    #[cfg(test)]
+    pub(crate) fn bind_host_await_replay(
+        &self,
+        ticket: u64,
+        sequence: u64,
+    ) -> Result<(), super::host_await::HostAwaitError> {
+        let ready = {
+            let mut gate =
+                super::sync_lock::lock(&self.shared.host_replay, "Runtime::bind_host_await_replay")
+                    .map_err(super::host_await::HostAwaitError::Runtime)?;
+            let Some(replay) = gate.as_mut() else {
+                return Err(super::host_await::HostAwaitError::Replay(
+                    "replay gate is not enabled",
+                ));
+            };
+            replay.bind(ticket, sequence).map_err(|err| {
+                super::host_await::HostAwaitError::Replay(super::deterministic::replay_label(err))
+            })?;
+            replay.drain_ready()
+        };
+        super::host_await::deliver_ready(&self.shared, ready)
+    }
+
     /// Stop accepting new scheduling work, join every worker + the timer
     /// thread, then finalize any flow still parked (mailbox, timer, injector,
     /// worker deques). Joiners see [`FlowOutcome::Failed`] (`runtime shutdown`)
@@ -899,12 +945,8 @@ fn finalize_shutdown_flow(shared: &Shared, flow: Flow) {
 }
 
 fn finalize_host_awaits(shared: &Shared) {
-    match shared.host_awaits.drain_all() {
-        Ok(parked) => {
-            for p in parked {
-                finalize_shutdown_flow(shared, *p.flow);
-            }
-        }
+    match shared.host_awaits.cancel_all() {
+        Ok(notices) => super::host_await::notify_cancelled(shared, notices),
         Err(e) => super::error::report_fault(e),
     }
 }

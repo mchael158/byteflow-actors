@@ -8,6 +8,9 @@ pub const TAG_SYS_DOWN: u16 = 0xFF01;
 /// Reserved Atomic Hop tag for linked-exit notices (`Ask` target death or
 /// `trap_exit` link signal).
 pub const TAG_SYS_EXIT: u16 = 0xFF02;
+/// Reserved Atomic Hop tag for a host `HostAwait` completion.
+/// `request_id` is the ticket written into the await register.
+pub const TAG_SYS_AWAIT: u16 = 0xFF03;
 
 /// Envelope carried in mailboxes and registers (**Atomic Hop**).
 ///

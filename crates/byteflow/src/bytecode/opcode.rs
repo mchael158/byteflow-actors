@@ -186,10 +186,11 @@ pub enum Opcode {
     /// `0` = Always, `1` = OnFailure, `2` = Never. Invalid `imm` → Trap.
     /// Append-only (`0x65`); `Trap` stays `0x60`.
     SetRestartPolicy = 0x65,
-    /// `HostAwait ra, rb, imm` → park this flow and hand `(op=imm, args=r[b])`
-    /// to the host [`crate::HostAwaitBridge`]. On completion the host writes
-    /// a [`crate::Value`] into `r[a]` (register writeback, like `Receive`).
-    /// Requires a bridge on [`crate::RuntimeConfig`]; otherwise the flow fails.
+    /// `HostAwait ra, rb, imm` → register a host operation `(op=imm, args=r[b])`
+    /// and write its ticket id (`Int`) into `r[a]`. The flow keeps running.
+    /// The host completes with a [`crate::TAG_SYS_AWAIT`] hop (`request_id`
+    /// = ticket) that bytecode reads with `Receive`. Requires a bridge on
+    /// [`crate::RuntimeConfig`]; otherwise the flow fails.
     /// Append-only (`0x66`); not a `CallNative` / std-native slot.
     HostAwait = 0x66,
     /// `ReceiveMatchTimeout ra, rb, rc` → like [`Self::ReceiveMatch`] but

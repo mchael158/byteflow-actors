@@ -808,11 +808,12 @@ impl<'a> Fn<'a> {
         self.b.emit_set_restart_policy(policy.as_u8());
     }
 
-    /// Park until the host [`crate::HostAwaitBridge`] completes.
+    /// Register a host operation and return the register that holds its ticket (`Int`).
     ///
     /// `op` is an opaque host discriminator (`imm`). `args` is a single
-    /// [`crate::Value`] handed to the bridge. On success the result is
-    /// written into the returned register (Receive-style writeback).
+    /// [`crate::Value`] handed to the bridge. The flow keeps running. The
+    /// host's result arrives later as a [`crate::TAG_SYS_AWAIT`] hop
+    /// (`request_id` = ticket); read it with [`Self::receive`].
     pub fn host_await(&mut self, op: u32, args: Reg) -> Reg {
         let dst = self.local();
         self.b.emit_host_await(dst.0, args.0, op);

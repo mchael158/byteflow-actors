@@ -38,5 +38,5 @@ pub use opcode::Opcode;
 pub use pattern::payload_matches;
 pub use program::{Fn, FuncId, Label, Program, Reg, RegWindow};
 pub use restart::RestartPolicy;
-pub use value::{Message, Value, MAX_LIST_LEN, TAG_SYS_DOWN, TAG_SYS_EXIT};
+pub use value::{Message, Value, MAX_LIST_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT};
 pub use verify::{verify, verify_with, ConstantKind, TrustLevel, VerifyConfig, VerifyError};

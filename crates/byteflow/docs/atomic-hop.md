@@ -72,7 +72,7 @@ by a matching hop; junk is queued behind the same lock.
 | `ReceiveMatchValue` `0x70` | `ra, rb, rc` — `tag == r[b]` and payload equal to `r[c]` (any `Value`) |
 | `SetTrapExit` `0x5F` | `ra` — BEAM `trap_exit` from truthy `r[a]` (see [`lifecycle.md`](lifecycle.md)) |
 | `SetRestartPolicy` `0x65` | `imm` — `0` Always / `1` OnFailure / `2` Never (supervisor exit decision) |
-| `HostAwait` `0x66` | `ra, rb, imm` — park; host bridge completes into `r[a]` (see [`host-await.md`](host-await.md)) |
+| `HostAwait` `0x66` | `ra, rb, imm` — ticket id in `r[a]`; host completion is a `TAG_SYS_AWAIT` hop (see [`host-await.md`](host-await.md)) |
 
 Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_REQ`);
 [`samples::receive_match_kind`](../src/samples.rs) (Str decoy then Int payload);
@@ -87,9 +87,11 @@ lifecycle opcodes — see [`lifecycle.md`](lifecycle.md) and
 
 ### HostAwait — async bridge (`0x66`)
 
-Park this flow and hand `(op, args)` to [`crate::HostAwaitBridge`]. The host
-completes with a register writeback (like `Receive`), not a mailbox hop and
-not a `CallNative` / std-native slot. See [`host-await.md`](host-await.md).
+Register a host operation and hand `(op, args)` to [`crate::HostAwaitBridge`].
+The flow keeps running; `r[a]` receives the ticket id. The host completes
+with an authenticated [`crate::TAG_SYS_AWAIT`] hop (`request_id` = ticket),
+not a `CallNative` / std-native slot. Bytecode reads it with `Receive`.
+See [`host-await.md`](host-await.md).
 
 ### `Ask` — atomic RPC hop (`0x55`)
 

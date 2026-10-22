@@ -14,6 +14,15 @@ All notable changes to **byteflow-actors** are documented here.
   (`0x7D`–`0x82`). Operands must be `Int`. Shifts keep the low 6 bits
   of the count. `Shr` is arithmetic. The integer JIT compiles these;
   a float trace stops before them.
+- **HostAwait:** one flow may have several host operations in flight.
+  Each ticket is its own id. The opcode writes that id into the
+  destination register and keeps running. Completion is an authenticated
+  host hop (`TAG_SYS_AWAIT`, `request_id` = ticket), on the same stamp
+  and capability path as `Runtime::send`. Finalize, kill, and shutdown
+  cancel the flow's tickets; a late `complete` is `Stale`.
+  `HostAwaitBridge::cancel` runs after the registry lock is released.
+  A test can replay those completions in a recorded order. Production
+  delivery is unchanged when that gate is off. No new opcode.
 
 ### Fixed
 
@@ -24,10 +33,17 @@ All notable changes to **byteflow-actors** are documented here.
   with the flow crossing the boundary; an already stamped sender is
   kept. `SendRemote` refuses a live cap before spending a send token
   and stamps a nested `sender == 0`. `HostAwait` completion reissues
-  caps into the parked flow. Untrusted `verify` rejects `Cap`, `Pid`,
+  caps into a `TAG_SYS_AWAIT` hop. Untrusted `verify` rejects `Cap`, `Pid`,
   and `Message` nested in a list constant. `Send` and `Ask` authenticate
   the hop before spending a send token. `CapId`'s `Display` prints 32
   bits; `Debug` keeps the full token.
+- **HostAwait `fail`:** the host's text is applied even when the flow is
+  still on its worker, including a `return` in the same turn. A `fail`
+  after that outcome is `Stale`. A full or dropped mailbox returns
+  `HostAwaitError::Mailbox` and fails the live flow. Replay keeps
+  delivering the later hops when an earlier one is refused. A rejected
+  replay sequence returns `HostAwaitError::Replay` instead of a poisoned
+  mutex.
 
 ## [0.9.18] — 2026-10-21
 

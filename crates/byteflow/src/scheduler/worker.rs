@@ -18,8 +18,8 @@ use std::time::Duration;
 use super::capability::{CapError, CapRights};
 use super::error::report_fault;
 use super::finalize::{
-    finalize_flow, finalize_if_killed, finalize_if_killed_host_await,
-    finalize_if_killed_waiting_send, kill_outcome_message, request_kill, resume_or_fail,
+    finalize_flow, finalize_if_killed, finalize_if_killed_waiting_send, kill_outcome_message,
+    request_kill, resume_or_fail,
 };
 use super::link::LinkId;
 use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitFilter};
@@ -380,14 +380,13 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
         }
     }
 
+    let Some(mut flow) = super::host_await::park_flow_if_host_failed(shared, flow) else {
+        return;
+    };
     match shared.kill_signals.take(flow.id) {
         Ok(Some(reason)) => {
-            finalize_flow(
-                shared,
-                *flow,
-                FlowOutcome::Failed(kill_outcome_message(reason)),
-                reason,
-            );
+            let msg = super::host_await::message_or_kill(shared, flow.id, reason);
+            finalize_flow(shared, *flow, FlowOutcome::Failed(msg), reason);
             return;
         }
         Ok(None) => {}
@@ -399,6 +398,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
     }
 
     loop {
+        let Some(kept) = super::host_await::park_flow_if_host_failed(shared, flow) else {
+            return;
+        };
+        flow = kept;
         if shared.shutdown.load(Ordering::Acquire) {
             finalize_flow(
                 shared,
@@ -446,6 +449,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 return;
             }
         };
+        let Some(kept) = super::host_await::park_flow_if_host_failed(shared, flow) else {
+            return;
+        };
+        flow = kept;
 
         match result {
             VmResult::Complete(value) => {
@@ -963,28 +970,51 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     return;
                 };
                 let flow_id = flow.id;
-                match shared.host_awaits.park(flow, dest_reg) {
-                    Ok(Ok((ticket, _))) => {
-                        if finalize_if_killed_host_await(shared, flow_id) {
-                            return;
-                        }
-                        let done =
-                            super::host_await::HostAwaitCompleter::new(Arc::clone(shared), ticket);
-                        let req = super::host_await::HostAwaitRequest {
-                            flow: flow_id,
-                            op,
-                            args,
-                        };
-                        bridge.submit(req, done);
+                let registered = match shared.host_awaits.register(flow_id, op) {
+                    Ok(Ok(registered)) => registered,
+                    Ok(Err(err)) => {
+                        finish_failed(shared, *flow, err.to_string());
                         return;
                     }
-                    Ok(Err((e, flow))) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                    Err((e, flow)) => {
-                        report_fault(e);
+                    Err(err) => {
+                        report_fault(err);
                         finish_failed(shared, *flow, "HostAwait index".into());
+                        return;
+                    }
+                };
+                let Some(resumed) =
+                    resume_or_fail(shared, flow, dest_reg, Value::Int(registered.id as i64))
+                else {
+                    return;
+                };
+                flow = resumed;
+                let done = super::host_await::HostAwaitCompleter::new(
+                    Arc::clone(shared),
+                    registered.id,
+                    registered.cancelled,
+                );
+                bridge.submit(
+                    super::host_await::HostAwaitRequest {
+                        flow: flow_id,
+                        op,
+                        args,
+                    },
+                    done,
+                );
+                let Some(kept) = super::host_await::park_flow_if_host_failed(shared, flow) else {
+                    return;
+                };
+                flow = kept;
+                match shared.kill_signals.take(flow.id) {
+                    Ok(Some(reason)) => {
+                        let msg = super::host_await::message_or_kill(shared, flow.id, reason);
+                        finalize_flow(shared, *flow, FlowOutcome::Failed(msg), reason);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        report_fault(err);
+                        finish_failed(shared, *flow, "kill-signal table unavailable".into());
                         return;
                     }
                 }
@@ -1543,12 +1573,34 @@ fn park_on_mailbox(
 }
 
 fn finish_ok(shared: &Shared, flow: Flow, value: Value) {
-    finalize_flow(
-        shared,
-        flow,
-        FlowOutcome::Completed(value),
-        FlowExitReason::Normal,
-    );
+    match shared.host_await_failures.commit_success(flow.id) {
+        Ok(Some(msg)) => {
+            let _ = shared.kill_signals.take(flow.id);
+            finalize_flow(
+                shared,
+                flow,
+                FlowOutcome::Failed(msg),
+                FlowExitReason::Fault,
+            );
+        }
+        Ok(None) => {
+            finalize_flow(
+                shared,
+                flow,
+                FlowOutcome::Completed(value),
+                FlowExitReason::Normal,
+            );
+        }
+        Err(err) => {
+            report_fault(err);
+            finalize_flow(
+                shared,
+                flow,
+                FlowOutcome::Failed("HostAwait failure table unavailable".into()),
+                FlowExitReason::Fault,
+            );
+        }
+    }
 }
 
 fn finish_failed(shared: &Shared, flow: Flow, msg: String) {

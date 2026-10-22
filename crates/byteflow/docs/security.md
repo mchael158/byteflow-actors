@@ -304,7 +304,7 @@ does not rewrite it. Host `Runtime::send` leaves nested `sender == 0`
 alone: that id is the host. `Send` and `Ask` refuse a capability the
 sender does not hold before spending a send token. `SendRemote` does
 the same, and also fails when the payload still contains a live cap.
-`HostAwait` completion reissues caps into the parked flow and fails
+`HostAwait` completion reissues caps into the result hop and fails
 that flow when the grant is refused.
 
 Untrusted [`verify`](crate::verify) applies the constant-pool ban inside

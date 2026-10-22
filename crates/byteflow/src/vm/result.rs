@@ -84,7 +84,8 @@ pub enum VmResult {
     SetTrapExit { enabled: bool },
     /// `SetRestartPolicy imm` — update this flow's restart policy (`0..=2`).
     SetRestartPolicy { policy: u8 },
-    /// `HostAwait` — park for a host-side async completion into `dest_reg`.
+    /// `HostAwait` — register a host operation. The worker writes the ticket
+    /// id into `dest_reg` and keeps the flow running.
     HostAwait { dest_reg: u8, op: u32, args: Value },
     /// `RegisterName ra` — publish `r[a]` (`Str`) as this flow's name.
     RegisterName { name: Arc<str> },

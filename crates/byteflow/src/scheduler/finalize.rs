@@ -126,12 +126,8 @@ pub(crate) fn finalize_if_killed(
     };
     match mailbox.take_parked() {
         Ok(Some(flow)) => {
-            finalize_flow(
-                shared,
-                *flow,
-                FlowOutcome::Failed(kill_outcome_message(reason)),
-                reason,
-            );
+            let msg = super::host_await::message_or_kill(shared, id, reason);
+            finalize_flow(shared, *flow, FlowOutcome::Failed(msg), reason);
             true
         }
         Ok(None) => {
@@ -160,12 +156,8 @@ pub(crate) fn finalize_if_killed_waiting_send(
             if let Err(e) = shared.waiting_send_at.remove(sender) {
                 report_fault(e);
             }
-            finalize_flow(
-                shared,
-                *flow,
-                FlowOutcome::Failed(kill_outcome_message(reason)),
-                reason,
-            );
+            let msg = super::host_await::message_or_kill(shared, sender, reason);
+            finalize_flow(shared, *flow, FlowOutcome::Failed(msg), reason);
             true
         }
         Ok(None) => {
@@ -175,33 +167,6 @@ pub(crate) fn finalize_if_killed_waiting_send(
         Err(e) => {
             report_fault(e);
             restore_kill_reason(shared, sender, reason);
-            false
-        }
-    }
-}
-
-/// Same window after `HostAwaitIndex::park`.
-pub(crate) fn finalize_if_killed_host_await(shared: &Shared, id: FlowId) -> bool {
-    let Some(reason) = take_kill_reason(shared, id) else {
-        return false;
-    };
-    match shared.host_awaits.take_flow(id) {
-        Ok(Some(flow)) => {
-            finalize_flow(
-                shared,
-                *flow,
-                FlowOutcome::Failed(kill_outcome_message(reason)),
-                reason,
-            );
-            true
-        }
-        Ok(None) => {
-            restore_kill_reason(shared, id, reason);
-            false
-        }
-        Err(e) => {
-            report_fault(e);
-            restore_kill_reason(shared, id, reason);
             false
         }
     }
@@ -410,6 +375,9 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
         report_fault(RuntimeError::CannotFinalizeHostFlow);
         return;
     }
+    if let Err(e) = shared.host_await_failures.seal(id) {
+        report_fault(e);
+    }
 
     log::info(format!(
         "finalize flow#{id} reason={reason} outcome={:?}",
@@ -428,8 +396,9 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
     if let Err(e) = shared.ask_waits.remove_asker(id) {
         report_fault(e);
     }
-    if let Err(e) = shared.host_awaits.forget_flow(id) {
-        report_fault(e);
+    match shared.host_awaits.cancel_flow(id) {
+        Ok(notices) => super::host_await::notify_cancelled(shared, notices),
+        Err(e) => report_fault(e),
     }
 
     if let Ok(Some(mailbox)) = shared.directory.lookup(id) {
@@ -520,6 +489,9 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
         link.notify(id, pending.outcome.clone(), pending.flow.restart_policy);
     }
     pending.flow.complete(pending.outcome);
+    if let Err(e) = shared.host_await_failures.clear(id) {
+        report_fault(e);
+    }
 }
 
 pub(crate) fn deliver_down(shared: &Shared, event: DownEvent) {
@@ -537,7 +509,7 @@ fn deliver_exit(shared: &Shared, owner: FlowId, dead: FlowId, reason: FlowExitRe
     deliver_system_hop(shared, owner, hop);
 }
 
-fn deliver_system_hop(shared: &Shared, owner: FlowId, hop: Value) {
+pub(crate) fn deliver_system_hop(shared: &Shared, owner: FlowId, hop: Value) {
     let mailbox = match shared.directory.lookup(owner) {
         Ok(Some(m)) => m,
         Ok(None) => return,
@@ -547,32 +519,35 @@ fn deliver_system_hop(shared: &Shared, owner: FlowId, hop: Value) {
         }
     };
     match mailbox.push_system(hop.clone()) {
-        Ok(Delivery::Handoff(parked)) => {
-            let _ = shared.ask_waits.remove_asker(parked.id);
-            match parked.last_receive_dest {
-                Some(dest) => {
-                    let Some(parked) = resume_or_fail(shared, parked, dest, hop) else {
-                        return;
-                    };
-                    parked
-                        .metrics
-                        .messages_received
-                        .fetch_add(1, Ordering::Relaxed);
-                    enqueue_flow(shared, parked);
-                    wake_workers(shared);
-                }
-                None => {
-                    finalize_flow(
-                        shared,
-                        *parked,
-                        FlowOutcome::Failed("handoff missing dest register".into()),
-                        FlowExitReason::Fault,
-                    );
-                }
-            }
-        }
+        Ok(Delivery::Handoff(parked)) => resume_handoff(shared, parked, hop),
         Ok(_) => {}
         Err(e) => report_fault(e),
+    }
+}
+
+/// Resume a flow that a mailbox handed back with `hop` already accepted.
+pub(crate) fn resume_handoff(shared: &Shared, parked: Box<Flow>, hop: Value) {
+    let _ = shared.ask_waits.remove_asker(parked.id);
+    match parked.last_receive_dest {
+        Some(dest) => {
+            let Some(parked) = resume_or_fail(shared, parked, dest, hop) else {
+                return;
+            };
+            parked
+                .metrics
+                .messages_received
+                .fetch_add(1, Ordering::Relaxed);
+            enqueue_flow(shared, parked);
+            wake_workers(shared);
+        }
+        None => {
+            finalize_flow(
+                shared,
+                *parked,
+                FlowOutcome::Failed("handoff missing dest register".into()),
+                FlowExitReason::Fault,
+            );
+        }
     }
 }
 
@@ -627,9 +602,10 @@ fn wake_orphaned_asks(shared: &Shared, target: FlowId, reason: FlowExitReason) {
     }
 }
 
-/// Set a kill signal and pull the flow out if it is parked (receive,
-/// `WAITING_SEND`, or `HostAwait`). A running flow stays on its worker and
-/// dies at the next quantum (cooperative preemption).
+/// Set a kill signal and pull the flow out if it is parked (receive or
+/// `WAITING_SEND`). A running flow stays on its worker and dies at the
+/// next quantum. Outstanding HostAwait tickets are cancelled here; the
+/// flow object itself is no longer stored in that index.
 pub(crate) fn extract_for_kill(
     shared: &Shared,
     id: FlowId,
@@ -683,13 +659,13 @@ pub(crate) fn extract_for_kill(
 }
 
 fn try_take_host_await(shared: &Shared, id: FlowId) -> Option<Flow> {
-    match shared.host_awaits.take_flow(id) {
-        Ok(flow) => flow.map(|f| *f),
-        Err(e) => {
-            report_fault(e);
-            None
-        }
+    // Tickets no longer own the flow. Cancel them so a late completion
+    // cannot deliver, then let mailbox / worker extraction find the flow.
+    match shared.host_awaits.cancel_flow(id) {
+        Ok(notices) => super::host_await::notify_cancelled(shared, notices),
+        Err(e) => report_fault(e),
     }
+    None
 }
 
 /// BEAM `exit/2`. `Normal` is a no-op. `Killed` cannot be trapped.
@@ -717,12 +693,8 @@ pub(crate) fn signal_exit(shared: &Shared, from: FlowId, target: FlowId, reason:
 /// the next worker quantum consumes the signal.
 pub(crate) fn request_kill(shared: &Shared, id: FlowId, reason: FlowExitReason) {
     if let Some(flow) = extract_for_kill(shared, id, reason) {
-        finalize_flow(
-            shared,
-            flow,
-            FlowOutcome::Failed(kill_outcome_message(reason)),
-            reason,
-        );
+        let msg = super::host_await::message_or_kill(shared, id, reason);
+        finalize_flow(shared, flow, FlowOutcome::Failed(msg), reason);
     }
 }
 

@@ -1,4 +1,4 @@
-//! HostAwait bridge: park a flow, complete from a host thread.
+//! HostAwait bridge: the flow keeps running; the host completes with a hop.
 //!
 //! ```text
 //! cargo run -p byteflow-actors --example host_await
@@ -34,8 +34,9 @@ fn main() {
     let mut program = Program::new("host-await-demo");
     program.function("main", 0, |f| {
         let args = f.load_i32(41);
-        let out = f.host_await(1, args);
-        f.return_(out);
+        let _ticket = f.host_await(1, args);
+        let msg = f.receive();
+        f.return_(msg);
     });
 
     let rt = match Runtime::with_config(
@@ -65,7 +66,9 @@ fn main() {
     rt.shutdown();
 
     match outcome {
-        FlowOutcome::Completed(Value::Int(42)) => {
+        FlowOutcome::Completed(Value::Message(msg))
+            if matches!(msg.payload.as_ref(), Value::Int(42)) =>
+        {
             println!("host_await ok: bridge returned 42");
         }
         other => {
