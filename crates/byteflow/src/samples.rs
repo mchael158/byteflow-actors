@@ -703,7 +703,7 @@ mod tests {
     use super::*;
     use crate::{
         bytecode::CapId, decode, encode, std_native_table, verify, FlowOutcome, Message,
-        QuotaConfig, Runtime, RuntimeConfig, Value,
+        QuotaConfig, Runtime, RuntimeConfig, TrustLevel, Value,
     };
 
     fn tiny(chunk: Chunk) -> Result<Runtime, crate::SpawnError> {
@@ -1668,6 +1668,50 @@ mod tests {
             "forwarding must keep the already stamped sender, got {outcome:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn refused_cap_does_not_spend_a_send_token() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::builder::ChunkBuilder;
+        let mut b = ChunkBuilder::new("quota-cap");
+        b.begin_function("main", 0, 8);
+        let forged = b.const_(Value::Cap(CapId::from_raw(1)));
+        b.emit_self_pid(0);
+        b.emit_load_imm(1, 1);
+        b.emit_load_imm(2, 1);
+        b.emit_load_const(3, forged);
+        b.emit_call_native(1, 2, 3);
+        b.emit_send(0, 1);
+        b.emit_return(0);
+        let rt = Runtime::with_natives_and_config(
+            b.finish(),
+            std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 10_000,
+                trust: TrustLevel::Trusted,
+                quota: QuotaConfig {
+                    send_burst: 0,
+                    send_per_sec: 0,
+                    ..QuotaConfig::permissive()
+                },
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Failed(reason) => {
+                if reason.contains("send rate") {
+                    return Err(format!("quota ran before the grant check: {reason}").into());
+                }
+                if !reason.contains("capability") {
+                    return Err(format!("expected a capability refusal, got {reason}").into());
+                }
+                Ok(())
+            }
+            other => Err(format!("expected a failed grant, got {other:?}").into()),
+        }
     }
 
     #[test]

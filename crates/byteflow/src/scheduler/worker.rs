@@ -562,10 +562,6 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 };
-                if let Err(e) = flow.quota.check_send() {
-                    finish_failed(shared, *flow, e.to_string());
-                    return;
-                }
                 let stamped =
                     match authenticate_outgoing_message(shared, flow.id, target, msg, &mut flow.vm)
                     {
@@ -575,6 +571,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                             return;
                         }
                     };
+                if let Err(e) = flow.quota.check_send() {
+                    finish_failed(shared, *flow, e.to_string());
+                    return;
+                }
                 let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
                 if let Err(e) = flow.quota.alloc(hop_cost) {
                     finish_failed(shared, *flow, e.to_string());
@@ -583,7 +583,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 RuntimeMetrics::inc(&shared.metrics.messages_sent);
                 flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
-                    "send from=flow#{} to=flow#{} via=cap#{} msg={}",
+                    "send from=flow#{} to=flow#{} via={} msg={}",
                     flow.id.as_u64(),
                     target.as_u64(),
                     target_cap,
@@ -696,10 +696,6 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 };
-                if let Err(e) = flow.quota.check_send() {
-                    finish_failed(shared, *flow, e.to_string());
-                    return;
-                }
                 let stamped_msg = match authenticate_outgoing_message(
                     shared,
                     flow.id,
@@ -713,6 +709,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 };
+                if let Err(e) = flow.quota.check_send() {
+                    finish_failed(shared, *flow, e.to_string());
+                    return;
+                }
                 let request_id = stamped_msg.request_id;
                 let stamped = Value::Message(stamped_msg);
                 let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
@@ -729,7 +729,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 RuntimeMetrics::inc(&shared.metrics.messages_sent);
                 flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
-                    "ask from=flow#{} to=flow#{} via=cap#{} req={} wait={filter:?}",
+                    "ask from=flow#{} to=flow#{} via={} req={} wait={filter:?}",
                     flow.id.as_u64(),
                     target.as_u64(),
                     target_cap,

@@ -250,6 +250,10 @@ Resolution is always `resolve(cap, current_flow, required_rights)`. Knowing the
 bits, or holding a copy in a register, is **not** enough: the calling flow must
 be the registered **holder** with sufficient rights.
 
+[`CapId`](crate::CapId)'s `Display` prints the high 32 bits (`cap#01234567…`).
+`print` and `BYTEFLOW_LOG` use that form. `Debug` still prints the full
+token for the host.
+
 [`Value::Pid`](crate::Value::Pid) remains for **identity** inside authenticated messages
 (`Message.sender` / `msg_sender`). It is **not** an ambient address.
 
@@ -297,10 +301,11 @@ A nested envelope whose `sender` is still `0` is stamped with the flow
 that crosses the boundary (`make_msg` cannot write another id). A
 non-zero nested sender was already stamped and is kept, so forwarding
 does not rewrite it. Host `Runtime::send` leaves nested `sender == 0`
-alone: that id is the host. `SendRemote` stamps `sender == 0` the same
-way and fails the flow, without spending a send token, when the payload
-still contains a live cap. `HostAwait` completion reissues caps into the
-parked flow and fails that flow when the grant is refused.
+alone: that id is the host. `Send` and `Ask` refuse a capability the
+sender does not hold before spending a send token. `SendRemote` does
+the same, and also fails when the payload still contains a live cap.
+`HostAwait` completion reissues caps into the parked flow and fails
+that flow when the grant is refused.
 
 Untrusted [`verify`](crate::verify) applies the constant-pool ban inside
 lists. A `List` of `Cap`, `Pid`, or `Message` does not pass.

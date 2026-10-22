@@ -83,7 +83,10 @@ impl fmt::Display for CapId {
         if self.is_none() {
             f.write_str("cap#none")
         } else {
-            write!(f, "cap#{:032x}", self.0)
+            // High 32 bits only. `print` and `BYTEFLOW_LOG` use Display,
+            // and the other 96 bits stay out of those streams. `Debug`
+            // still prints the full token for the host.
+            write!(f, "cap#{:08x}…", (self.0 >> 96) as u32)
         }
     }
 }
@@ -439,6 +442,17 @@ mod tests {
     fn from_raw_is_crate_internal() {
         assert_eq!(CapId::from_raw(0), CapId::NONE);
         assert!(!CapId::from_raw(1).is_none());
+    }
+
+    #[test]
+    fn display_shows_a_prefix_and_debug_keeps_the_token() {
+        let id = CapId::from_raw(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
+        let shown = id.to_string();
+        assert_eq!(shown, "cap#01234567…");
+        assert!(!shown.contains("89abcdef"));
+        let debug = format!("{id:?}");
+        assert!(debug.contains("0123456789abcdef0011223344556677"));
+        assert_eq!(CapId::NONE.to_string(), "cap#none");
     }
 
     #[test]

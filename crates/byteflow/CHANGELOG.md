@@ -25,7 +25,9 @@ All notable changes to **byteflow-actors** are documented here.
   kept. `SendRemote` refuses a live cap before spending a send token
   and stamps a nested `sender == 0`. `HostAwait` completion reissues
   caps into the parked flow. Untrusted `verify` rejects `Cap`, `Pid`,
-  and `Message` nested in a list constant.
+  and `Message` nested in a list constant. `Send` and `Ask` authenticate
+  the hop before spending a send token. `CapId`'s `Display` prints 32
+  bits; `Debug` keeps the full token.
 
 ## [0.9.18] — 2026-10-21
 

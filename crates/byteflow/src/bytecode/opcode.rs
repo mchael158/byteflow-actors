@@ -225,9 +225,10 @@ pub enum Opcode {
     /// payload `Int == r[c]`. Non-matching hops stay queued. Append-only (`0x6E`).
     ReceiveMatchEq = 0x6E,
     /// `StartChild ra, policy, fn` → spawn function `imm` as a supervised
-    /// child of **this** flow's supervisor (`b` = restart policy `0..=2`).
-    /// Writes an addressing Cap into `r[a]`. The caller must itself have
-    /// been started by a host [`crate::Supervisor`]. Append-only (`0x6F`).
+    /// child (`b` = restart policy `0..=2`). Writes an addressing Cap into
+    /// `r[a]`. Attaches to the supervisor this flow started with
+    /// [`Self::StartSupervisor`], otherwise to the host supervisor that
+    /// started this flow. With neither, the flow fails. Append-only (`0x6F`).
     StartChild = 0x6F,
     /// `ReceiveMatchValue ra, rb, rc` → selective receive: `tag == r[b]` and
     /// payload structurally equal to `r[c]` (any [`crate::Value`], not only
@@ -362,6 +363,7 @@ impl Opcode {
             0x5E => ReceiveMatchCorrImm,
             0x5F => SetTrapExit,
             0x60 => Trap,
+            0x61 => Nop,
             0x62 => RegisterName,
             0x63 => Whereis,
             0x64 => ReceiveMatchKind,
@@ -395,7 +397,6 @@ impl Opcode {
             0x80 => BitNot,
             0x81 => Shl,
             0x82 => Shr,
-            0x61 => Nop,
             _ => return None,
         })
     }
