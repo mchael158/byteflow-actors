@@ -290,7 +290,7 @@ By default, [`verify`](crate::verify) and [`decode`](crate::decode) reject
 authority-bearing constants should pass [`TrustLevel::Trusted`](crate::TrustLevel::Trusted).
 
 A `Value::Cap` that crosses a flow boundary is reissued for the recipient,
-including when it sits inside a `List` or inside another hop's payload.
+including when it sits inside a `List`, a `Map`, or another hop's payload.
 Copying the token is not a grant. The sender must hold the cap; otherwise
 `Send`, `Ask`, and spawn fail. The same walk covers a nested hop's
 `reply_cap`. On a local hop, `NONE` is replaced with the pair's SEND cap.
@@ -304,11 +304,13 @@ does not rewrite it. Host `Runtime::send` leaves nested `sender == 0`
 alone: that id is the host. `Send` and `Ask` refuse a capability the
 sender does not hold before spending a send token. `SendRemote` does
 the same, and also fails when the payload still contains a live cap.
+`encode_frame` writes that hop as a `.bf` value. It refuses a `Cap` or a
+`Pid`, and it refuses an envelope whose sender is not the frame header.
 `HostAwait` completion reissues caps into the result hop and fails
 that flow when the grant is refused.
 
 Untrusted [`verify`](crate::verify) applies the constant-pool ban inside
-lists. A `List` of `Cap`, `Pid`, or `Message` does not pass.
+lists and maps. A `List` or `Map` of `Cap`, `Pid`, or `Message` does not pass.
 
 ---
 
@@ -587,25 +589,23 @@ Host-side bytecode **integrity fingerprint**: [`fingerprint_bf`](crate::fingerpr
 known fingerprint. This is **not** cryptographic module attestation (no
 signatures, MACs, or trust roots inside Byteflow).
 
-### Phase 5 (done — 0.9.7: relation caps + paranoid + attested boot)
+### Phase 5 (done — 0.9.7: relation caps + attested boot)
 
 - Process-wide caps on links / monitors / registry names
   (`max_links` / `max_monitors` / `max_registry_names`), enforced inside
   each store under the same lock as the table.
-- [`RuntimeConfig::paranoid_jumps`](../src/scheduler/runtime.rs): still
-  forced on for `trust == Untrusted` and for [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs).
-  The VM bounds-checks every `Jump` / `Branch` either way (`Fault::BadJump`).
-  `verify` also rejects a jump that would enter another function, and a
-  function that falls into the next one without `Jump` / `Return` / `Halt` /
-  `Exit` / `Trap`.
+- Every `Jump` / `Branch` is bounds-checked (`Fault::BadJump`). There is
+  no config flag for that check. `verify` also rejects a jump that would
+  enter another function, and a function that falls into the next one
+  without `Jump` / `Return` / `Halt` / `Exit` / `Trap`.
 - [`Runtime::with_attested`](../src/scheduler/runtime.rs): fingerprint gate
   before verify/start; [`SpawnError::Attestation`](crate::SpawnError) distinct
   from [`SpawnError::VerifyFailed`](crate::SpawnError).
 - [`RuntimeConfig::sandbox`](../src/scheduler/runtime.rs) expands to include
-  the relation caps + `paranoid_jumps: true`. **`Default` stays permissive**
-  on those caps (DX); jump bounds are fail-closed in every config.
-  Production untrusted workloads should use `sandbox()` + `with_attested`
-  + a minimal native table.
+  the relation caps. **`Default` stays permissive** on those caps (DX);
+  jump bounds are fail-closed in every config. Production untrusted
+  workloads should use `sandbox()` + `with_attested` + a minimal native
+  table.
 
 ---
 

@@ -54,11 +54,6 @@ pub struct Vm {
     quota: Option<Arc<FlowQuota>>,
     /// Process-wide memory ceiling (optional; set by the runtime).
     memory: Option<Arc<crate::MemoryBudget>>,
-    /// Retained for API / `RuntimeConfig` wiring. Out-of-range jumps always
-    /// trap with [`Fault::BadJump`] (fail-closed); this flag no longer gates
-    /// the check.
-    #[allow(dead_code)]
-    paranoid_jumps: bool,
     /// BEAM process dictionary. Allocated on first `DictPut` so the common
     /// flow that never touches the dict pays nothing.
     dict: Option<HashMap<i64, Value>>,
@@ -109,17 +104,9 @@ impl Vm {
             next_request_id: 1,
             quota: None,
             memory: None,
-            paranoid_jumps: false,
             dict: None,
             dict_bytes: 0,
         })
-    }
-
-    /// Historical API: out-of-range `Jump` / `Branch` always trap with
-    /// [`Fault::BadJump`]. The flag is retained for `RuntimeConfig` compatibility
-    /// but does not change jump semantics.
-    pub fn set_paranoid_jumps(&mut self, enabled: bool) {
-        self.paranoid_jumps = enabled;
     }
 
     /// Attach the flow's quota so register stores of `Str`/`Bytes` charge heap.
@@ -1966,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    fn paranoid_jump_out_of_range_traps() -> TestResult {
+    fn jump_out_of_range_traps() -> TestResult {
         let mut b = ChunkBuilder::new("t");
         b.begin_function("main", 0, 1);
         b.emit_load_imm(0, 0);
@@ -1975,7 +1962,6 @@ mod tests {
         let code_len = chunk.code.len();
         chunk.code[0] = Instruction::only_imm(Opcode::Jump, 100);
         let mut vm = Vm::new(Arc::new(chunk), NativeTable::empty(), 0, &[])?;
-        vm.set_paranoid_jumps(true);
         match vm.run(10) {
             VmResult::Trap(Fault::BadJump {
                 target: 101,
@@ -2785,27 +2771,6 @@ mod tests {
         match vm.run(10) {
             VmResult::Trap(Fault::NativeDenied(NativeCallError::NoNativeRight)) => Ok(()),
             other => Err(format!("expected NativeDenied(NoNativeRight), got {other:?}").into()),
-        }
-    }
-
-    #[test]
-    fn bad_jump_fail_closes_even_without_paranoid_flag() -> TestResult {
-        let mut b = ChunkBuilder::new("t");
-        b.begin_function("main", 0, 1);
-        b.emit_load_imm(0, 7);
-        b.emit_return(0);
-        let mut chunk = b.finish();
-        let code_len = chunk.code.len();
-        chunk.code[0] = Instruction::only_imm(Opcode::Jump, 100);
-        let mut vm = Vm::new(Arc::new(chunk), NativeTable::empty(), 0, &[])?;
-        // Flag retained for API compat; jumps always fail closed.
-        vm.set_paranoid_jumps(false);
-        match vm.run(10) {
-            VmResult::Trap(Fault::BadJump {
-                target: 101,
-                code_len: len,
-            }) if len == code_len => Ok(()),
-            other => Err(format!("expected BadJump(101), got {other:?}").into()),
         }
     }
 }

@@ -41,15 +41,20 @@ All notable changes to **byteflow-actors** are documented here.
   `RECV` reads and `SEND` writes. At most 256 rows and 64 KiB. The table
   disappears when the owner finalizes. This is not a global ETS table.
 - **Cluster framing:** `encode_frame` / `decode_frame` / `Runtime::deliver_frame`
-  carry a hop (node, name, envelope) with no live `Cap`. The host still
-  opens the socket. The runtime only encodes, decodes, and delivers into
-  the local mailbox with the sender the host declared. Sender `0` is refused.
+  carry a hop (node, name, envelope). The envelope is a `.bf` value, the
+  same encoding as a module constant. A `Cap` or `Pid` does not cross, and
+  the envelope sender must be the header sender. The host still opens the
+  socket. The runtime encodes, decodes, and delivers into the local
+  mailbox with that sender. Sender `0` is refused.
 
 ### Fixed
 
 - **Remote frame sender:** the envelope sender must be the header sender.
   An envelope with sender `0`, or a different id, is refused, so a frame
   cannot arrive looking like a local host hop.
+- **Jumps:** an out-of-range `Jump` or `Branch` is always `BadJump`.
+  `RuntimeConfig::paranoid_jumps` and `Vm::set_paranoid_jumps` are gone;
+  the flag was stored and never changed the check.
 - **Table row cap:** replacing a row whose size is zero still counts as
   the same row. A full table can overwrite that key. Table ids do not
   wrap back to 1 after the counter is exhausted.

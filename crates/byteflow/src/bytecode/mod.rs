@@ -32,8 +32,8 @@ pub use cap::{
 };
 pub use chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC};
 pub use disasm::disassemble;
-pub(crate) use format::MAX_VALUE_DEPTH;
 pub use format::{decode, decode_with, encode, FormatError};
+pub(crate) use format::{decode_value, encode_value, MAX_VALUE_DEPTH};
 pub use instruction::Instruction;
 pub use opcode::{IntCmp, Opcode};
 pub use pattern::payload_matches;

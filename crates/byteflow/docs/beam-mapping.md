@@ -30,6 +30,8 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
 | selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` / `Fn::receive_match_cmp(tag, bound, cmp)` / `Fn::receive_match_value(tag, value)` | Tag, payload wire-tag (`0..=10`), tag + `Int`, tag + `Eq`/`Lt`/`Le` on an `Int`, or tag + any `Value`. No tuples |
+| map | `Fn::map_pack` / `map_get` / `map_len` | At most 32 pairs. Keys are `Int` or `Str`. A missing key is `Unit`. A module that stores a map is ABI v7 |
+| `ets` | `Fn::table_open` / `table_get` / `table_put` | One table per owning flow. `RECV` reads, `SEND` writes. Gone when the owner exits |
 | `receive … after T` | `Fn::receive_match_imm_timeout(tag, ms)` / `Fn::receive_timeout` | Match + timeout writes `Unit` (hops stay queued) |
 | `is_process_alive(Pid)` | `Fn::is_alive(cap)` | Held Cap → live flow? `false` if revoked / not held |
 | `exit(Pid, Reason)` | `Fn::exit_signal(cap, reason)` | Needs `LINK`. `Normal` ignored. `Killed` untrappable |
@@ -51,8 +53,10 @@ Message { sender, reply_cap, request_id, tag, payload }
 ```
 
 - `payload` is a nested [`Value`](../src/bytecode/value.rs) — scalars,
-  `Str` / `Bytes`, a `List` of at most 32 elements (ABI v6), or another hop.
-  A module with no list constant stays on ABI v5.
+  `Str` / `Bytes`, a `List` of at most 32 elements (ABI v6), a `Map` of at
+  most 32 pairs with `Int` or `Str` keys (ABI v7), or another hop.
+  A module stays on the oldest ABI that can hold its constants: v7 when a
+  map is present, otherwise v6 when a list is present, otherwise v5.
 - `sender` is **authenticated by the runtime** on bytecode `Send` / `Ask`.
   `make_msg` has no sender operand (3-arg: request_id, tag, payload). A
   leftover 4-arg encoding is ignored — see
@@ -116,7 +120,7 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 
 | BEAM / OTP | Byteflow today |
 |------------|----------------|
-| **distribution** | No cluster protocol and no sockets. `encode_frame` / `decode_frame` / `Runtime::deliver_frame` move one hop; the host opens the connection and declares the sender. A live `Cap` does not cross |
+| **distribution** | No cluster protocol and no sockets. `encode_frame` / `decode_frame` / `Runtime::deliver_frame` move one hop. The envelope is a `.bf` value. The host opens the connection. The header sender and the envelope sender are the same id, and that id is not `0`. A `Cap` or `Pid` does not cross |
 | **arbitrary term patterns** | Tag, payload kind (`0..=10`), `Int` equality (`ReceiveMatchEq`), `Eq`/`Lt`/`Le` on an `Int` (`ReceiveMatchCmp`), structural equality (`ReceiveMatchValue`), and `after`. Maps are a value (`MapPack`), not a pattern language. No tuples |
 | **ETS** | No global table. One named table per owning flow (`TableOpen`); `RECV` reads, `SEND` writes; it disappears when the owner finalizes |
 
@@ -154,11 +158,13 @@ fails that flow.
 ```text
 self()              →  hop_sender on received msg; self_address() for Cap
 !                   →  send(cap, hop(...))
-receive             →  receive() / receive_match_imm(TAG) / receive_match_kind(kind)
+receive             →  receive() / receive_match_imm(TAG) / receive_match_kind(kind) / receive_match_cmp(tag, bound, Eq\|Lt\|Le)
 receive … after     →  receive_match_imm_timeout(TAG, ms) / receive_timeout(ms)
 is_process_alive    →  is_alive(cap)
 exit(Pid, Reason)   →  exit_signal(cap, reason)   // reason = FlowExitReason as Int
 put/get/erase       →  dict_put / dict_get / dict_erase
+map                 →  map_pack / map_get / map_len
+ets                 →  table_open / table_get / table_put   // one table per flow, not a global store
 start_child         →  start_supervisor(strategy) then start_child(fn, RestartPolicy)
 actor loop          →  actor_loop(TAG, \|f, req\| { … })
 cast                →  cast(cap, hop(...))   // alias of send

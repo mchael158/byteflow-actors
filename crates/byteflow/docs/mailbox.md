@@ -65,7 +65,7 @@ Handoff.
 
 ## Wait epoch (stale deadlines)
 
-`ReceiveTimeout` cancellation is lazy: the timer never removes its entry
+Sleep and receive-timeout deadlines share one hierarchical wheel (six levels, 256 slots, 1 ms). `ReceiveTimeout` cancellation is lazy: the wheel never removes its entry
 when a hop wakes the receiver early, it just expects to find nobody
 parked when it fires. That expectation breaks the moment the flow parks
 *again* before the old deadline — which a receive loop does constantly:

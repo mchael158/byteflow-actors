@@ -9,7 +9,7 @@ Byteflow's concurrent unit is a **flow** (`Flow`, `FlowId`, `FlowHandle`, `FlowO
 
 Wire identity still uses `Value::Pid` (FlowId as `u64`) inside messages.
 **Addressing** for bytecode `Send` / `Ask` uses `Value::Cap` (FlowCap, ABI v5 / 0.9.0+).
-Scalars include `Value::Str` / `Value::Bytes` in the constant pool; hops remain
+Scalars include `Value::Str` / `Value::Bytes` / `Value::Map` in the constant pool; hops remain
 `Message`-only. Untrusted `.bf` loads reject `Cap` / `Pid` / `Message` in the
 pool unless [`TrustLevel::Trusted`](../src/bytecode/verify.rs) is set.
 
@@ -30,7 +30,7 @@ Message { sender, reply_cap, request_id, tag, payload }
   mint a fresh id at the hop boundary. `Ask` refuses a second in-flight
   `Ask` that reuses a still-pending id.
 - **tag** — protocol discriminator (opaque to the VM)
-- **payload** — arbitrary [`Value`](../src/bytecode/value.rs) (nested scalars, blobs, etc.)
+- **payload** — a [`Value`](../src/bytecode/value.rs): scalars, blobs, a list, a map, or another hop
 
 **Authenticated sender (security S1):** bytecode `Send` / `Ask` overwrite
 the outer `Message.sender` and attach `reply_cap` before delivery. A
@@ -119,11 +119,13 @@ as `ReceiveTimeout`). If the **target exits** first, dest is a
 
 **Cap in payload:** any `Value::Cap` the sender *holds* is reissued so the
 recipient becomes the new holder (`CapTable::delegate`). The walk includes
-a `List`, a nested hop's payload, and that hop's `reply_cap`. On a local
+a `List`, a `Map`, a nested hop's payload, and that hop's `reply_cap`. On a local
 hop a nested `reply_cap` of `NONE` is minted for the pair. This is
 additive (the sender keeps their token). A cap the sender does not hold
 fails the hop. `SendRemote` refuses a live cap before spending a send
-token.
+token. `encode_frame` then writes that hop with the `.bf` value encoding
+and also refuses a `Pid`. The frame header and the envelope must name the
+same sender.
 
 That is the deliberate difference vs classic actor runtimes that allow any value on send.
 

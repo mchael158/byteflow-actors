@@ -82,11 +82,6 @@ pub struct RuntimeConfig {
     /// Constant-pool trust for [`crate::verify_with`] at runtime construction.
     /// Default is [`crate::TrustLevel::Untrusted`] (fail closed).
     pub trust: crate::bytecode::TrustLevel,
-    /// Enables defensive jump validation for every VM.
-    ///
-    /// When [`Self::trust`] is [`crate::TrustLevel::Untrusted`], paranoid
-    /// jump checking is always enabled regardless of this flag.
-    pub paranoid_jumps: bool,
     /// Where bytecode `print` (native index 0) writes when using
     /// [`crate::std_native_table_with`]. Ignored if you supply your own table.
     pub output: Arc<dyn crate::OutputSink>,
@@ -141,7 +136,6 @@ impl Default for RuntimeConfig {
             distribution: None,
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
-            paranoid_jumps: false,
             output: Arc::new(crate::output::NullSink),
             quota: super::quota::QuotaConfig::default(),
             #[cfg(feature = "jit")]
@@ -165,7 +159,6 @@ impl RuntimeConfig {
             max_monitors: 1024,
             max_registry_names: 256,
             max_runtime_bytes: 64 * 1024 * 1024,
-            paranoid_jumps: true,
             ..Default::default()
         }
     }
@@ -221,8 +214,6 @@ pub struct Shared {
     /// Correlation ids for host `Runtime::send` when `request_id == 0`.
     /// Starts at 1; `0` stays the unset sentinel.
     pub(crate) host_next_request_id: AtomicU64,
-    /// Defensive VM jump validation. Always true for `TrustLevel::Untrusted`.
-    pub(crate) paranoid_jumps: bool,
     /// Shared trace JIT state (`feature = "jit"`).
     #[cfg(feature = "jit")]
     pub(crate) jit: Option<std::sync::Arc<crate::jit::JitRuntime>>,
@@ -336,9 +327,6 @@ impl Runtime {
             None
         };
 
-        let paranoid_jumps =
-            config.paranoid_jumps || matches!(config.trust, crate::bytecode::TrustLevel::Untrusted);
-
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             stealers,
@@ -369,7 +357,6 @@ impl Runtime {
             tables: super::table::FlowTables::new(),
             flow_supervisors: Mutex::new(Vec::new()),
             host_next_request_id: AtomicU64::new(1),
-            paranoid_jumps,
             #[cfg(feature = "jit")]
             jit,
         });
@@ -1265,7 +1252,6 @@ pub(crate) fn spawn_on(
             return Err(e.into());
         }
     };
-    vm.set_paranoid_jumps(shared.paranoid_jumps);
     vm.set_memory_budget(Arc::clone(&shared.memory));
     if let Err(e) = vm.set_quota(Arc::clone(&quota)) {
         shared.flow_limit.release();
@@ -1800,7 +1786,6 @@ mod tests {
         assert_eq!(config.max_links, 1024);
         assert_eq!(config.max_monitors, 1024);
         assert_eq!(config.max_registry_names, 256);
-        assert!(config.paranoid_jumps);
         assert_eq!(config.max_runtime_bytes, 64 * 1024 * 1024);
     }
 
@@ -1810,7 +1795,6 @@ mod tests {
         assert_eq!(config.max_links, 0);
         assert_eq!(config.max_monitors, 0);
         assert_eq!(config.max_registry_names, 0);
-        assert!(!config.paranoid_jumps);
     }
 
     #[test]
@@ -1853,26 +1837,6 @@ mod tests {
             FlowOutcome::Completed(Value::Int(42)) => Ok(()),
             other => Err(format!("expected 42, got {other:?}").into()),
         }
-    }
-
-    #[test]
-    fn untrusted_enables_paranoid_jumps_on_shared() -> Result<(), Box<dyn std::error::Error>> {
-        // Default trust is Untrusted → Shared.paranoid_jumps must be true
-        // even when the explicit config flag is false.
-        let rt = Runtime::with_config(
-            add_chunk(),
-            RuntimeConfig {
-                workers: 1,
-                quantum: 1_000,
-                mailbox: MailboxConfig::DEFAULT,
-                trust: crate::bytecode::TrustLevel::Untrusted,
-                paranoid_jumps: false,
-                ..Default::default()
-            },
-        )?;
-        assert!(rt.shared.paranoid_jumps);
-        rt.shutdown();
-        Ok(())
     }
 
     #[test]

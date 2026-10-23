@@ -193,54 +193,57 @@ pub fn encode_frame(hop: &OutboundHop) -> Result<Vec<u8>, RemoteFrameError> {
     if hop.name.is_empty() || hop.name.len() > MAX_FRAME_NAME {
         return Err(RemoteFrameError::Name);
     }
-    if hop.message.reply_cap != CapId::NONE || hop.message.payload.contains_live_cap(0) {
-        return Err(RemoteFrameError::LiveCapability);
-    }
     if hop.message.sender != hop.sender.as_u64() {
         return Err(frame_sender_error(hop.message.sender));
     }
-    let mut out = Vec::new();
+    screen_message(&hop.message, 0)?;
+    let mut out = Vec::with_capacity(32 + hop.name.len());
     out.extend_from_slice(&FRAME_MAGIC);
     out.push(FRAME_VERSION);
     out.extend_from_slice(&hop.node.to_le_bytes());
     out.extend_from_slice(&(hop.name.len() as u16).to_le_bytes());
     out.extend_from_slice(hop.name.as_bytes());
     out.extend_from_slice(&hop.sender.as_u64().to_le_bytes());
-    write_frame_message(&mut out, &hop.message)?;
+    out.extend_from_slice(&crate::bytecode::encode_value(&Value::Message(
+        hop.message.clone(),
+    )));
     Ok(out)
 }
 
 /// Inverse of [`encode_frame`]. The host still decides which bytes are trusted.
 pub fn decode_frame(bytes: &[u8]) -> Result<OutboundHop, RemoteFrameError> {
-    let mut reader = FrameReader {
-        data: bytes,
-        pos: 0,
-    };
-    let magic = reader.array::<4>()?;
+    let mut pos = 0usize;
+    let magic: [u8; 4] = take(bytes, &mut pos)?;
     if magic != FRAME_MAGIC {
         return Err(RemoteFrameError::BadMagic);
     }
-    if reader.u8()? != FRAME_VERSION {
+    let version: [u8; 1] = take(bytes, &mut pos)?;
+    if version[0] != FRAME_VERSION {
         return Err(RemoteFrameError::BadVersion);
     }
-    let node = reader.u64()?;
-    let name_len = reader.u16()? as usize;
+    let node = u64::from_le_bytes(take(bytes, &mut pos)?);
+    let name_len = u16::from_le_bytes(take(bytes, &mut pos)?) as usize;
     if name_len == 0 || name_len > MAX_FRAME_NAME {
         return Err(RemoteFrameError::Name);
     }
-    let name_bytes = reader.take(name_len)?;
+    let name_bytes = take_slice(bytes, &mut pos, name_len)?;
     let name = std::str::from_utf8(name_bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
-    let sender = reader.u64()?;
+    let sender = u64::from_le_bytes(take(bytes, &mut pos)?);
     if sender == 0 {
         return Err(RemoteFrameError::SenderZero);
     }
-    let message = read_frame_message(&mut reader)?;
+    let (value, consumed) =
+        crate::bytecode::decode_value(&bytes[pos..]).map_err(frame_format_error)?;
+    if consumed != bytes.len() - pos {
+        return Err(RemoteFrameError::Unsupported);
+    }
+    let Value::Message(message) = value else {
+        return Err(RemoteFrameError::Unsupported);
+    };
     if message.sender != sender {
         return Err(frame_sender_error(message.sender));
     }
-    if reader.pos != reader.data.len() {
-        return Err(RemoteFrameError::Unsupported);
-    }
+    screen_message(&message, 0)?;
     Ok(OutboundHop {
         sender: FlowId(sender),
         node,
@@ -257,193 +260,72 @@ fn frame_sender_error(message_sender: u64) -> RemoteFrameError {
     }
 }
 
-struct FrameReader<'a> {
-    data: &'a [u8],
-    pos: usize,
+fn take<const N: usize>(data: &[u8], pos: &mut usize) -> Result<[u8; N], RemoteFrameError> {
+    let slice = take_slice(data, pos, N)?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(slice);
+    Ok(out)
 }
 
-impl<'a> FrameReader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], RemoteFrameError> {
-        let end = self.pos.checked_add(n).ok_or(RemoteFrameError::Truncated)?;
-        if end > self.data.len() {
-            return Err(RemoteFrameError::Truncated);
-        }
-        let slice = &self.data[self.pos..end];
-        self.pos = end;
-        Ok(slice)
+fn take_slice<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], RemoteFrameError> {
+    let end = pos.checked_add(n).ok_or(RemoteFrameError::Truncated)?;
+    if end > data.len() {
+        return Err(RemoteFrameError::Truncated);
     }
+    let slice = &data[*pos..end];
+    *pos = end;
+    Ok(slice)
+}
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], RemoteFrameError> {
-        let slice = self.take(N)?;
-        let mut out = [0u8; N];
-        out.copy_from_slice(slice);
-        Ok(out)
-    }
-
-    fn u8(&mut self) -> Result<u8, RemoteFrameError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, RemoteFrameError> {
-        Ok(u16::from_le_bytes(self.array()?))
-    }
-
-    fn u32(&mut self) -> Result<u32, RemoteFrameError> {
-        Ok(u32::from_le_bytes(self.array()?))
-    }
-
-    fn u64(&mut self) -> Result<u64, RemoteFrameError> {
-        Ok(u64::from_le_bytes(self.array()?))
-    }
-
-    fn i64(&mut self) -> Result<i64, RemoteFrameError> {
-        Ok(i64::from_le_bytes(self.array()?))
+fn frame_format_error(err: crate::bytecode::FormatError) -> RemoteFrameError {
+    match err {
+        crate::bytecode::FormatError::Truncated => RemoteFrameError::Truncated,
+        crate::bytecode::FormatError::BadUtf8 => RemoteFrameError::BadUtf8,
+        crate::bytecode::FormatError::UnknownValueTag(4 | 6) => RemoteFrameError::LiveCapability,
+        _ => RemoteFrameError::Unsupported,
     }
 }
 
-fn write_frame_message(out: &mut Vec<u8>, message: &Message) -> Result<(), RemoteFrameError> {
+fn screen_message(message: &Message, depth: u32) -> Result<(), RemoteFrameError> {
+    if depth > crate::bytecode::MAX_VALUE_DEPTH {
+        return Err(RemoteFrameError::Unsupported);
+    }
     if !message.reply_cap.is_none() {
         return Err(RemoteFrameError::LiveCapability);
     }
-    out.extend_from_slice(&message.sender.to_le_bytes());
-    out.extend_from_slice(&message.request_id.to_le_bytes());
-    out.extend_from_slice(&message.tag.to_le_bytes());
-    write_frame_value(out, message.payload.as_ref())
+    screen_value(message.payload.as_ref(), depth + 1)
 }
 
-fn read_frame_message(reader: &mut FrameReader<'_>) -> Result<Message, RemoteFrameError> {
-    let sender = reader.u64()?;
-    let request_id = reader.u64()?;
-    let tag = reader.u16()?;
-    let payload = read_frame_value(reader, 0)?;
-    Ok(Message::new(sender, request_id, tag, payload).authenticate(sender, CapId::NONE))
-}
-
-fn write_frame_value(out: &mut Vec<u8>, value: &Value) -> Result<(), RemoteFrameError> {
+fn screen_value(value: &Value, depth: u32) -> Result<(), RemoteFrameError> {
+    if depth > crate::bytecode::MAX_VALUE_DEPTH {
+        return Err(RemoteFrameError::Unsupported);
+    }
     match value {
-        Value::Unit => out.push(0),
-        Value::Bool(flag) => {
-            out.push(1);
-            out.push(u8::from(*flag));
-        }
-        Value::Int(n) => {
-            out.push(2);
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::Float(n) => {
-            out.push(3);
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::Pid(_) | Value::Cap(_) => return Err(RemoteFrameError::LiveCapability),
-        Value::Message(message) => {
-            out.push(5);
-            write_frame_message(out, message)?;
-        }
-        Value::Str(text) => {
-            out.push(7);
-            write_frame_blob(out, text.as_bytes())?;
-        }
-        Value::Bytes(bytes) => {
-            out.push(8);
-            write_frame_blob(out, bytes)?;
-        }
+        Value::Pid(_) | Value::Cap(_) => Err(RemoteFrameError::LiveCapability),
+        Value::Message(message) => screen_message(message, depth),
         Value::List(items) => {
             if items.len() > crate::bytecode::MAX_LIST_LEN {
                 return Err(RemoteFrameError::Unsupported);
             }
-            out.push(9);
-            out.extend_from_slice(&(items.len() as u32).to_le_bytes());
-            for item in items.iter() {
-                write_frame_value(out, item)?;
-            }
+            items
+                .iter()
+                .try_for_each(|item| screen_value(item, depth + 1))
         }
         Value::Map(entries) => {
             if entries.len() > crate::bytecode::MAX_MAP_LEN {
                 return Err(RemoteFrameError::Unsupported);
             }
-            out.push(10);
-            out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-            for (key, item) in entries.iter() {
-                match key {
-                    crate::bytecode::MapKey::Int(n) => {
-                        out.push(0);
-                        out.extend_from_slice(&n.to_le_bytes());
-                    }
-                    crate::bytecode::MapKey::Str(text) => {
-                        out.push(1);
-                        write_frame_blob(out, text.as_bytes())?;
-                    }
-                }
-                write_frame_value(out, item)?;
-            }
+            entries
+                .iter()
+                .try_for_each(|(_, item)| screen_value(item, depth + 1))
         }
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Str(_)
+        | Value::Bytes(_) => Ok(()),
     }
-    Ok(())
-}
-
-fn write_frame_blob(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), RemoteFrameError> {
-    let len = u32::try_from(bytes.len()).map_err(|_| RemoteFrameError::Unsupported)?;
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(bytes);
-    Ok(())
-}
-
-fn read_frame_value(reader: &mut FrameReader<'_>, depth: u32) -> Result<Value, RemoteFrameError> {
-    if depth > crate::bytecode::MAX_VALUE_DEPTH {
-        return Err(RemoteFrameError::Unsupported);
-    }
-    match reader.u8()? {
-        0 => Ok(Value::Unit),
-        1 => Ok(Value::Bool(reader.u8()? != 0)),
-        2 => Ok(Value::Int(reader.i64()?)),
-        3 => Ok(Value::Float(f64::from_le_bytes(reader.array()?))),
-        4 | 6 => Err(RemoteFrameError::LiveCapability),
-        5 => Ok(Value::Message(read_frame_message(reader)?)),
-        7 => {
-            let bytes = read_frame_blob(reader)?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
-            Ok(Value::str(text))
-        }
-        8 => Ok(Value::bytes(read_frame_blob(reader)?)),
-        9 => {
-            let n = reader.u32()?;
-            if n > crate::bytecode::MAX_LIST_LEN as u32 {
-                return Err(RemoteFrameError::Unsupported);
-            }
-            let mut items = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                items.push(read_frame_value(reader, depth + 1)?);
-            }
-            Value::try_list(items).ok_or(RemoteFrameError::Unsupported)
-        }
-        10 => {
-            let n = reader.u32()?;
-            if n > crate::bytecode::MAX_MAP_LEN as u32 {
-                return Err(RemoteFrameError::Unsupported);
-            }
-            let mut entries = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                let key = match reader.u8()? {
-                    0 => crate::bytecode::MapKey::Int(reader.i64()?),
-                    1 => {
-                        let bytes = read_frame_blob(reader)?;
-                        let text =
-                            std::str::from_utf8(&bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
-                        crate::bytecode::MapKey::str(text)
-                    }
-                    _ => return Err(RemoteFrameError::Unsupported),
-                };
-                entries.push((key, read_frame_value(reader, depth + 1)?));
-            }
-            Value::try_map(entries).ok_or(RemoteFrameError::Unsupported)
-        }
-        _ => Err(RemoteFrameError::Unsupported),
-    }
-}
-
-fn read_frame_blob(reader: &mut FrameReader<'_>) -> Result<Vec<u8>, RemoteFrameError> {
-    let len = reader.u32()? as usize;
-    Ok(reader.take(len)?.to_vec())
 }
 
 #[cfg(test)]
@@ -773,8 +655,8 @@ mod tests {
         if !matches!(encode_frame(&other), Err(RemoteFrameError::SenderMismatch)) {
             return Err(RemoteFrameError::Unsupported);
         }
-        // Header sender stays 9. The envelope sender sits just after it.
-        let envelope_at = 4 + 1 + 8 + 2 + agreed.name.len() + 8;
+        // Header, then the `.bf` message tag, then the envelope sender.
+        let envelope_at = 4 + 1 + 8 + 2 + agreed.name.len() + 8 + 1;
         let mut forged = bytes.clone();
         forged[envelope_at..envelope_at + 8].copy_from_slice(&0u64.to_le_bytes());
         if !matches!(decode_frame(&forged), Err(RemoteFrameError::SenderZero)) {

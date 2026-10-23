@@ -24,7 +24,7 @@ cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
-**Not** a Tokio replacement / not distributed OTP. Host Rust owns I/O; Byteflow owns cheap flows. Local OTP in bytecode: `exit/2`, process dictionary, `after`, `is_alive`, `start_supervisor`, and `start_child` — see `crates/byteflow/docs/beam-mapping.md`.
+**Not** a Tokio replacement and **not** a cluster protocol. Host Rust owns I/O; Byteflow owns cheap flows. Local bytecode covers `exit/2`, the process dictionary, `after`, `is_alive`, `start_supervisor`, `start_child`, maps, an integer `receive` comparison, and one table per flow. A remote hop is a `.bf` frame the host writes on its own socket — see `crates/byteflow/docs/beam-mapping.md`.
 
 Atomic Hop (`Value::Message`): see `crates/byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
 

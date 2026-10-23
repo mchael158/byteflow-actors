@@ -215,8 +215,8 @@ function's `entry` is not `Jump`, `Return`, `Halt`, `Exit`, or `Trap`,
 `verify` reports [`VerifyError::FallThrough`](crate::VerifyError).
 Falling off `code.len()` stays an implicit return. The runtime
 check stays even after `verify`, so a hand-built or corrupted chunk cannot
-complete as a silent `return Unit`. `RuntimeConfig::paranoid_jumps` is
-still set for untrusted and sandbox configs; it no longer toggles the check.
+complete as a silent `return Unit`. That check does not depend on a
+config flag.
 
 No memory is touched out of bounds (the fetch goes through a checked
 `get`). `verify` remains mandatory for untrusted input: it still settles

@@ -241,6 +241,25 @@ fn write_value(out: &mut Vec<u8>, value: &Value) {
     }
 }
 
+/// One value in the same layout as a `.bf` constant. The caller decides
+/// whether a `Cap` or `Pid` is allowed.
+pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_value(&mut out, value);
+    out
+}
+
+/// Decode one value from the front of `bytes`. The `usize` is how many
+/// bytes that value occupied.
+pub(crate) fn decode_value(bytes: &[u8]) -> Result<(Value, usize), FormatError> {
+    let mut reader = Reader {
+        data: bytes,
+        pos: 0,
+    };
+    let value = reader.read_value(TrustLevel::Trusted, 0, ABI_VERSION_MAPS)?;
+    Ok((value, reader.pos))
+}
+
 fn constants_contain_map(constants: &[Value]) -> bool {
     fn walk(value: &Value) -> bool {
         match value {
