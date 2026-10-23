@@ -304,13 +304,15 @@ pub enum CapTarget {
     NativeTable,
     /// Exclusive target of [`CapRights::ADMIN`]: kill / inspect / quota top-up.
     Scheduler,
+    /// One flow-owned table. `u64` is the table id, not a [`FlowId`](crate::FlowId).
+    Table(u64),
 }
 
 impl CapTarget {
     pub fn flow_id(self) -> Option<u64> {
         match self {
             CapTarget::Flow(id) => Some(id),
-            CapTarget::NativeTable | CapTarget::Scheduler => None,
+            CapTarget::NativeTable | CapTarget::Scheduler | CapTarget::Table(_) => None,
         }
     }
 }

@@ -12,6 +12,7 @@
 //! | [`verify`] | Structural checks before a [`crate::Runtime`] starts |
 //!
 //! Current ABI: see [`ABI_VERSION`]. Lists use [`ABI_VERSION_LISTS`].
+//! Maps use [`ABI_VERSION_MAPS`].
 
 pub(crate) mod builder;
 mod cap;
@@ -29,14 +30,16 @@ mod verify;
 pub use cap::{
     Cap, CapId, CapIdError, CapRights, CapTarget, NativeIdx, NativeMask, RevocationCell,
 };
-pub use chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, MAGIC};
+pub use chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC};
 pub use disasm::disassemble;
 pub(crate) use format::MAX_VALUE_DEPTH;
 pub use format::{decode, decode_with, encode, FormatError};
 pub use instruction::Instruction;
-pub use opcode::Opcode;
+pub use opcode::{IntCmp, Opcode};
 pub use pattern::payload_matches;
 pub use program::{Fn, FuncId, Label, Program, Reg, RegWindow};
 pub use restart::RestartPolicy;
-pub use value::{Message, Value, MAX_LIST_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT};
+pub use value::{
+    MapKey, Message, Value, MAX_LIST_LEN, MAX_MAP_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT,
+};
 pub use verify::{verify, verify_with, ConstantKind, TrustLevel, VerifyConfig, VerifyError};

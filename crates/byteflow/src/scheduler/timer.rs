@@ -1,5 +1,3 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,6 +6,13 @@ use super::mailbox::{Mailbox, WaitEpoch};
 use super::process::{Flow, FlowId};
 use super::runtime::enqueue_flow;
 use super::sync_lock;
+
+/// Slots per wheel level. A power of two so the slot index is a bit mask.
+const SLOTS: usize = 256;
+const SLOT_SHIFT: u32 = 8;
+/// Six levels of 256 slots at 1 ms cover more than `Instant` can express.
+const LEVELS: usize = 6;
+const TICK_NS: u64 = 1_000_000;
 
 /// What to do when a timer entry's deadline is reached.
 enum TimerPayload {
@@ -29,6 +34,9 @@ enum TimerPayload {
         dest_reg: u8,
         epoch: WaitEpoch,
     },
+    /// Test marker. Production never constructs one.
+    #[cfg(test)]
+    Probe(u64),
 }
 
 struct TimerEntry {
@@ -36,42 +44,153 @@ struct TimerEntry {
     payload: TimerPayload,
 }
 
-// Ordering is by deadline only — two entries with the same deadline are
-// "equal" for heap-ordering purposes even though they wake different
-// processes. That's intentional: `BinaryHeap` only needs a total order to
-// stay a valid heap, and we never rely on it to deduplicate entries.
-impl PartialEq for TimerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline
+struct Slot {
+    entries: Vec<TimerEntry>,
+    earliest: Option<Instant>,
+}
+
+/// Hierarchical timing wheel. Insert is O(1). A wake scans the fixed slot
+/// grid, not the timer count, and only the slots whose earliest deadline
+/// has passed are opened.
+struct Wheel {
+    levels: Vec<Vec<Slot>>,
+    /// Tick of the last observed `now`. New inserts bucket against it.
+    cursor: u64,
+    origin: Instant,
+}
+
+impl Wheel {
+    fn new() -> Self {
+        let mut levels = Vec::with_capacity(LEVELS);
+        for _ in 0..LEVELS {
+            let mut slots = Vec::with_capacity(SLOTS);
+            for _ in 0..SLOTS {
+                slots.push(Slot {
+                    entries: Vec::new(),
+                    earliest: None,
+                });
+            }
+            levels.push(slots);
+        }
+        Self {
+            levels,
+            cursor: 0,
+            origin: Instant::now(),
+        }
+    }
+
+    fn tick_of(&self, when: Instant) -> u64 {
+        let nanos = when.saturating_duration_since(self.origin).as_nanos();
+        let ticks = nanos / u128::from(TICK_NS);
+        u64::try_from(ticks).unwrap_or(u64::MAX)
+    }
+
+    fn observe(&mut self, now: Instant) {
+        self.cursor = self.tick_of(now);
+    }
+
+    fn insert(&mut self, entry: TimerEntry) {
+        let when = self.tick_of(entry.deadline).max(self.cursor);
+        let (level, slot) = place(self.cursor, when);
+        let bucket = &mut self.levels[level][slot];
+        bucket.earliest = Some(match bucket.earliest {
+            Some(prev) if prev <= entry.deadline => prev,
+            _ => entry.deadline,
+        });
+        bucket.entries.push(entry);
+    }
+
+    /// Entries with `deadline <= now`, earliest first. Later entries stay
+    /// in the wheel, rebucketed against `now`.
+    fn collect_due(&mut self, now: Instant) -> Vec<TimerEntry> {
+        self.observe(now);
+        let mut due = Vec::new();
+        loop {
+            let mut opened = false;
+            for level in 0..LEVELS {
+                for slot in 0..SLOTS {
+                    let ready = matches!(
+                        self.levels[level][slot].earliest,
+                        Some(earliest) if earliest <= now
+                    );
+                    if !ready {
+                        continue;
+                    }
+                    opened = true;
+                    let batch = std::mem::take(&mut self.levels[level][slot].entries);
+                    self.levels[level][slot].earliest = None;
+                    for entry in batch {
+                        if entry.deadline <= now {
+                            due.push(entry);
+                        } else {
+                            self.insert(entry);
+                        }
+                    }
+                }
+            }
+            if !opened {
+                break;
+            }
+        }
+        due.sort_by_key(|entry| entry.deadline);
+        due
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        let mut best = None;
+        for level in &self.levels {
+            for slot in level {
+                if let Some(earliest) = slot.earliest {
+                    best = Some(match best {
+                        Some(prev) if prev <= earliest => prev,
+                        _ => earliest,
+                    });
+                }
+            }
+        }
+        best
+    }
+
+    fn drain_sleepers(&mut self) -> Vec<Flow> {
+        let mut flows = Vec::new();
+        for level in &mut self.levels {
+            for slot in level.iter_mut() {
+                let batch = std::mem::take(&mut slot.entries);
+                slot.earliest = None;
+                for entry in batch {
+                    if let TimerPayload::WakeSleeper(flow) = entry.payload {
+                        flows.push(*flow);
+                    }
+                }
+            }
+        }
+        flows
     }
 }
-impl Eq for TimerEntry {}
-impl PartialOrd for TimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+
+/// Level whose window contains `when - cursor`, and the slot inside it.
+fn place(cursor: u64, when: u64) -> (usize, usize) {
+    let when = when.max(cursor);
+    let delta = when - cursor;
+    let mut level = 0usize;
+    let mut horizon = SLOTS as u64;
+    while level + 1 < LEVELS && delta >= horizon {
+        level += 1;
+        horizon = horizon.saturating_mul(SLOTS as u64);
     }
-}
-impl Ord for TimerEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.deadline.cmp(&other.deadline)
-    }
+    let shift = (level as u32) * SLOT_SHIFT;
+    let slot = ((when >> shift) as usize) & (SLOTS - 1);
+    (level, slot)
 }
 
 /// A single global `Sleep`/`ReceiveTimeout` deadline queue.
 ///
-/// # On the choice of a binary heap over a real timing wheel
-///
-/// Design notes §19 calls for a hierarchical timing wheel (O(1) insert/
-/// cancel, bucketed by coarse deadlines) — the right choice at BEAM/Tokio
-/// scale, where timer churn is enormous. A `BinaryHeap<Reverse<TimerEntry>>`
-/// behind one mutex is `O(log n)` insert and pop, which is the simpler,
-/// well-understood structure and is more than fast enough to validate the
-/// scheduling model end-to-end (this is exactly the "don't build everything
-/// at once" ordering the design notes argue for in §36 — a wheel is a
-/// drop-in replacement for this module's internals later, since nothing
-/// outside `timer.rs` knows how deadlines are stored).
+/// Deadlines sit in a hierarchical wheel: each level has [`SLOTS`] buckets
+/// and one slot of level `n` spans 256 slots of level `n - 1`. Insert touches
+/// one bucket. The timer thread sleeps until the earliest deadline, then
+/// opens only the buckets that have reached it.
 pub struct TimerWheel {
-    heap: Mutex<BinaryHeap<Reverse<TimerEntry>>>,
+    wheel: Mutex<Wheel>,
     cvar: Condvar,
     shutdown: Mutex<bool>,
 }
@@ -116,7 +235,7 @@ fn farthest_deadline(now: Instant) -> Instant {
 impl TimerWheel {
     pub fn new() -> Arc<Self> {
         Arc::new(TimerWheel {
-            heap: Mutex::new(BinaryHeap::new()),
+            wheel: Mutex::new(Wheel::new()),
             cvar: Condvar::new(),
             shutdown: Mutex::new(false),
         })
@@ -154,9 +273,9 @@ impl TimerWheel {
     }
 
     fn push(&self, entry: TimerEntry) {
-        match sync_lock::lock(&self.heap, "TimerWheel::push") {
-            Ok(mut heap) => {
-                heap.push(Reverse(entry));
+        match sync_lock::lock(&self.wheel, "TimerWheel::push") {
+            Ok(mut wheel) => {
+                wheel.insert(entry);
                 self.cvar.notify_one();
             }
             Err(e) => report_fault(e),
@@ -171,25 +290,16 @@ impl TimerWheel {
         self.cvar.notify_all();
     }
 
-    /// Take every sleeper out of the heap. Receive-timeout entries are
+    /// Take every sleeper out of the wheel. Receive-timeout entries are
     /// dropped: those flows live in the mailbox and are drained there.
-    ///
-    /// `Flow` is already the scheduler's boxed task. The `Box` is that
-    /// ownership, not a second heap layer around a `Vec` element.
-    #[allow(clippy::vec_box)]
-    pub(crate) fn drain(&self) -> Vec<Box<Flow>> {
-        let mut flows = Vec::new();
-        match sync_lock::lock(&self.heap, "TimerWheel::drain") {
-            Ok(mut heap) => {
-                while let Some(Reverse(entry)) = heap.pop() {
-                    if let TimerPayload::WakeSleeper(flow) = entry.payload {
-                        flows.push(flow);
-                    }
-                }
+    pub(crate) fn drain(&self) -> Vec<Flow> {
+        match sync_lock::lock(&self.wheel, "TimerWheel::drain") {
+            Ok(mut wheel) => wheel.drain_sleepers(),
+            Err(e) => {
+                report_fault(e);
+                Vec::new()
             }
-            Err(e) => report_fault(e),
         }
-        flows
     }
 
     /// Runs on a single dedicated OS thread (spawned by
@@ -202,66 +312,52 @@ impl TimerWheel {
     /// Mutex poison → [`report_fault`] and exit the drive loop (fail-closed).
     pub fn drive(self: &Arc<Self>, shared: &super::runtime::Shared) {
         loop {
-            let mut heap = match sync_lock::lock(&self.heap, "TimerWheel::drive") {
-                Ok(h) => h,
-                Err(e) => {
-                    report_fault(e);
-                    return;
-                }
-            };
-            let shutting_down = match sync_lock::lock(&self.shutdown, "TimerWheel::drive/shutdown")
-            {
-                Ok(g) => *g,
-                Err(e) => {
-                    report_fault(e);
-                    return;
-                }
-            };
-            if shutting_down {
-                return;
-            }
-            match heap.peek() {
-                None => {
-                    match sync_lock::wait_timeout(
-                        &self.cvar,
-                        heap,
-                        Duration::from_millis(250),
-                        "TimerWheel::idle",
-                    ) {
-                        Ok((guard, _)) => {
-                            drop(guard);
+            let due = {
+                let mut wheel = match sync_lock::lock(&self.wheel, "TimerWheel::drive") {
+                    Ok(wheel) => wheel,
+                    Err(e) => {
+                        report_fault(e);
+                        return;
+                    }
+                };
+                let shutting_down =
+                    match sync_lock::lock(&self.shutdown, "TimerWheel::drive/shutdown") {
+                        Ok(flag) => *flag,
+                        Err(e) => {
+                            report_fault(e);
+                            return;
                         }
+                    };
+                if shutting_down {
+                    return;
+                }
+                let now = Instant::now();
+                let due = wheel.collect_due(now);
+                if due.is_empty() {
+                    let wait_for = match wheel.next_deadline() {
+                        Some(deadline) => {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                drop(wheel);
+                                continue;
+                            }
+                            left
+                        }
+                        None => Duration::from_millis(250),
+                    };
+                    match sync_lock::wait_timeout(&self.cvar, wheel, wait_for, "TimerWheel::wait") {
+                        Ok((guard, _)) => drop(guard),
                         Err(e) => {
                             report_fault(e);
                             return;
                         }
                     }
+                    continue;
                 }
-                Some(Reverse(top)) => {
-                    let now = Instant::now();
-                    if top.deadline <= now {
-                        let Reverse(entry) = match heap.pop() {
-                            Some(e) => e,
-                            None => continue,
-                        };
-                        drop(heap);
-                        self.fire(entry, shared);
-                    } else {
-                        let wait_for = top.deadline - now;
-                        match sync_lock::wait_timeout(
-                            &self.cvar,
-                            heap,
-                            wait_for,
-                            "TimerWheel::wait",
-                        ) {
-                            Ok((guard, _)) => drop(guard),
-                            Err(e) => {
-                                report_fault(e);
-                                return;
-                            }
-                        }
-                    }
-                }
+                due
+            };
+            for entry in due {
+                self.fire(entry, shared);
             }
         }
     }
@@ -306,6 +402,8 @@ impl TimerWheel {
                     Err(e) => report_fault(e),
                 }
             }
+            #[cfg(test)]
+            TimerPayload::Probe(_) => {}
         }
         match sync_lock::lock(&shared.notify.0, "TimerWheel::fire/notify") {
             Ok(_guard) => shared.notify.1.notify_all(),
@@ -332,5 +430,60 @@ mod tests {
             deadline > capped,
             "a delay past 30 years must not collapse to that clamp"
         );
+    }
+
+    #[test]
+    fn a_short_deadline_fires_and_a_later_one_stays() {
+        let mut wheel = Wheel::new();
+        let now = Instant::now();
+        wheel.insert(TimerEntry {
+            deadline: now,
+            payload: TimerPayload::Probe(1),
+        });
+        wheel.insert(TimerEntry {
+            deadline: now + Duration::from_secs(3),
+            payload: TimerPayload::Probe(2),
+        });
+        let due = wheel.collect_due(now + Duration::from_millis(10));
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].payload, TimerPayload::Probe(1)));
+        let later = wheel.collect_due(now + Duration::from_secs(3));
+        assert_eq!(later.len(), 1);
+        assert!(matches!(later[0].payload, TimerPayload::Probe(2)));
+    }
+
+    #[test]
+    fn a_deadline_past_the_first_level_still_fires() {
+        let mut wheel = Wheel::new();
+        let now = Instant::now();
+        let when = now + Duration::from_secs(2);
+        let (level, _) = place(wheel.cursor, wheel.tick_of(when).max(wheel.cursor));
+        assert!(level >= 1, "2s must leave the 256ms level");
+        wheel.insert(TimerEntry {
+            deadline: when,
+            payload: TimerPayload::Probe(7),
+        });
+        assert!(wheel
+            .collect_due(now + Duration::from_millis(20))
+            .is_empty());
+        let due = wheel.collect_due(when);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].payload, TimerPayload::Probe(7)));
+    }
+
+    #[test]
+    fn equal_deadlines_both_fire() {
+        let mut wheel = Wheel::new();
+        let now = Instant::now();
+        wheel.insert(TimerEntry {
+            deadline: now,
+            payload: TimerPayload::Probe(1),
+        });
+        wheel.insert(TimerEntry {
+            deadline: now,
+            payload: TimerPayload::Probe(2),
+        });
+        let due = wheel.collect_due(now);
+        assert_eq!(due.len(), 2);
     }
 }

@@ -396,6 +396,7 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
     if let Err(e) = shared.ask_waits.remove_asker(id) {
         report_fault(e);
     }
+    shared.tables.close_owner(shared, id);
     match shared.host_awaits.cancel_flow(id) {
         Ok(notices) => super::host_await::notify_cancelled(shared, notices),
         Err(e) => report_fault(e),

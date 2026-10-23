@@ -1,4 +1,4 @@
-use super::chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, MAGIC};
+use super::chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC};
 use super::instruction::Instruction;
 use super::opcode::Opcode;
 use super::value::Value;
@@ -74,7 +74,9 @@ impl std::error::Error for FormatError {}
 pub fn encode(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
-    let abi = if constants_contain_list(&chunk.constants) {
+    let abi = if constants_contain_map(&chunk.constants) {
+        ABI_VERSION_MAPS
+    } else if constants_contain_list(&chunk.constants) {
         ABI_VERSION_LISTS
     } else {
         ABI_VERSION
@@ -121,7 +123,7 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         return Err(FormatError::BadMagic { found: magic });
     }
     let abi = r.read_u32()?;
-    if abi != ABI_VERSION && abi != ABI_VERSION_LISTS {
+    if abi != ABI_VERSION && abi != ABI_VERSION_LISTS && abi != ABI_VERSION_MAPS {
         return Err(FormatError::UnsupportedAbi(abi));
     }
     let name = r.read_string()?;
@@ -219,13 +221,43 @@ fn write_value(out: &mut Vec<u8>, value: &Value) {
                 write_value(out, item);
             }
         }
+        Value::Map(entries) => {
+            out.push(10);
+            out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (key, value) in entries.iter() {
+                match key {
+                    super::value::MapKey::Int(n) => {
+                        out.push(0);
+                        out.extend_from_slice(&n.to_le_bytes());
+                    }
+                    super::value::MapKey::Str(text) => {
+                        out.push(1);
+                        write_blob(out, text.as_bytes());
+                    }
+                }
+                write_value(out, value);
+            }
+        }
     }
+}
+
+fn constants_contain_map(constants: &[Value]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Map(_) => true,
+            Value::List(items) => items.iter().any(walk),
+            Value::Message(message) => walk(message.payload.as_ref()),
+            _ => false,
+        }
+    }
+    constants.iter().any(walk)
 }
 
 fn constants_contain_list(constants: &[Value]) -> bool {
     fn walk(value: &Value) -> bool {
         match value {
             Value::List(_) => true,
+            Value::Map(entries) => entries.iter().any(|(_, value)| walk(value)),
             Value::Message(message) => walk(message.payload.as_ref()),
             _ => false,
         }
@@ -385,6 +417,34 @@ impl<'a> Reader<'a> {
                 }
                 Value::try_list(items).ok_or(FormatError::ValueTooNested)
             }
+            10 => {
+                if abi < ABI_VERSION_MAPS {
+                    return Err(FormatError::UnknownValueTag(10));
+                }
+                let n = self.read_u32()?;
+                if n > super::value::MAX_MAP_LEN as u32 {
+                    return Err(FormatError::LimitExceeded {
+                        what: "map",
+                        got: n,
+                    });
+                }
+                let mut entries = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let key = match self.read_u8()? {
+                        0 => super::value::MapKey::Int(i64::from_le_bytes(self.read_array()?)),
+                        1 => {
+                            let bytes = self.read_blob("map key")?;
+                            let text =
+                                std::str::from_utf8(bytes).map_err(|_| FormatError::BadUtf8)?;
+                            super::value::MapKey::str(text)
+                        }
+                        _ => return Err(FormatError::UnknownValueTag(10)),
+                    };
+                    let value = self.read_value(trust, depth + 1, abi)?;
+                    entries.push((key, value));
+                }
+                super::value::Value::try_map(entries).ok_or(FormatError::ValueTooNested)
+            }
             tag => Err(FormatError::UnknownValueTag(tag)),
         }
     }
@@ -538,5 +598,40 @@ mod tests {
             Err(FormatError::LimitExceeded { what: "list", .. })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn map_constant_roundtrips_as_abi_v7() -> Result<(), FormatError> {
+        let map = Value::try_map(vec![
+            (super::super::value::MapKey::int(1), Value::Int(2)),
+            (super::super::value::MapKey::str("k"), Value::str("v")),
+        ])
+        .ok_or(FormatError::ValueTooNested)?;
+        let mut chunk = Chunk {
+            name: "map".into(),
+            ..Chunk::default()
+        };
+        chunk.constants.push(map);
+        chunk.functions.push(FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        let bytes = encode(&chunk);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4])),
+            ABI_VERSION_MAPS
+        );
+        let back = decode_with(&bytes, TrustLevel::Trusted)?;
+        match back.constants.first() {
+            Some(Value::Map(entries)) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].1, Value::Int(2));
+                Ok(())
+            }
+            _ => Err(FormatError::Truncated),
+        }
     }
 }

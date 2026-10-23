@@ -1086,6 +1086,13 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::ListPack
             | Opcode::ListGet
             | Opcode::ListLen
+            | Opcode::MapPack
+            | Opcode::MapGet
+            | Opcode::MapLen
+            | Opcode::ReceiveMatchCmp
+            | Opcode::TableOpen
+            | Opcode::TableGet
+            | Opcode::TablePut
             | Opcode::Trap
             | Opcode::Halt
     )

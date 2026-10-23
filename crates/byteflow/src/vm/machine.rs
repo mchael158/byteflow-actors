@@ -528,6 +528,78 @@ impl Vm {
         self.set_reg(dst, Value::Int(items.len() as i64))
     }
 
+    fn map_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
+        if !(0..=crate::bytecode::MAX_MAP_LEN as i32).contains(&count) {
+            return Err(Fault::TypeMismatch {
+                expected: "map length 0..=32",
+                got: "imm-out-of-range",
+            });
+        }
+        let mut entries = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let key_reg = reg_at(base, (index as u16).saturating_mul(2))?;
+            let value_reg = reg_at(base, (index as u16).saturating_mul(2).saturating_add(1))?;
+            let key = match self.get_reg(key_reg)? {
+                Value::Int(n) => crate::bytecode::MapKey::Int(n),
+                Value::Str(text) => crate::bytecode::MapKey::Str(text),
+                other => {
+                    return Err(Fault::TypeMismatch {
+                        expected: "map key (int or str)",
+                        got: other.type_name(),
+                    })
+                }
+            };
+            entries.push((key, self.get_reg(value_reg)?));
+        }
+        let map = match Value::try_map(entries) {
+            Some(map) => map,
+            None => {
+                return Err(Fault::TypeMismatch {
+                    expected: "map",
+                    got: "duplicate-key-or-nested",
+                })
+            }
+        };
+        self.set_reg(dst, map)
+    }
+
+    fn map_get(&mut self, dst: u8, src: u8, key: u8) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::Map(entries) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "map",
+                got: value.type_name(),
+            });
+        };
+        let key = match self.get_reg(key)? {
+            Value::Int(n) => crate::bytecode::MapKey::Int(n),
+            Value::Str(text) => crate::bytecode::MapKey::Str(text),
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "map key (int or str)",
+                    got: other.type_name(),
+                })
+            }
+        };
+        let found = entries
+            .iter()
+            .find(|(existing, _)| existing == &key)
+            .map(|(_, item)| item.clone())
+            .unwrap_or(Value::Unit);
+        self.set_reg(dst, found)
+    }
+
+    fn map_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::Map(entries) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "map",
+                got: value.type_name(),
+            });
+        };
+        self.set_reg(dst, Value::Int(entries.len() as i64))
+    }
+
     fn numeric_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) -> Result<(), Fault> {
         let a = self.get_reg(lhs)?;
         let b = self.get_reg(rhs)?;
@@ -786,6 +858,55 @@ impl Vm {
                 Opcode::ListLen => {
                     trap!(self.list_len(instr.a, instr.b));
                 }
+                Opcode::MapPack => {
+                    trap!(self.map_pack(instr.a, instr.b, instr.imm));
+                }
+                Opcode::MapGet => {
+                    trap!(self.map_get(instr.a, instr.b, instr.c));
+                }
+                Opcode::MapLen => {
+                    trap!(self.map_len(instr.a, instr.b));
+                }
+                Opcode::ReceiveMatchCmp => {
+                    let tag = trap!(self.tag_from_reg(instr.b));
+                    let bound = trap!(self.int_from_reg(instr.c));
+                    let Some(cmp) = crate::bytecode::IntCmp::from_imm(instr.imm) else {
+                        return VmResult::Trap(Fault::TypeMismatch {
+                            expected: "cmp 0..=2",
+                            got: "imm-out-of-range",
+                        });
+                    };
+                    return VmResult::Receive {
+                        dest_reg: instr.a,
+                        timeout: None,
+                        match_tag: Some(tag),
+                        match_request_id: None,
+                        match_payload_kind: None,
+                        match_payload_eq: None,
+                        match_payload_value: None,
+                        match_payload_cmp: Some((cmp, bound)),
+                    };
+                }
+                Opcode::TableOpen => {
+                    return VmResult::TableOpen {
+                        dest_reg: instr.a,
+                        name: trap!(self.expect_str_reg(instr.b)),
+                    };
+                }
+                Opcode::TableGet => {
+                    return VmResult::TableGet {
+                        dest_reg: instr.a,
+                        cap: trap!(self.expect_cap_reg(instr.b)),
+                        key: trap!(self.get_reg(instr.c)),
+                    };
+                }
+                Opcode::TablePut => {
+                    return VmResult::TablePut {
+                        cap: trap!(self.expect_cap_reg(instr.a)),
+                        key: trap!(self.get_reg(instr.b)),
+                        value: trap!(self.get_reg(instr.c)),
+                    };
+                }
                 Opcode::Move => {
                     let v = trap!(self.get_reg(instr.b));
                     trap!(self.set_reg(instr.a, v));
@@ -947,6 +1068,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveTimeout => {
@@ -959,6 +1081,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatch => {
@@ -971,6 +1094,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatchImm => {
@@ -983,6 +1107,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatchTimeout => {
@@ -996,6 +1121,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatchImmTimeout => {
@@ -1009,6 +1135,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::IsAlive => {
@@ -1096,6 +1223,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: Some(payload),
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatchValue => {
@@ -1109,6 +1237,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: Some(Arc::new(payload)),
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::SendRemote => {
@@ -1181,12 +1310,12 @@ impl Vm {
                 }
                 Opcode::ReceiveMatchKind => {
                     // Selective receive by payload wire-tag (`Value::wire_tag`,
-                    // 0..=9). Non-matching hops stay queued (FIFO skip).
+                    // 0..=10). Non-matching hops stay queued (FIFO skip).
                     let kind = match u8::try_from(instr.imm) {
-                        Ok(k) if k <= 9 => k,
+                        Ok(k) if k <= 10 => k,
                         _ => {
                             return VmResult::Trap(Fault::TypeMismatch {
-                                expected: "payload kind 0..=9",
+                                expected: "payload kind 0..=10",
                                 got: "imm-out-of-range",
                             })
                         }
@@ -1199,6 +1328,7 @@ impl Vm {
                         match_payload_kind: Some(kind),
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::FreshRequestId => {
@@ -1216,6 +1346,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::ReceiveMatchCorrImm => {
@@ -1229,6 +1360,7 @@ impl Vm {
                         match_payload_kind: None,
                         match_payload_eq: None,
                         match_payload_value: None,
+                        match_payload_cmp: None,
                     };
                 }
                 Opcode::Ask => {
@@ -1511,6 +1643,30 @@ fn heap_charge_of(value: &Value) -> Result<usize, Fault> {
                     .ok_or_else(|| Fault::QuotaExceeded("heap charge does not fit".into()))?;
                 for item in items.iter() {
                     let part = walk(item, depth + 1)?;
+                    sum = match sum.checked_add(part) {
+                        Some(total) => total,
+                        None => {
+                            return Err(Fault::QuotaExceeded("heap charge does not fit".into()));
+                        }
+                    };
+                }
+                Ok(sum)
+            }
+            Value::Map(entries) => {
+                let mut sum = entries
+                    .len()
+                    .checked_mul(std::mem::size_of::<Value>())
+                    .ok_or_else(|| Fault::QuotaExceeded("heap charge does not fit".into()))?;
+                for (key, value) in entries.iter() {
+                    if let crate::bytecode::MapKey::Str(text) = key {
+                        sum = match sum.checked_add(text.len()) {
+                            Some(total) => total,
+                            None => {
+                                return Err(Fault::QuotaExceeded("heap charge does not fit".into()))
+                            }
+                        };
+                    }
+                    let part = walk(value, depth + 1)?;
                     sum = match sum.checked_add(part) {
                         Some(total) => total,
                         None => {
@@ -2563,6 +2719,44 @@ mod tests {
                 Ok(())
             }
             other => Err(format!("list quota: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn map_pack_get_len_and_duplicate_key() -> TestResult {
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 6);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 7);
+        b.emit_load_imm(2, 2);
+        b.emit_load_imm(3, 8);
+        b.emit_map_pack(4, 0, 2);
+        b.emit_map_get(5, 4, 2);
+        b.emit_return(5);
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(20) {
+            VmResult::Complete(Value::Int(8)) => {}
+            other => return Err(format!("map get: {other:?}").into()),
+        }
+        let mut b = ChunkBuilder::new("t");
+        b.begin_function("main", 0, 5);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 7);
+        b.emit_load_imm(2, 1);
+        b.emit_load_imm(3, 8);
+        b.emit_map_pack(4, 0, 2);
+        b.emit_halt();
+        let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+        match vm.run(20) {
+            VmResult::Trap(fault) => {
+                let text = fault.to_string();
+                if text.contains("duplicate") {
+                    Ok(())
+                } else {
+                    Err(format!("duplicate key: {text}").into())
+                }
+            }
+            other => Err(format!("duplicate key: {other:?}").into()),
         }
     }
 

@@ -203,12 +203,16 @@ fn receive_filter(
     match_payload_kind: Option<u8>,
     match_payload_eq: Option<i64>,
     match_payload_value: Option<std::sync::Arc<crate::Value>>,
+    match_payload_cmp: Option<(crate::bytecode::IntCmp, i64)>,
 ) -> WaitFilter {
     if let Some(kind) = match_payload_kind {
         return WaitFilter::PayloadKind(kind);
     }
     if let (Some(tag), Some(payload)) = (match_tag, match_payload_value) {
         return WaitFilter::TagValue { tag, payload };
+    }
+    if let (Some(tag), Some((cmp, bound))) = (match_tag, match_payload_cmp) {
+        return WaitFilter::TagCmp { tag, cmp, bound };
     }
     if let (Some(tag), Some(payload)) = (match_tag, match_payload_eq) {
         return WaitFilter::TagPayload { tag, payload };
@@ -634,6 +638,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 match_payload_kind,
                 match_payload_eq,
                 match_payload_value,
+                match_payload_cmp,
             } => {
                 if !flow.authority.rights().contains(CapRights::RECV) {
                     finish_failed(
@@ -650,6 +655,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     match_payload_kind,
                     match_payload_eq,
                     match_payload_value,
+                    match_payload_cmp,
                 );
                 match flow.mailbox.try_pop_filter(filter.clone()) {
                     Ok(Some(msg)) => {
@@ -962,6 +968,43 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         );
                         return;
                     }
+                }
+            }
+            VmResult::TableOpen { dest_reg, name } => {
+                match shared.tables.open(shared, flow.id, name.as_ref()) {
+                    Ok(cap) => match flow.vm.set_register(dest_reg, crate::Value::Cap(cap)) {
+                        Ok(()) => {}
+                        Err(fault) => {
+                            shared.tables.close_owner(shared, flow.id);
+                            finish_failed(shared, *flow, fault.to_string());
+                            return;
+                        }
+                    },
+                    Err(msg) => {
+                        finish_failed(shared, *flow, msg);
+                        return;
+                    }
+                }
+            }
+            VmResult::TableGet { dest_reg, cap, key } => {
+                match shared.tables.get(shared, flow.id, cap, &key) {
+                    Ok(value) => match flow.vm.set_register(dest_reg, value) {
+                        Ok(()) => {}
+                        Err(fault) => {
+                            finish_failed(shared, *flow, fault.to_string());
+                            return;
+                        }
+                    },
+                    Err(msg) => {
+                        finish_failed(shared, *flow, msg);
+                        return;
+                    }
+                }
+            }
+            VmResult::TablePut { cap, key, value } => {
+                if let Err(msg) = shared.tables.put(shared, flow.id, cap, &key, value) {
+                    finish_failed(shared, *flow, msg);
+                    return;
                 }
             }
             VmResult::HostAwait { dest_reg, op, args } => {

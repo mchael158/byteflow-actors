@@ -356,6 +356,49 @@ impl<'a> Fn<'a> {
         dst
     }
 
+    /// Pack `pairs` into a map. Each pair is `(key, value)` already in
+    /// registers. Keys are `Int` or `Str`. At most 32 pairs.
+    pub fn map_pack(&mut self, pairs: &[(Reg, Reg)]) -> Reg {
+        let dst = self.local();
+        let base = match pairs.first() {
+            Some((key, _)) => key.0,
+            None => 0,
+        };
+        self.b.emit_map_pack(dst.0, base, pairs.len() as i32);
+        dst
+    }
+
+    pub fn map_get(&mut self, map: Reg, key: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_map_get(dst.0, map.0, key.0);
+        dst
+    }
+
+    pub fn map_len(&mut self, map: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_map_len(dst.0, map.0);
+        dst
+    }
+
+    /// Open this flow's table and return its Cap (`SEND` and `RECV`).
+    pub fn table_open(&mut self, name: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_table_open(dst.0, name.0);
+        dst
+    }
+
+    /// Read `key` from `table`. Missing key yields `Unit`.
+    pub fn table_get(&mut self, table: Reg, key: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_table_get(dst.0, table.0, key.0);
+        dst
+    }
+
+    /// Store `value` at `key` in `table`.
+    pub fn table_put(&mut self, table: Reg, key: Reg, value: Reg) {
+        self.b.emit_table_put(table.0, key.0, value.0);
+    }
+
     pub fn sub(&mut self, lhs: Reg, rhs: Reg) -> Reg {
         self.binop(Opcode::Sub, lhs, rhs)
     }
@@ -657,6 +700,16 @@ impl<'a> Fn<'a> {
         dst
     }
 
+    /// Selective receive: tag and an `Int` payload compared with `bound`.
+    ///
+    /// `Eq`, `Lt`, and `Le` use signed integers. A hop whose payload is not
+    /// that `Int`, or that fails the comparison, stays in the mailbox.
+    pub fn receive_match_cmp(&mut self, tag: Reg, bound: Reg, cmp: crate::bytecode::IntCmp) -> Reg {
+        let msg = self.local();
+        self.b.emit_receive_match_cmp(msg.0, tag.0, bound.0, cmp);
+        msg
+    }
+
     /// Selective receive: application tag **and** `Int` payload equality.
     pub fn receive_match_eq(&mut self, tag: Reg, payload: Reg) -> Reg {
         let msg = self.local();
@@ -728,7 +781,7 @@ impl<'a> Fn<'a> {
         msg
     }
 
-    /// Wait for a hop whose `payload.wire_tag() == kind` (`0..=9`, FIFO skip).
+    /// Wait for a hop whose `payload.wire_tag() == kind` (`0..=10`, FIFO skip).
     pub fn receive_match_kind(&mut self, kind: u8) -> Reg {
         let msg = self.local();
         self.b.emit_receive_match_kind(msg.0, kind);

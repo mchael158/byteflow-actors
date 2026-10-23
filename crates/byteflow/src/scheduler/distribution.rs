@@ -140,6 +140,312 @@ pub(crate) fn deliver(
     })
 }
 
+const FRAME_MAGIC: [u8; 4] = *b"BFH1";
+const FRAME_VERSION: u8 = 1;
+const MAX_FRAME_NAME: usize = 256;
+
+/// Why a remote hop frame was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteFrameError {
+    BadMagic,
+    Truncated,
+    BadVersion,
+    BadUtf8,
+    /// A `Cap` or `Pid` was on the wire, or a nested hop still had a reply cap.
+    LiveCapability,
+    /// Sender `0` is the local host. A remote frame must name another id.
+    SenderZero,
+    /// The frame header and the envelope name different senders.
+    SenderMismatch,
+    Name,
+    Unsupported,
+    NoSuchName,
+    Mailbox(super::mailbox::MailboxFullReason),
+    Unavailable,
+}
+
+impl std::fmt::Display for RemoteFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadMagic => f.write_str("remote frame magic"),
+            Self::Truncated => f.write_str("remote frame truncated"),
+            Self::BadVersion => f.write_str("remote frame version"),
+            Self::BadUtf8 => f.write_str("remote frame name"),
+            Self::LiveCapability => f.write_str("remote frame carried a local capability"),
+            Self::SenderZero => f.write_str("remote frame sender is the local host"),
+            Self::SenderMismatch => f.write_str("remote frame sender does not match the envelope"),
+            Self::Name => f.write_str("remote frame name"),
+            Self::Unsupported => f.write_str("remote frame value"),
+            Self::NoSuchName => f.write_str("remote frame name is not registered"),
+            Self::Mailbox(reason) => write!(f, "remote frame mailbox ({reason})"),
+            Self::Unavailable => f.write_str("remote frame unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for RemoteFrameError {}
+
+/// Bytes the host can write on its own socket. No capability leaves the node.
+pub fn encode_frame(hop: &OutboundHop) -> Result<Vec<u8>, RemoteFrameError> {
+    if hop.sender.is_host() {
+        return Err(RemoteFrameError::SenderZero);
+    }
+    if hop.name.is_empty() || hop.name.len() > MAX_FRAME_NAME {
+        return Err(RemoteFrameError::Name);
+    }
+    if hop.message.reply_cap != CapId::NONE || hop.message.payload.contains_live_cap(0) {
+        return Err(RemoteFrameError::LiveCapability);
+    }
+    if hop.message.sender != hop.sender.as_u64() {
+        return Err(frame_sender_error(hop.message.sender));
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&FRAME_MAGIC);
+    out.push(FRAME_VERSION);
+    out.extend_from_slice(&hop.node.to_le_bytes());
+    out.extend_from_slice(&(hop.name.len() as u16).to_le_bytes());
+    out.extend_from_slice(hop.name.as_bytes());
+    out.extend_from_slice(&hop.sender.as_u64().to_le_bytes());
+    write_frame_message(&mut out, &hop.message)?;
+    Ok(out)
+}
+
+/// Inverse of [`encode_frame`]. The host still decides which bytes are trusted.
+pub fn decode_frame(bytes: &[u8]) -> Result<OutboundHop, RemoteFrameError> {
+    let mut reader = FrameReader {
+        data: bytes,
+        pos: 0,
+    };
+    let magic = reader.array::<4>()?;
+    if magic != FRAME_MAGIC {
+        return Err(RemoteFrameError::BadMagic);
+    }
+    if reader.u8()? != FRAME_VERSION {
+        return Err(RemoteFrameError::BadVersion);
+    }
+    let node = reader.u64()?;
+    let name_len = reader.u16()? as usize;
+    if name_len == 0 || name_len > MAX_FRAME_NAME {
+        return Err(RemoteFrameError::Name);
+    }
+    let name_bytes = reader.take(name_len)?;
+    let name = std::str::from_utf8(name_bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
+    let sender = reader.u64()?;
+    if sender == 0 {
+        return Err(RemoteFrameError::SenderZero);
+    }
+    let message = read_frame_message(&mut reader)?;
+    if message.sender != sender {
+        return Err(frame_sender_error(message.sender));
+    }
+    if reader.pos != reader.data.len() {
+        return Err(RemoteFrameError::Unsupported);
+    }
+    Ok(OutboundHop {
+        sender: FlowId(sender),
+        node,
+        name: Arc::from(name),
+        message,
+    })
+}
+
+fn frame_sender_error(message_sender: u64) -> RemoteFrameError {
+    if message_sender == 0 {
+        RemoteFrameError::SenderZero
+    } else {
+        RemoteFrameError::SenderMismatch
+    }
+}
+
+struct FrameReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> FrameReader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], RemoteFrameError> {
+        let end = self.pos.checked_add(n).ok_or(RemoteFrameError::Truncated)?;
+        if end > self.data.len() {
+            return Err(RemoteFrameError::Truncated);
+        }
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], RemoteFrameError> {
+        let slice = self.take(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(slice);
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, RemoteFrameError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, RemoteFrameError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> Result<u32, RemoteFrameError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, RemoteFrameError> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn i64(&mut self) -> Result<i64, RemoteFrameError> {
+        Ok(i64::from_le_bytes(self.array()?))
+    }
+}
+
+fn write_frame_message(out: &mut Vec<u8>, message: &Message) -> Result<(), RemoteFrameError> {
+    if !message.reply_cap.is_none() {
+        return Err(RemoteFrameError::LiveCapability);
+    }
+    out.extend_from_slice(&message.sender.to_le_bytes());
+    out.extend_from_slice(&message.request_id.to_le_bytes());
+    out.extend_from_slice(&message.tag.to_le_bytes());
+    write_frame_value(out, message.payload.as_ref())
+}
+
+fn read_frame_message(reader: &mut FrameReader<'_>) -> Result<Message, RemoteFrameError> {
+    let sender = reader.u64()?;
+    let request_id = reader.u64()?;
+    let tag = reader.u16()?;
+    let payload = read_frame_value(reader, 0)?;
+    Ok(Message::new(sender, request_id, tag, payload).authenticate(sender, CapId::NONE))
+}
+
+fn write_frame_value(out: &mut Vec<u8>, value: &Value) -> Result<(), RemoteFrameError> {
+    match value {
+        Value::Unit => out.push(0),
+        Value::Bool(flag) => {
+            out.push(1);
+            out.push(u8::from(*flag));
+        }
+        Value::Int(n) => {
+            out.push(2);
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Value::Float(n) => {
+            out.push(3);
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Value::Pid(_) | Value::Cap(_) => return Err(RemoteFrameError::LiveCapability),
+        Value::Message(message) => {
+            out.push(5);
+            write_frame_message(out, message)?;
+        }
+        Value::Str(text) => {
+            out.push(7);
+            write_frame_blob(out, text.as_bytes())?;
+        }
+        Value::Bytes(bytes) => {
+            out.push(8);
+            write_frame_blob(out, bytes)?;
+        }
+        Value::List(items) => {
+            if items.len() > crate::bytecode::MAX_LIST_LEN {
+                return Err(RemoteFrameError::Unsupported);
+            }
+            out.push(9);
+            out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            for item in items.iter() {
+                write_frame_value(out, item)?;
+            }
+        }
+        Value::Map(entries) => {
+            if entries.len() > crate::bytecode::MAX_MAP_LEN {
+                return Err(RemoteFrameError::Unsupported);
+            }
+            out.push(10);
+            out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (key, item) in entries.iter() {
+                match key {
+                    crate::bytecode::MapKey::Int(n) => {
+                        out.push(0);
+                        out.extend_from_slice(&n.to_le_bytes());
+                    }
+                    crate::bytecode::MapKey::Str(text) => {
+                        out.push(1);
+                        write_frame_blob(out, text.as_bytes())?;
+                    }
+                }
+                write_frame_value(out, item)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_frame_blob(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), RemoteFrameError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| RemoteFrameError::Unsupported)?;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn read_frame_value(reader: &mut FrameReader<'_>, depth: u32) -> Result<Value, RemoteFrameError> {
+    if depth > crate::bytecode::MAX_VALUE_DEPTH {
+        return Err(RemoteFrameError::Unsupported);
+    }
+    match reader.u8()? {
+        0 => Ok(Value::Unit),
+        1 => Ok(Value::Bool(reader.u8()? != 0)),
+        2 => Ok(Value::Int(reader.i64()?)),
+        3 => Ok(Value::Float(f64::from_le_bytes(reader.array()?))),
+        4 | 6 => Err(RemoteFrameError::LiveCapability),
+        5 => Ok(Value::Message(read_frame_message(reader)?)),
+        7 => {
+            let bytes = read_frame_blob(reader)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
+            Ok(Value::str(text))
+        }
+        8 => Ok(Value::bytes(read_frame_blob(reader)?)),
+        9 => {
+            let n = reader.u32()?;
+            if n > crate::bytecode::MAX_LIST_LEN as u32 {
+                return Err(RemoteFrameError::Unsupported);
+            }
+            let mut items = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                items.push(read_frame_value(reader, depth + 1)?);
+            }
+            Value::try_list(items).ok_or(RemoteFrameError::Unsupported)
+        }
+        10 => {
+            let n = reader.u32()?;
+            if n > crate::bytecode::MAX_MAP_LEN as u32 {
+                return Err(RemoteFrameError::Unsupported);
+            }
+            let mut entries = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                let key = match reader.u8()? {
+                    0 => crate::bytecode::MapKey::Int(reader.i64()?),
+                    1 => {
+                        let bytes = read_frame_blob(reader)?;
+                        let text =
+                            std::str::from_utf8(&bytes).map_err(|_| RemoteFrameError::BadUtf8)?;
+                        crate::bytecode::MapKey::str(text)
+                    }
+                    _ => return Err(RemoteFrameError::Unsupported),
+                };
+                entries.push((key, read_frame_value(reader, depth + 1)?));
+            }
+            Value::try_map(entries).ok_or(RemoteFrameError::Unsupported)
+        }
+        _ => Err(RemoteFrameError::Unsupported),
+    }
+}
+
+fn read_frame_blob(reader: &mut FrameReader<'_>) -> Result<Vec<u8>, RemoteFrameError> {
+    let len = reader.u32()? as usize;
+    Ok(reader.take(len)?.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -266,5 +572,261 @@ mod tests {
             return Err("remote nested hop minted a local reply cap".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn frame_keeps_the_declared_sender() -> Result<(), RemoteFrameError> {
+        use crate::CapId;
+        let hop = OutboundHop {
+            sender: FlowId(9),
+            node: 3,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(9, 4, 1, Value::Int(5)).authenticate(9, CapId::NONE),
+        };
+        let back = decode_frame(&encode_frame(&hop)?)?;
+        if back.sender.as_u64() != 9 || back.node != 3 || back.message.tag != 1 {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        if !matches!(back.message.payload.as_ref(), Value::Int(5)) {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn frame_rejects_a_live_cap() {
+        use crate::CapId;
+        let hop = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(9, 1, 1, Value::Cap(CapId::from_raw(1)))
+                .authenticate(9, CapId::NONE),
+        };
+        assert!(matches!(
+            encode_frame(&hop),
+            Err(RemoteFrameError::LiveCapability)
+        ));
+    }
+
+    #[test]
+    fn deliver_frame_lands_in_the_named_mailbox() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::CapId;
+        let mut program = Program::new("inbox");
+        program.function("main", 0, |f| {
+            let msg = f.receive();
+            let n = f.hop_payload(msg);
+            f.return_(n);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        let cap = rt.mint_cap(handle.id())?;
+        rt.register_name("inbox", cap)?;
+        let frame = encode_frame(&OutboundHop {
+            sender: FlowId(44),
+            node: 2,
+            name: std::sync::Arc::from("inbox"),
+            message: Message::new(44, 1, 7, Value::Int(8)).authenticate(44, CapId::NONE),
+        })?;
+        rt.deliver_frame(&frame).map_err(|err| format!("{err:?}"))?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("deliver frame timed out")?;
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Completed(Value::Int(8)) => Ok(()),
+            other => Err(format!("deliver frame: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn receive_match_cmp_keeps_the_failing_int_queued() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::IntCmp;
+        use crate::bytecode::Message;
+        let mut program = Program::new("guard");
+        program.function("main", 0, |f| {
+            let tag = f.load_i32(1);
+            let bound = f.load_i32(10);
+            let msg = f.receive_match_cmp(tag, bound, IntCmp::Lt);
+            let n = f.hop_payload(msg);
+            f.return_(n);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        rt.send(
+            handle.id(),
+            Value::Message(Message::request(1, 1, Value::Int(20))),
+        )?;
+        rt.send(
+            handle.id(),
+            Value::Message(Message::request(2, 1, Value::Int(3))),
+        )?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("guard timed out")?;
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Completed(Value::Int(3)) => Ok(()),
+            other => Err(format!("guard: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn table_put_get_and_read_only_delegate() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::CapRights;
+        let mut program = Program::new("table");
+        program.function("main", 0, |f| {
+            let name = f.load_str("box");
+            let table = f.table_open(name);
+            let key = f.load_i32(1);
+            let value = f.load_i32(42);
+            f.table_put(table, key, value);
+            let got = f.table_get(table, key);
+            f.return_(got);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("table get timed out")?;
+        rt.shutdown();
+        if !matches!(outcome, FlowOutcome::Completed(Value::Int(42))) {
+            return Err(format!("table get: {outcome:?}").into());
+        }
+
+        let mut program = Program::new("table-ro");
+        program.function("main", 0, |f| {
+            let name = f.load_str("box");
+            let table = f.table_open(name);
+            let key = f.load_i32(1);
+            let value = f.load_i32(42);
+            f.table_put(table, key, value);
+            let read_only = f.delegate(table, CapRights::RECV);
+            f.table_put(read_only, key, value);
+            f.return_(value);
+        });
+        let rt = Runtime::with_natives_and_config(
+            program.build(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("read-only put timed out")?;
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Failed(text) if text.contains("rights") => Ok(()),
+            other => Err(format!("read-only put: {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn frame_rejects_a_sender_that_is_not_the_envelope() -> Result<(), RemoteFrameError> {
+        use crate::CapId;
+        let agreed = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(9, 1, 1, Value::Int(1)).authenticate(9, CapId::NONE),
+        };
+        let bytes = encode_frame(&agreed)?;
+        let host = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(0, 1, 1, Value::Int(1)).authenticate(0, CapId::NONE),
+        };
+        if !matches!(encode_frame(&host), Err(RemoteFrameError::SenderZero)) {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        let other = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(4, 1, 1, Value::Int(1)).authenticate(4, CapId::NONE),
+        };
+        if !matches!(encode_frame(&other), Err(RemoteFrameError::SenderMismatch)) {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        // Header sender stays 9. The envelope sender sits just after it.
+        let envelope_at = 4 + 1 + 8 + 2 + agreed.name.len() + 8;
+        let mut forged = bytes.clone();
+        forged[envelope_at..envelope_at + 8].copy_from_slice(&0u64.to_le_bytes());
+        if !matches!(decode_frame(&forged), Err(RemoteFrameError::SenderZero)) {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        forged[envelope_at..envelope_at + 8].copy_from_slice(&4u64.to_le_bytes());
+        if !matches!(decode_frame(&forged), Err(RemoteFrameError::SenderMismatch)) {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn table_overwrite_at_the_row_cap_keeps_the_row() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bytecode::builder::ChunkBuilder;
+        let mut b = ChunkBuilder::new("full");
+        b.begin_function("main", 0, 6);
+        let name = b.const_(Value::str("box"));
+        b.emit_load_const(0, name);
+        b.emit_table_open(1, 0);
+        b.emit_load_imm(2, 0);
+        b.emit_load_imm(3, 0);
+        let again = b.new_label();
+        let done = b.new_label();
+        b.bind_label(again);
+        b.emit_table_put(1, 2, 3);
+        b.emit_add_imm(2, 2, 1);
+        b.emit_lt_imm(4, 2, 256);
+        b.emit_branch(4, done);
+        b.emit_jump(again);
+        b.bind_label(done);
+        b.emit_load_imm(2, 0);
+        b.emit_load_imm(3, 7);
+        b.emit_table_put(1, 2, 3);
+        b.emit_table_get(5, 1, 2);
+        b.emit_return(5);
+        let rt = Runtime::with_natives_and_config(
+            b.finish(),
+            crate::std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("table fill timed out")?;
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Completed(Value::Int(7)) => Ok(()),
+            other => Err(format!("overwrite at cap: {other:?}").into()),
+        }
     }
 }

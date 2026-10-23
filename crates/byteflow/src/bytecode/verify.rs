@@ -81,6 +81,12 @@ fn reject_untrusted_constant(value: &Value, index: usize) -> Result<(), VerifyEr
             }
             Ok(())
         }
+        Value::Map(entries) => {
+            for (_, value) in entries.iter() {
+                reject_untrusted_constant(value, index)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

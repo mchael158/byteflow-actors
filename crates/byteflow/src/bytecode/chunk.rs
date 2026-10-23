@@ -16,12 +16,18 @@ pub const MAGIC: [u8; 4] = *b"BFV0";
 /// v6: [`Value::List`] wire tag `9`. Modules without a list still encode
 /// as v5 so an older reader keeps accepting them. A list constant is
 /// written only as v6; v5 decoders reject tag `9`.
+/// v7: [`Value::Map`] wire tag `10`. A module without a map stays on v5 or
+/// v6. v5 and v6 decoders reject tag `10`.
 pub const ABI_VERSION: u32 = 5;
 
 /// ABI that introduces [`Value::List`]. [`encode`](super::encode) emits this
-/// only when the chunk contains a list. [`decode`](super::decode) accepts
-/// both v5 and v6.
+/// only when the chunk contains a list and no map. [`decode`](super::decode)
+/// accepts v5, v6, and v7.
 pub const ABI_VERSION_LISTS: u32 = 6;
+
+/// ABI that introduces [`Value::Map`]. Emitted only when a constant contains
+/// a map. Decode accepts it alongside v5 and v6.
+pub const ABI_VERSION_MAPS: u32 = 7;
 
 /// A callable entry point inside a [`Chunk`]: either bytecode-defined or a
 /// slot reserved for a native (Rust) function registered with the runtime

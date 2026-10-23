@@ -45,13 +45,16 @@ mod runtime;
 mod spawn;
 mod supervisor;
 mod sync_lock;
+mod table;
 mod timer;
 mod worker;
 
 pub use crate::bytecode::RestartPolicy;
 pub use capability::{CapError, CapRights, Capability};
 pub use delegate::{exec_delegate, DelegateError};
-pub use distribution::{DistributionBridge, OutboundHop};
+pub use distribution::{
+    decode_frame, encode_frame, DistributionBridge, OutboundHop, RemoteFrameError,
+};
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};
 pub use host_await::{

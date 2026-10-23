@@ -23,9 +23,36 @@ All notable changes to **byteflow-actors** are documented here.
   `HostAwaitBridge::cancel` runs after the registry lock is released.
   A test can replay those completions in a recorded order. Production
   delivery is unchanged when that gate is off. No new opcode.
+- **Timer wheel:** sleep and receive-timeout deadlines share a six-level
+  wheel (256 slots, 1 ms). Insert is one bucket. A late receive timeout
+  still belongs only to that park's `WaitEpoch`. The drive waits until
+  the next exact deadline.
+- **Maps:** `Value::Map` holds at most 32 pairs. Keys are `Int` or `Str`.
+  `MapPack` (`0x84`), `MapGet` (`0x85`), and `MapLen` (`0x86`). A missing
+  key reads as `Unit`. A module that stores a map encodes as **ABI v7**;
+  a module without one stays on the ABI it already uses. The JIT stops
+  before these opcodes.
+- **Guards:** `ReceiveMatchCmp` (`0x83`) is one extra selective-receive
+  filter: tag plus `Eq`, `Lt`, or `Le` on an `Int` payload. A hop that
+  fails the comparison, or whose payload is not an `Int`, stays queued
+  in order.
+- **Tables:** one named table per owning flow (`TableOpen` `0x87`,
+  `TableGet` `0x88`, `TablePut` `0x89`). The owner receives a Cap.
+  `RECV` reads and `SEND` writes. At most 256 rows and 64 KiB. The table
+  disappears when the owner finalizes. This is not a global ETS table.
+- **Cluster framing:** `encode_frame` / `decode_frame` / `Runtime::deliver_frame`
+  carry a hop (node, name, envelope) with no live `Cap`. The host still
+  opens the socket. The runtime only encodes, decodes, and delivers into
+  the local mailbox with the sender the host declared. Sender `0` is refused.
 
 ### Fixed
 
+- **Remote frame sender:** the envelope sender must be the header sender.
+  An envelope with sender `0`, or a different id, is refused, so a frame
+  cannot arrive looking like a local host hop.
+- **Table row cap:** replacing a row whose size is zero still counts as
+  the same row. A full table can overwrite that key. Table ids do not
+  wrap back to 1 after the counter is exhausted.
 - **Capability grants:** `Send`, `Ask`, host `Runtime::send`, and spawn
   arguments reissue a `Cap` nested in a `List` or in another hop,
   including that hop's `reply_cap`. A token the sender does not hold

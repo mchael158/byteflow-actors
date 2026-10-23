@@ -46,7 +46,7 @@ pub enum VmResult {
         match_tag: Option<u16>,
         match_request_id: Option<u64>,
         /// When set, wait for a hop whose `payload.wire_tag()` equals this
-        /// BFV0 tag (`0..=9`). Independent of [`Self::Receive::match_tag`].
+        /// BFV0 tag (`0..=10`). Independent of [`Self::Receive::match_tag`].
         match_payload_kind: Option<u8>,
         /// When set together with [`Self::Receive::match_tag`], the hop's
         /// payload must be that `Int` (term equality, not a full pattern).
@@ -54,6 +54,23 @@ pub enum VmResult {
         /// When set together with [`Self::Receive::match_tag`], the hop's
         /// payload must equal this value (`ReceiveMatchValue`).
         match_payload_value: Option<Arc<Value>>,
+        /// When set together with [`Self::Receive::match_tag`], the payload
+        /// must be an `Int` that passes this comparison. Other hops stay queued.
+        match_payload_cmp: Option<(crate::bytecode::IntCmp, i64)>,
+    },
+    /// `TableOpen` — this flow creates its one table and receives a Cap.
+    TableOpen { dest_reg: u8, name: Arc<str> },
+    /// `TableGet` — read one row. Missing key writes `Unit`.
+    TableGet {
+        dest_reg: u8,
+        cap: CapId,
+        key: Value,
+    },
+    /// `TablePut` — write one row. Requires `SEND` on the table Cap.
+    TablePut {
+        cap: CapId,
+        key: Value,
+        value: Value,
     },
     /// `SendRemote` — authenticated hop for the host distribution bridge.
     SendRemote {

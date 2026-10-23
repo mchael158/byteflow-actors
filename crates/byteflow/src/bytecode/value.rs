@@ -109,6 +109,27 @@ impl Message {
 /// by the decoder, `ListPack`, and [`Value::try_list`].
 pub const MAX_LIST_LEN: usize = 32;
 
+/// Most pairs a [`Value::Map`] may hold. Keys are [`MapKey`] (`Int` or `Str`).
+pub const MAX_MAP_LEN: usize = 32;
+
+/// Key of a [`Value::Map`]. Floats are not keys: equality would not be
+/// a useful match, and a NaN key could never be read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapKey {
+    Int(i64),
+    Str(Arc<str>),
+}
+
+impl MapKey {
+    pub fn int(n: i64) -> Self {
+        MapKey::Int(n)
+    }
+
+    pub fn str(text: impl AsRef<str>) -> Self {
+        MapKey::Str(Arc::from(text.as_ref()))
+    }
+}
+
 /// Shared stand-in so [`Drop`] can detach a payload without allocating.
 fn discarded_payload() -> Arc<Value> {
     static EMPTY: std::sync::OnceLock<Arc<Value>> = std::sync::OnceLock::new();
@@ -175,10 +196,13 @@ pub enum Value {
     /// Bounded sequence (ABI v6 wire tag `9`). At most [`MAX_LIST_LEN`]
     /// elements; nesting shares [`super::MAX_VALUE_DEPTH`] with `Message`.
     List(Arc<[Value]>),
+    /// Bounded map (ABI v7 wire tag `10`). At most [`MAX_MAP_LEN`] pairs.
+    /// Insertion order is kept. A duplicate key is rejected at construction.
+    Map(Arc<[(MapKey, Value)]>),
 }
 
 impl Value {
-    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`).
+    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`, `Map=10`).
     ///
     /// Used by [`crate::Opcode::ReceiveMatchKind`] selective receive.
     #[inline]
@@ -194,6 +218,39 @@ impl Value {
             Value::Str(_) => 7,
             Value::Bytes(_) => 8,
             Value::List(_) => 9,
+            Value::Map(_) => 10,
+        }
+    }
+
+    /// Value stored under `key`, if `self` is a map that contains it.
+    pub fn map_get(&self, key: &MapKey) -> Option<&Value> {
+        match self {
+            Value::Map(entries) => entries
+                .iter()
+                .find(|(existing, _)| existing == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// Build a [`Value::Map`]. Fails when there are more than [`MAX_MAP_LEN`]
+    /// pairs, a key is repeated, or nesting exceeds the decoder ceiling.
+    pub fn try_map(entries: Vec<(MapKey, Value)>) -> Option<Self> {
+        if entries.len() > MAX_MAP_LEN {
+            return None;
+        }
+        for index in 0..entries.len() {
+            for earlier in 0..index {
+                if entries[index].0 == entries[earlier].0 {
+                    return None;
+                }
+            }
+        }
+        let value = Value::Map(Arc::from(entries));
+        if value.within_nesting_limit() {
+            Some(value)
+        } else {
+            None
         }
     }
 
@@ -236,6 +293,7 @@ impl Value {
             match value {
                 Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
                 Value::List(items) => items.iter().all(|item| walk(item, depth + 1)),
+                Value::Map(entries) => entries.iter().all(|(_, value)| walk(value, depth + 1)),
                 _ => true,
             }
         }
@@ -278,6 +336,16 @@ impl Value {
                 }
                 Value::try_list(next).ok_or_else(|| too_nested.clone())
             }
+            Value::Map(entries) => {
+                let mut next = Vec::with_capacity(entries.len());
+                for (key, value) in entries.iter() {
+                    next.push((
+                        key.clone(),
+                        value.map_caps(depth + 1, too_nested, on_cap, on_message)?,
+                    ));
+                }
+                Value::try_map(next).ok_or_else(|| too_nested.clone())
+            }
             other => Ok(other.clone()),
         }
     }
@@ -319,6 +387,16 @@ impl Value {
                 }
                 Value::try_list(next)
             }
+            Value::Map(entries) => {
+                let mut next = Vec::with_capacity(entries.len());
+                for (key, value) in entries.iter() {
+                    next.push((
+                        key.clone(),
+                        value.stamp_unset_envelopes(depth + 1, sender_if_unset, mint)?,
+                    ));
+                }
+                Value::try_map(next)
+            }
             other => Some(other.clone()),
         }
     }
@@ -338,13 +416,16 @@ impl Value {
                 !message.reply_cap.is_none() || message.payload.contains_live_cap(depth + 1)
             }
             Value::List(items) => items.iter().any(|item| item.contains_live_cap(depth + 1)),
+            Value::Map(entries) => entries
+                .iter()
+                .any(|(_, value)| value.contains_live_cap(depth + 1)),
             _ => false,
         }
     }
 
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
-    /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], and empty
-    /// [`Value::List`].
+    /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], empty
+    /// [`Value::List`], and empty [`Value::Map`].
     #[inline]
     pub fn is_truthy(&self) -> bool {
         match self {
@@ -352,6 +433,7 @@ impl Value {
             Value::Str(s) if s.is_empty() => false,
             Value::Bytes(b) if b.is_empty() => false,
             Value::List(items) if items.is_empty() => false,
+            Value::Map(entries) if entries.is_empty() => false,
             _ => true,
         }
     }
@@ -470,6 +552,20 @@ impl Value {
                         }
                         return Some(extra);
                     }
+                    Value::Map(entries) => {
+                        if depth >= super::MAX_VALUE_DEPTH {
+                            return None;
+                        }
+                        let slots = entries.len().checked_mul(std::mem::size_of::<Value>())?;
+                        extra = extra.checked_add(slots)?;
+                        for (key, value) in entries.iter() {
+                            if let MapKey::Str(text) = key {
+                                extra = extra.checked_add(text.len())?;
+                            }
+                            extra = extra.checked_add(walk(value, depth + 1)?)?;
+                        }
+                        return Some(extra);
+                    }
                     Value::Str(s) => return extra.checked_add(s.len()),
                     Value::Bytes(b) => return extra.checked_add(b.len()),
                     Value::Unit
@@ -496,6 +592,7 @@ impl Value {
             Value::Str(_) => "str",
             Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
+            Value::Map(_) => "map",
         }
     }
 }
@@ -521,6 +618,20 @@ impl fmt::Display for Value {
                     write!(f, "{item}")?;
                 }
                 write!(f, "]")
+            }
+            Value::Map(entries) => {
+                write!(f, "{{")?;
+                for (index, (key, value)) in entries.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    match key {
+                        MapKey::Int(n) => write!(f, "{n}")?,
+                        MapKey::Str(text) => write!(f, "{text}")?,
+                    }
+                    write!(f, ": {value}")?;
+                }
+                write!(f, "}}")
             }
         }
     }

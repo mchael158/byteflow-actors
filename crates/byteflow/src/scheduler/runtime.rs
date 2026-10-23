@@ -213,6 +213,8 @@ pub struct Shared {
     pub(crate) host_await_failures: super::host_await::HostAwaitFailures,
     /// `SendRemote` queue. `None` fails the opcode.
     pub(crate) distribution: Option<Arc<super::distribution::DistributionBridge>>,
+    /// One named table per flow. Empty until `TableOpen`.
+    pub(crate) tables: super::table::FlowTables,
     /// Supervisors started by bytecode `StartSupervisor`. Joined from
     /// [`Runtime::shutdown`] after workers stop.
     pub(crate) flow_supervisors: Mutex<Vec<super::supervisor::Supervisor>>,
@@ -364,6 +366,7 @@ impl Runtime {
             host_replay: Mutex::new(None),
             host_await_failures: super::host_await::HostAwaitFailures::new(),
             distribution: config.distribution.clone(),
+            tables: super::table::FlowTables::new(),
             flow_supervisors: Mutex::new(Vec::new()),
             host_next_request_id: AtomicU64::new(1),
             paranoid_jumps,
@@ -553,6 +556,79 @@ impl Runtime {
             Err(e) => {
                 super::error::report_fault(e);
                 Err(SendError::Unavailable)
+            }
+        }
+    }
+
+    /// Deliver a hop the host read off its own socket.
+    ///
+    /// The frame's sender is kept. This path does not restamp it as the local
+    /// host (`0`). A `Cap` or `Pid` in the frame is refused. The name must
+    /// already be registered on this node; the host still owns the socket.
+    pub fn deliver_frame(&self, bytes: &[u8]) -> Result<(), super::distribution::RemoteFrameError> {
+        let hop = super::distribution::decode_frame(bytes)?;
+        let cap = match self.shared.registry.whereis(hop.name.as_ref()) {
+            Ok(Some(cap)) => cap,
+            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Err(err) => {
+                super::error::report_fault(err);
+                return Err(super::distribution::RemoteFrameError::Unavailable);
+            }
+        };
+        let target = match self.shared.caps.lookup(cap) {
+            Ok(Some(entry)) => match entry.target() {
+                Some(id) => id,
+                None => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            },
+            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Err(err) => {
+                super::error::report_fault(err);
+                return Err(super::distribution::RemoteFrameError::Unavailable);
+            }
+        };
+        let mailbox = match self.shared.directory.lookup(target) {
+            Ok(Some(mailbox)) => mailbox,
+            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Err(err) => {
+                super::error::report_fault(err);
+                return Err(super::distribution::RemoteFrameError::Unavailable);
+            }
+        };
+        let stamped = Value::Message(hop.message);
+        match mailbox.push(stamped.clone()) {
+            Ok(Ok(Delivery::Queued | Delivery::QueuedDropOldest | Delivery::DroppedNewest)) => {
+                Ok(())
+            }
+            Ok(Ok(Delivery::Handoff(flow))) => {
+                let _ = self.shared.ask_waits.remove_asker(flow.id);
+                match flow.last_receive_dest {
+                    Some(dest) => {
+                        let Some(flow) =
+                            super::finalize::resume_or_fail(&self.shared, flow, dest, stamped)
+                        else {
+                            return Err(super::distribution::RemoteFrameError::Unavailable);
+                        };
+                        enqueue_flow(&self.shared, flow);
+                        wake_workers(&self.shared);
+                        Ok(())
+                    }
+                    None => {
+                        super::finalize::finalize_flow(
+                            &self.shared,
+                            *flow,
+                            FlowOutcome::Failed("handoff missing dest register".into()),
+                            FlowExitReason::Fault,
+                        );
+                        Err(super::distribution::RemoteFrameError::Unavailable)
+                    }
+                }
+            }
+            Ok(Err(full)) => Err(super::distribution::RemoteFrameError::Mailbox(
+                full.reason(),
+            )),
+            Err(err) => {
+                super::error::report_fault(err);
+                Err(super::distribution::RemoteFrameError::Unavailable)
             }
         }
     }
@@ -958,7 +1034,7 @@ fn finalize_host_awaits(shared: &Shared) {
 fn finalize_stranded(shared: &Shared) {
     finalize_host_awaits(shared);
     for flow in shared.timer.drain() {
-        finalize_shutdown_flow(shared, *flow);
+        finalize_shutdown_flow(shared, flow);
     }
     for _ in 0..8 {
         let mut n = 0usize;

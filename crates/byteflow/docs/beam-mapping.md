@@ -29,7 +29,7 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `spawn(fun)` | `Fn::spawn(fn, &[args])` | `Spawn` → Cap |
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
-| selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` / `Fn::receive_match_value(tag, value)` | Tag, payload wire-tag (`0..=9`), tag + `Int`, or tag + any `Value`. No guards, tuples, or maps |
+| selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` / `Fn::receive_match_cmp(tag, bound, cmp)` / `Fn::receive_match_value(tag, value)` | Tag, payload wire-tag (`0..=10`), tag + `Int`, tag + `Eq`/`Lt`/`Le` on an `Int`, or tag + any `Value`. No tuples |
 | `receive … after T` | `Fn::receive_match_imm_timeout(tag, ms)` / `Fn::receive_timeout` | Match + timeout writes `Unit` (hops stay queued) |
 | `is_process_alive(Pid)` | `Fn::is_alive(cap)` | Held Cap → live flow? `false` if revoked / not held |
 | `exit(Pid, Reason)` | `Fn::exit_signal(cap, reason)` | Needs `LINK`. `Normal` ignored. `Killed` untrappable |
@@ -116,9 +116,9 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 
 | BEAM / OTP | Byteflow today |
 |------------|----------------|
-| **distribution** | Single node on purpose. The host owns I/O; Byteflow does not open sockets or speak EPMD |
-| **arbitrary term patterns** | Tag, payload kind (`0..=9`), `Int` equality (`ReceiveMatchEq`), structural equality (`ReceiveMatchValue`), and `after`. No guards, tuples, or maps |
-| **ETS** | No |
+| **distribution** | No cluster protocol and no sockets. `encode_frame` / `decode_frame` / `Runtime::deliver_frame` move one hop; the host opens the connection and declares the sender. A live `Cap` does not cross |
+| **arbitrary term patterns** | Tag, payload kind (`0..=10`), `Int` equality (`ReceiveMatchEq`), `Eq`/`Lt`/`Le` on an `Int` (`ReceiveMatchCmp`), structural equality (`ReceiveMatchValue`), and `after`. Maps are a value (`MapPack`), not a pattern language. No tuples |
+| **ETS** | No global table. One named table per owning flow (`TableOpen`); `RECV` reads, `SEND` writes; it disappears when the owner finalizes |
 
 Failures without `trap_exit` / monitors surface as `FlowOutcome::Failed` on
 `join`, not as mailbox messages.

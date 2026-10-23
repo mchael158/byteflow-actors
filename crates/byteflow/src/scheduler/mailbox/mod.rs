@@ -66,6 +66,13 @@ pub(crate) enum WaitFilter {
     /// `ReceiveMatchValue`: oldest hop with this tag and a payload equal
     /// to `payload` ([`crate::payload_matches`]).
     TagValue { tag: u16, payload: Arc<Value> },
+    /// `ReceiveMatchCmp`: oldest hop with this tag whose `Int` payload
+    /// passes `cmp` against `bound`. A non-int payload does not match.
+    TagCmp {
+        tag: u16,
+        cmp: crate::bytecode::IntCmp,
+        bound: i64,
+    },
     /// `Ask`: reply belonging to one specific request.
     ///
     /// `expect_request_id` is the RPC correlation key.
@@ -101,6 +108,13 @@ impl WaitFilter {
                 None => false,
             },
             Self::TagValue { tag, ref payload } => payload_matches(tag, payload, value),
+            Self::TagCmp { tag, cmp, bound } => match value.as_message() {
+                Some(message) => {
+                    message.tag == tag
+                        && matches!(message.payload.as_ref(), Value::Int(n) if cmp.holds(*n, bound))
+                }
+                None => false,
+            },
             Self::Correlation {
                 expect_request_id,
                 expect_sender,
@@ -702,6 +716,39 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn tag_cmp_skips_a_non_matching_int_and_a_non_int() {
+        let filter = WaitFilter::TagCmp {
+            tag: 1,
+            cmp: crate::bytecode::IntCmp::Lt,
+            bound: 10,
+        };
+        let high = Value::Message(Message::new(1, 1, 1, Value::Int(20)));
+        let text = Value::Message(Message::new(1, 2, 1, Value::str("no")));
+        let low = Value::Message(Message::new(1, 3, 1, Value::Int(3)));
+        let other_tag = Value::Message(Message::new(1, 4, 2, Value::Int(1)));
+        assert!(!filter.matches(&high));
+        assert!(!filter.matches(&text));
+        assert!(filter.matches(&low));
+        assert!(!filter.matches(&other_tag));
+        let min = Value::Message(Message::new(1, 5, 1, Value::Int(i64::MIN)));
+        assert!(filter.matches(&min));
+        let eq = WaitFilter::TagCmp {
+            tag: 1,
+            cmp: crate::bytecode::IntCmp::Eq,
+            bound: i64::MIN,
+        };
+        let le = WaitFilter::TagCmp {
+            tag: 1,
+            cmp: crate::bytecode::IntCmp::Le,
+            bound: 3,
+        };
+        assert!(eq.matches(&min));
+        assert!(!eq.matches(&low));
+        assert!(le.matches(&low));
+        assert!(!le.matches(&high));
     }
 
     fn dummy_flow() -> Result<Box<Flow>, Box<dyn std::error::Error>> {

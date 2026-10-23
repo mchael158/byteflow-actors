@@ -137,6 +137,46 @@ impl ChunkBuilder {
         self.emit(Instruction::abc(Opcode::ListLen, dst, src, 0));
     }
 
+    pub fn emit_map_pack(&mut self, dst: u8, base: u8, pairs: i32) {
+        self.emit(Instruction::new(Opcode::MapPack, dst, base, 0, pairs));
+    }
+
+    pub fn emit_map_get(&mut self, dst: u8, map: u8, key: u8) {
+        self.emit(Instruction::abc(Opcode::MapGet, dst, map, key));
+    }
+
+    pub fn emit_map_len(&mut self, dst: u8, map: u8) {
+        self.emit(Instruction::abc(Opcode::MapLen, dst, map, 0));
+    }
+
+    pub fn emit_receive_match_cmp(
+        &mut self,
+        dst: u8,
+        tag: u8,
+        bound: u8,
+        cmp: super::opcode::IntCmp,
+    ) {
+        self.emit(Instruction::new(
+            Opcode::ReceiveMatchCmp,
+            dst,
+            tag,
+            bound,
+            cmp.as_imm(),
+        ));
+    }
+
+    pub fn emit_table_open(&mut self, dst: u8, name: u8) {
+        self.emit(Instruction::abc(Opcode::TableOpen, dst, name, 0));
+    }
+
+    pub fn emit_table_get(&mut self, dst: u8, cap: u8, key: u8) {
+        self.emit(Instruction::abc(Opcode::TableGet, dst, cap, key));
+    }
+
+    pub fn emit_table_put(&mut self, cap: u8, key: u8, value: u8) {
+        self.emit(Instruction::abc(Opcode::TablePut, cap, key, value));
+    }
+
     pub fn emit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
         debug_assert!(matches!(
             op,

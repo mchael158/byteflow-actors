@@ -77,7 +77,22 @@ impl fmt::Display for Instruction {
                 )
             }
             Opcode::ListGet => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
-            Opcode::ListLen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::ListLen | Opcode::MapLen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::MapPack => write!(
+                f,
+                "{} r{}, r{}, pairs={}",
+                self.op, self.a, self.b, self.imm
+            ),
+            Opcode::MapGet | Opcode::TableGet => {
+                write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
+            }
+            Opcode::TableOpen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::TablePut => write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c),
+            Opcode::ReceiveMatchCmp => write!(
+                f,
+                "{} r{}, tag=r{}, bound=r{}, cmp={}",
+                self.op, self.a, self.b, self.c, self.imm
+            ),
             Opcode::Neg | Opcode::BitNot => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
             Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),

@@ -84,6 +84,8 @@ impl From<RuntimeError> for CapError {
 struct CapTableInner {
     entries: HashMap<CapId, Capability>,
     flow_cells: HashMap<u64, Arc<RevocationCell>>,
+    /// Revocation cell of each flow-owned table, keyed by table id.
+    table_cells: HashMap<u64, Arc<RevocationCell>>,
     /// Stable reply address: `(holder, target) → CapId`.
     ///
     /// Hop `reply_cap` is an *address* (SEND back to the sender), not a
@@ -104,6 +106,7 @@ impl CapTable {
             inner: Mutex::new(CapTableInner {
                 entries: HashMap::new(),
                 flow_cells: HashMap::new(),
+                table_cells: HashMap::new(),
                 reply_index: HashMap::new(),
             }),
             native_cell: Arc::new(RevocationCell::new()),
@@ -293,11 +296,35 @@ impl CapTable {
             },
             CapTarget::NativeTable => entry.cap.is_valid(self.native_cell.as_ref()),
             CapTarget::Scheduler => entry.cap.is_valid(self.scheduler_cell.as_ref()),
+            CapTarget::Table(tid) => match table.table_cells.get(&tid) {
+                Some(cell) => entry.cap.is_valid(cell.as_ref()),
+                None => false,
+            },
         };
         if !valid {
             return Err(CapError::Unknown);
         }
         Ok(entry)
+    }
+
+    /// Install the revocation cell for a new flow-owned table.
+    pub fn bind_table(&self, id: u64, cell: Arc<RevocationCell>) -> Result<(), RuntimeError> {
+        self.lock("CapTable::bind_table")?
+            .table_cells
+            .insert(id, cell);
+        Ok(())
+    }
+
+    /// Revoke every Cap that addresses `id` and drop the table cell.
+    pub fn revoke_table(&self, id: u64) -> Result<(), RuntimeError> {
+        let mut table = self.lock("CapTable::revoke_table")?;
+        if let Some(cell) = table.table_cells.remove(&id) {
+            cell.revoke();
+        }
+        table
+            .entries
+            .retain(|_, entry| entry.cap.target() != CapTarget::Table(id));
+        Ok(())
     }
 
     /// New token, attenuated rights, `to_holder` becomes the holder.
@@ -316,6 +343,12 @@ impl CapTable {
                 .lock("CapTable::attenuate")?
                 .flow_cells
                 .get(&fid)
+                .cloned()
+                .ok_or(CapError::Unknown)?,
+            CapTarget::Table(tid) => self
+                .lock("CapTable::attenuate")?
+                .table_cells
+                .get(&tid)
                 .cloned()
                 .ok_or(CapError::Unknown)?,
             CapTarget::NativeTable | CapTarget::Scheduler => {
@@ -369,6 +402,10 @@ impl CapTable {
             },
             CapTarget::NativeTable => cap.cap.is_valid(self.native_cell.as_ref()),
             CapTarget::Scheduler => cap.cap.is_valid(self.scheduler_cell.as_ref()),
+            CapTarget::Table(tid) => match table.table_cells.get(&tid) {
+                Some(cell) => cap.cap.is_valid(cell.as_ref()),
+                None => false,
+            },
         };
         drop(table);
         if !valid {

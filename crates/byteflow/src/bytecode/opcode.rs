@@ -178,7 +178,7 @@ pub enum Opcode {
     /// the caller, or `Unit` if missing. Never a raw FlowId. (`0x63`)
     Whereis = 0x63,
     /// `ReceiveMatchKind ra, imm` → block until a [`crate::Value::Message`]
-    /// whose `payload.wire_tag() == imm` (BFV0 tag `0..=9`) is available.
+    /// whose `payload.wire_tag() == imm` (BFV0 tag `0..=10`) is available.
     /// Non-matching hops stay queued (FIFO skip). Append-only (`0x64`);
     /// `Trap` stays `0x60`.
     ReceiveMatchKind = 0x64,
@@ -305,6 +305,29 @@ pub enum Opcode {
     /// operands must be `Int`. The sign bit fills the vacated bits.
     /// Append-only (`0x82`).
     Shr = 0x82,
+    /// `ReceiveMatchCmp ra, rb, rc, imm` → wait for tag `r[b]` and an `Int`
+    /// payload compared with `r[c]` by `imm` (`0` eq, `1` lt, `2` le).
+    /// A hop that fails the comparison stays queued. Append-only (`0x83`).
+    ReceiveMatchCmp = 0x83,
+    /// `MapPack ra, rb, imm` → `r[a]` becomes a map of `imm` pairs starting
+    /// at `r[b]` (`key`, `value`, `key`, `value`, …). `imm` is `0..=32`.
+    /// Keys are `Int` or `Str`. A duplicate key traps. Append-only (`0x84`).
+    MapPack = 0x84,
+    /// `MapGet ra, rb, rc` → `r[a] = r[b][r[c]]`. Missing key writes `Unit`.
+    /// Append-only (`0x85`).
+    MapGet = 0x85,
+    /// `MapLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x86`).
+    MapLen = 0x86,
+    /// `TableOpen ra, rb` → this flow's table, named by the `Str` in `r[b]`.
+    /// Writes a Cap (`SEND|RECV`, target = that table) into `r[a]`.
+    /// A second open traps. Append-only (`0x87`).
+    TableOpen = 0x87,
+    /// `TableGet ra, rb, rc` → `r[a]` is the row of cap `r[b]` at key `r[c]`.
+    /// Requires `RECV`. Missing key writes `Unit`. Append-only (`0x88`).
+    TableGet = 0x88,
+    /// `TablePut ra, rb, rc` → store `r[c]` in cap `r[a]` at key `r[b]`.
+    /// Requires `SEND`. Append-only (`0x89`).
+    TablePut = 0x89,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -398,6 +421,13 @@ impl Opcode {
             0x80 => BitNot,
             0x81 => Shl,
             0x82 => Shr,
+            0x83 => ReceiveMatchCmp,
+            0x84 => MapPack,
+            0x85 => MapGet,
+            0x86 => MapLen,
+            0x87 => TableOpen,
+            0x88 => TableGet,
+            0x89 => TablePut,
             _ => return None,
         })
     }
@@ -431,6 +461,13 @@ impl std::fmt::Display for Opcode {
             Opcode::BitNot => "BitNot",
             Opcode::Shl => "Shl",
             Opcode::Shr => "Shr",
+            Opcode::ReceiveMatchCmp => "ReceiveMatchCmp",
+            Opcode::MapPack => "MapPack",
+            Opcode::MapGet => "MapGet",
+            Opcode::MapLen => "MapLen",
+            Opcode::TableOpen => "TableOpen",
+            Opcode::TableGet => "TableGet",
+            Opcode::TablePut => "TablePut",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",
@@ -487,5 +524,40 @@ impl std::fmt::Display for Opcode {
             Opcode::Nop => "Nop",
         };
         f.write_str(name)
+    }
+}
+
+/// Integer comparison used by [`Opcode::ReceiveMatchCmp`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntCmp {
+    Eq,
+    Lt,
+    Le,
+}
+
+impl IntCmp {
+    pub const fn from_imm(imm: i32) -> Option<Self> {
+        match imm {
+            0 => Some(Self::Eq),
+            1 => Some(Self::Lt),
+            2 => Some(Self::Le),
+            _ => None,
+        }
+    }
+
+    pub const fn as_imm(self) -> i32 {
+        match self {
+            Self::Eq => 0,
+            Self::Lt => 1,
+            Self::Le => 2,
+        }
+    }
+
+    pub fn holds(self, payload: i64, bound: i64) -> bool {
+        match self {
+            Self::Eq => payload == bound,
+            Self::Lt => payload < bound,
+            Self::Le => payload <= bound,
+        }
     }
 }

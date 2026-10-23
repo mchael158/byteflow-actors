@@ -64,12 +64,13 @@ by a matching hop; junk is queued behind the same lock.
 | `FreshRequestId` `0x5C` | `ra` — next per-flow correlation id |
 | `ReceiveMatchCorr` `0x5D` | `ra, rb, rc` — `tag == r[b]` and `request_id == r[c]` |
 | `ReceiveMatchCorrImm` `0x5E` | `ra, rb, imm` — immediate tag + `request_id` from `r[b]` |
-| `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=9`; `List` is `9`) |
+| `ReceiveMatchKind` `0x64` | `ra, imm` — wait for hop whose `payload.wire_tag() == imm` (`0..=10`; `List` is `9`, `Map` is `10`) |
 | `ReceiveMatchTimeout` `0x67` | `ra, rb, rc` — tag from `r[b]`, `after r[c]` ms → `Unit` |
 | `ReceiveMatchImmTimeout` `0x68` | `ra, rb, imm` — immediate tag, timeout `r[b]` |
 | `IsAlive` `0x69` | `ra, rb` — `Bool`: held Cap `r[b]` still names a live flow |
 | `ReceiveMatchEq` `0x6E` | `ra, rb, rc` — `tag == r[b]` and payload `Int == r[c]` |
 | `ReceiveMatchValue` `0x70` | `ra, rb, rc` — `tag == r[b]` and payload equal to `r[c]` (any `Value`) |
+| `ReceiveMatchCmp` `0x83` | `ra, rb, rc, imm` — `tag == r[b]` and `Int` payload `Eq`/`Lt`/`Le` against `r[c]` (`imm` 0/1/2). A miss stays queued |
 | `SetTrapExit` `0x5F` | `ra` — BEAM `trap_exit` from truthy `r[a]` (see [`lifecycle.md`](lifecycle.md)) |
 | `SetRestartPolicy` `0x65` | `imm` — `0` Always / `1` OnFailure / `2` Never (supervisor exit decision) |
 | `HostAwait` `0x66` | `ra, rb, imm` — ticket id in `r[a]`; host completion is a `TAG_SYS_AWAIT` hop (see [`host-await.md`](host-await.md)) |
@@ -79,8 +80,10 @@ Sample: [`samples::selective_receive`](../src/samples.rs) (`TAG_JUNK` then `TAG_
 [`samples::receive_match_eq`](../src/samples.rs) (same tag, payload `0` then `41`);
 [`samples::selective_receive_timeout`](../src/samples.rs) (`after` → `Unit`).
 
-Tag, kind (`0..=9`), `Int` equality, and structural payload equality are
-still **not** arbitrary BEAM term patterns: no guards, tuples, or maps.
+Tag, kind (`0..=10`), `Int` equality, an integer comparison (`ReceiveMatchCmp`),
+and structural payload equality are still **not** arbitrary BEAM term
+patterns: no tuples, and no guard language beyond that one comparison.
+Maps are values (`MapPack` / `MapGet` / `MapLen`), not patterns.
 `exit/2`, the process dictionary, `StartSupervisor`, and `StartChild` are
 lifecycle opcodes — see [`lifecycle.md`](lifecycle.md) and
 [`beam-mapping.md`](beam-mapping.md).
