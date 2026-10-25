@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::{Chunk, Fault, Value, Vm, VmResult};
 
 use super::compiler::TraceCompiler;
-use super::exit::{ExitReason, JitReturn};
+use super::exit::{ExitReason, JitReturn, JIT_BUDGET, JIT_DEOPT};
 use super::frame::{JitCallRecord, JitFrame, MAX_JIT_CALL_DEPTH};
 use super::module_local::with_jit_module;
 use super::runtime::JitRuntime;
@@ -66,19 +66,23 @@ impl EntryTags {
 }
 
 /// Attempt one native trace at the current `(function, pc)`.
-fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> Option<VmResult> {
+fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> JitProbe {
     if !Arc::ptr_eq(&ctx.chunk, &vm.chunk_arc()) {
-        return None;
+        return JitProbe::Miss;
     }
-    let pc = vm.current_pc()?;
+    let Some(pc) = vm.current_pc() else {
+        return JitProbe::Miss;
+    };
     let function = vm.current_function();
-    let register_count = vm.current_num_registers()?;
+    let Some(register_count) = vm.current_num_registers() else {
+        return JitProbe::Miss;
+    };
 
     let mut slots = vec![0i64; slot_capacity(vm)];
     let floats = match sync_slots_from_vm(vm, &mut slots) {
         SyncSlotsResult::Ok => false,
         SyncSlotsResult::Float => true,
-        SyncSlotsResult::Deopt | SyncSlotsResult::Unavailable => return None,
+        SyncSlotsResult::Deopt | SyncSlotsResult::Unavailable => return JitProbe::Miss,
     };
 
     let key = TraceKey {
@@ -86,7 +90,7 @@ fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> Option<VmResu
         entry_pc: pc as u32,
         floats,
     };
-    let exit = try_run_hot_tagged(
+    let Some((exit, spent)) = try_run_hot_tagged(
         ctx,
         vm.chunk_arc().as_ref(),
         key,
@@ -97,12 +101,10 @@ fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> Option<VmResu
             metrics: None,
             tags: EntryTags::from_vm(vm),
         },
-    )?;
-    match apply_exit_tagged(vm, &slots, exit) {
-        Ok(Some(result)) => Some(result),
-        Ok(None) => None,
-        Err(fault) => Some(VmResult::Trap(fault)),
-    }
+    ) else {
+        return JitProbe::Miss;
+    };
+    finish_probe(vm, &slots, exit, spent)
 }
 
 fn try_jit_step_runtime(
@@ -110,13 +112,17 @@ fn try_jit_step_runtime(
     runtime: &JitRuntime,
     budget: u32,
     metrics: Option<&crate::scheduler::RuntimeMetrics>,
-) -> Option<VmResult> {
+) -> JitProbe {
     if !runtime.matches_chunk(&vm.chunk_arc()) {
-        return None;
+        return JitProbe::Miss;
     }
-    let pc = vm.current_pc()?;
+    let Some(pc) = vm.current_pc() else {
+        return JitProbe::Miss;
+    };
     let function = vm.current_function();
-    let register_count = vm.current_num_registers()?;
+    let Some(register_count) = vm.current_num_registers() else {
+        return JitProbe::Miss;
+    };
 
     let mut slots = vec![0i64; slot_capacity(vm)];
     let floats = match sync_slots_from_vm(vm, &mut slots) {
@@ -126,9 +132,9 @@ fn try_jit_step_runtime(
             if let Some(m) = metrics {
                 crate::scheduler::RuntimeMetrics::inc(&m.jit_deopts);
             }
-            return None;
+            return JitProbe::Miss;
         }
-        SyncSlotsResult::Unavailable => return None,
+        SyncSlotsResult::Unavailable => return JitProbe::Miss,
     };
 
     let key = TraceKey {
@@ -136,7 +142,7 @@ fn try_jit_step_runtime(
         entry_pc: pc as u32,
         floats,
     };
-    let exit = try_run_hot_runtime_tagged(
+    let Some((exit, spent)) = try_run_hot_runtime_tagged(
         runtime,
         vm.chunk_arc().as_ref(),
         key,
@@ -147,11 +153,39 @@ fn try_jit_step_runtime(
             metrics,
             tags: EntryTags::from_vm(vm),
         },
-    )?;
-    match apply_exit_tagged(vm, &slots, exit) {
-        Ok(Some(result)) => Some(result),
-        Ok(None) => None,
-        Err(fault) => Some(VmResult::Trap(fault)),
+    ) else {
+        return JitProbe::Miss;
+    };
+    finish_probe(vm, &slots, exit, spent)
+}
+
+/// What one probe of the current `pc` did.
+enum JitProbe {
+    /// No compiled trace ran. The interpreter executes this instruction.
+    Miss,
+    /// A trace ran `spent` instructions. `stop` ends the quantum. `None`
+    /// means the interpreter still has to execute the instruction now at `pc`
+    /// (an effect the trace refused, or the instruction after a side exit).
+    Hit { spent: u32, stop: Option<VmResult> },
+}
+
+fn finish_probe(vm: &mut Vm, slots: &[i64], exit: JitReturn, spent: u32) -> JitProbe {
+    let kind = exit.kind;
+    match apply_exit_tagged(vm, slots, exit) {
+        Ok(Some(result)) => JitProbe::Hit {
+            spent,
+            stop: Some(result),
+        },
+        Ok(None) if kind == JIT_BUDGET => JitProbe::Hit {
+            spent,
+            stop: Some(VmResult::Yield),
+        },
+        Ok(None) if kind == JIT_DEOPT => JitProbe::Miss,
+        Ok(None) => JitProbe::Hit { spent, stop: None },
+        Err(fault) => JitProbe::Hit {
+            spent,
+            stop: Some(VmResult::Trap(fault)),
+        },
     }
 }
 
@@ -176,12 +210,23 @@ pub fn run_vm_with_jit_runtime(
 fn run_vm_with_jit_loop(
     vm: &mut Vm,
     budget: u32,
-    mut try_step: impl FnMut(&mut Vm, u32) -> Option<VmResult>,
+    mut try_step: impl FnMut(&mut Vm, u32) -> JitProbe,
 ) -> VmResult {
     let mut remaining = budget;
     while remaining > 0 {
-        if let Some(result) = try_step(vm, remaining) {
-            return result;
+        match try_step(vm, remaining) {
+            JitProbe::Hit { spent, stop } => {
+                let spent = spent.min(remaining);
+                vm.record_instructions(u64::from(spent));
+                remaining -= spent;
+                if let Some(result) = stop {
+                    return result;
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+            JitProbe::Miss => {}
         }
         match vm.run(1) {
             VmResult::Yield => {
@@ -229,6 +274,7 @@ pub fn run_compiled_trace(
         register_count,
         EntryTags::INT,
     )
+    .0
 }
 
 fn run_compiled_trace_with_tags(
@@ -239,7 +285,7 @@ fn run_compiled_trace_with_tags(
     function: u32,
     register_count: u32,
     tags: EntryTags,
-) -> JitReturn {
+) -> (JitReturn, u32) {
     let mut call_stack = [JitCallRecord {
         return_pc: 0,
         return_function: 0,
@@ -272,15 +318,19 @@ fn run_compiled_trace_with_tags(
         entry_as_float: tags.as_float,
     };
     unsafe { (entry)(&mut frame) };
-    JitReturn {
-        kind: frame.exit_kind,
-        pc: frame.pc,
-        return_reg: frame.return_reg,
-        written: frame.written,
-        as_bool: frame.as_bool,
-        as_unit: frame.as_unit,
-        as_float: frame.as_float,
-    }
+    let spent = budget.saturating_sub(frame.budget);
+    (
+        JitReturn {
+            kind: frame.exit_kind,
+            pc: frame.pc,
+            return_reg: frame.return_reg,
+            written: frame.written,
+            as_bool: frame.as_bool,
+            as_unit: frame.as_unit,
+            as_float: frame.as_float,
+        },
+        spent,
+    )
 }
 
 /// Run a cached trace by reference.
@@ -326,7 +376,7 @@ pub fn try_run_hot(
             tags: EntryTags::INT,
         },
     )
-    .map(JitReturn::into_reason)
+    .map(|(ret, _)| ret.into_reason())
 }
 
 fn try_run_hot_tagged(
@@ -334,7 +384,7 @@ fn try_run_hot_tagged(
     chunk: &Chunk,
     key: TraceKey,
     call: &mut HotCall<'_>,
-) -> Option<JitReturn> {
+) -> Option<(JitReturn, u32)> {
     if ctx.cache.get(&key).is_none() {
         if !ctx.hot.hit(key, ctx.hot_threshold) {
             if let Some(m) = call.metrics {
@@ -395,7 +445,7 @@ pub fn try_run_hot_runtime(
             tags: EntryTags::INT,
         },
     )
-    .map(JitReturn::into_reason)
+    .map(|(ret, _)| ret.into_reason())
 }
 
 fn try_run_hot_runtime_tagged(
@@ -403,7 +453,7 @@ fn try_run_hot_runtime_tagged(
     chunk: &Chunk,
     key: TraceKey,
     call: &mut HotCall<'_>,
-) -> Option<JitReturn> {
+) -> Option<(JitReturn, u32)> {
     if let Some(copy) = runtime.get_trace(&key) {
         if let Some(m) = call.metrics {
             crate::scheduler::RuntimeMetrics::inc(&m.jit_executions);
@@ -1068,6 +1118,32 @@ mod tests {
         let mut slots = vec![0i64; 1];
         let ret = run_compiled_trace_ref(trace, &mut slots, 0, 2, 0, 1);
         assert!(matches!(ret.into_reason(), ExitReason::Budget { pc: 2 }));
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_trace_counts_the_instructions_it_ran() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-count");
+        b.begin_function("main", 0, 1);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(0, 2);
+        b.emit_load_imm(0, 3);
+        b.emit_return(0);
+        let chunk = Arc::new(b.finish());
+        let mut ctx = JitContext::new(chunk.clone())?;
+        force_compile(
+            &mut ctx,
+            &chunk,
+            TraceKey {
+                function: 0,
+                entry_pc: 0,
+                floats: false,
+            },
+        )?;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let result = run_vm_with_jit(&mut vm, 10, &mut ctx);
+        assert!(matches!(result, VmResult::Complete(Value::Int(3))));
+        assert_eq!(vm.instructions_executed(), 4);
         Ok(())
     }
 

@@ -428,14 +428,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
         let slice = (shared.quantum as i64).min(remaining) as u32;
         let before = flow.vm.instructions_executed();
         let ran = panic::catch_unwind(AssertUnwindSafe(|| {
-            #[cfg(feature = "jit")]
-            {
-                super::jit::run_flow_quantum(&mut flow, shared, slice)
-            }
-            #[cfg(not(feature = "jit"))]
-            {
-                flow.vm.run(slice)
-            }
+            super::quantum::run_slice(&mut flow, shared, slice)
         }));
         let delta = flow.vm.instructions_executed().saturating_sub(before);
         if let Err(e) = flow.quota.charge_cpu(delta as i64) {
