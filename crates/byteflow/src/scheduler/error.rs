@@ -204,6 +204,8 @@ pub enum SpawnError {
     Unavailable,
     /// Flow-id counter wrapped onto the reserved host id.
     FlowIdExhausted,
+    /// Host correlation counter wrapped. A new id would reuse `1`.
+    RequestIdsExhausted,
     /// Live flow count would exceed [`crate::RuntimeConfig::max_flows`].
     FlowLimit {
         current: usize,
@@ -243,6 +245,9 @@ impl fmt::Display for SpawnError {
             SpawnError::Unavailable => write!(f, "spawn: runtime table unavailable"),
             SpawnError::FlowIdExhausted => {
                 write!(f, "spawn: flow id space exhausted (counter wrapped)")
+            }
+            SpawnError::RequestIdsExhausted => {
+                write!(f, "spawn: host request ids exhausted")
             }
             SpawnError::FlowLimit { current, max } => {
                 write!(f, "spawn: live flow limit reached ({current}/{max})")

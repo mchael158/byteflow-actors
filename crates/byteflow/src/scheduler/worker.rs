@@ -22,7 +22,7 @@ use super::finalize::{
     request_kill, resume_or_fail,
 };
 use super::link::LinkId;
-use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitFilter};
+use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitEpoch, WaitFilter};
 use super::metrics::RuntimeMetrics;
 use super::monitor::{FlowExitReason, MonitorRef};
 use super::process::{Flow, FlowId, FlowOutcome, PendingSend};
@@ -95,14 +95,23 @@ fn authenticate_outgoing_message(
         .authenticate(sender.as_u64(), reply))
 }
 
-/// Next host correlation id. `0` is reserved as “unset”, so a counter that
-/// lands on zero is skipped. Mapping that zero to `1` without consuming it
-/// made the following id `1` as well.
-pub(crate) fn mint_host_request_id(counter: &AtomicU64) -> u64 {
+/// Next host correlation id.
+///
+/// A fresh counter starts at 1, so the first id is 1. `0` is not an id: it
+/// means the counter wrapped and is pinned there. Later calls return `None`
+/// instead of issuing `1` again.
+pub(crate) fn mint_host_request_id(counter: &AtomicU64) -> Option<u64> {
     loop {
-        let id = counter.fetch_add(1, Ordering::Relaxed);
-        if id != 0 {
-            return id;
+        let id = counter.load(Ordering::Relaxed);
+        if id == 0 {
+            return None;
+        }
+        let next = if id == u64::MAX { 0 } else { id + 1 };
+        if counter
+            .compare_exchange(id, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(id);
         }
     }
 }
@@ -118,7 +127,8 @@ pub(crate) fn authenticate_host_outgoing_message(
     mut message: Message,
 ) -> Result<Message, CapError> {
     if message.request_id == 0 {
-        message.request_id = mint_host_request_id(&shared.host_next_request_id);
+        message.request_id = mint_host_request_id(&shared.host_next_request_id)
+            .ok_or(CapError::RequestIdsExhausted)?;
     }
     let payload = reissue_caps_from_host(shared, recipient, (*message.payload).clone())?;
     Ok(message
@@ -145,7 +155,8 @@ pub(crate) fn reissue_caps_from_host(
         &mut |id| shared.caps.reissue_for(id, recipient),
         &mut |message| {
             if message.request_id == 0 {
-                message.request_id = mint_host_request_id(&shared.host_next_request_id);
+                message.request_id = mint_host_request_id(&shared.host_next_request_id)
+                    .ok_or(CapError::RequestIdsExhausted)?;
             }
             if !message.reply_cap.is_none() {
                 message.reply_cap = shared.caps.reissue_for(message.reply_cap, recipient)?;
@@ -476,7 +487,9 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 return;
             }
             VmResult::Sleep(delay) => {
-                shared.timer.schedule_sleep(delay, flow);
+                if let Err(flow) = shared.timer.schedule_sleep(delay, flow) {
+                    finish_failed(shared, *flow, "timer unavailable".into());
+                }
                 return;
             }
             VmResult::SelfPid { dest_reg } => {
@@ -584,8 +597,6 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
-                RuntimeMetrics::inc(&shared.metrics.messages_sent);
-                flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
                     "send from=flow#{} to=flow#{} via={} msg={}",
                     flow.id.as_u64(),
@@ -597,9 +608,11 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     DeliverStatus::Ok | DeliverStatus::Dropped => {
                         // Fire-and-forget: DropNewest is intentional loss,
                         // not a hang. Free the hop charge either way.
+                        note_message_sent(shared, &flow);
                         flow.quota.free(hop_cost);
                     }
                     DeliverStatus::Full => {
+                        note_message_sent(shared, &flow);
                         match park_waiting_send(
                             shared,
                             flow,
@@ -732,20 +745,18 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     expect_sender: Some(target.as_u64()),
                 };
                 flow.last_receive_dest = Some(dest_reg);
-                RuntimeMetrics::inc(&shared.metrics.messages_sent);
-                flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 log::info(format!(
-                    "ask from=flow#{} to=flow#{} via={} req={} wait={filter:?}",
+                    "ask from=flow#{} to=flow#{} via={} req={request_id} msg={stamped} wait={filter:?}",
                     flow.id.as_u64(),
                     target.as_u64(),
                     target_cap,
-                    stamped
                 ));
                 // Order: deliver request to *target*, then wait on *our*
                 // mailbox. park_filter re-checks under the same mutex if the
                 // reply raced ahead (anti lost-wakeup on the caller's inbox).
                 match deliver(shared, local, target, stamped.clone()) {
                     DeliverStatus::Ok => {
+                        note_message_sent(shared, &flow);
                         flow.quota.free(hop_cost);
                     }
                     DeliverStatus::Dropped => {
@@ -758,6 +769,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                     DeliverStatus::Full => {
+                        note_message_sent(shared, &flow);
                         match park_waiting_send(
                             shared,
                             flow,
@@ -1513,9 +1525,16 @@ fn park_ask(
                 return;
             }
             if let Some(delay) = timeout {
-                shared
-                    .timer
-                    .schedule_receive_timeout(delay, asker, mailbox, dest_reg, epoch);
+                let armed = shared.timer.schedule_receive_timeout(
+                    delay,
+                    asker,
+                    mailbox.clone(),
+                    dest_reg,
+                    epoch,
+                );
+                if !armed {
+                    fail_unarmed_timeout(shared, &mailbox, epoch);
+                }
             }
         }
         Ok(Err(mut flow)) => {
@@ -1583,9 +1602,16 @@ fn park_on_mailbox(
                 return;
             }
             if let Some(delay) = timeout {
-                shared
-                    .timer
-                    .schedule_receive_timeout(delay, pid, mailbox, dest_reg, epoch);
+                let armed = shared.timer.schedule_receive_timeout(
+                    delay,
+                    pid,
+                    mailbox.clone(),
+                    dest_reg,
+                    epoch,
+                );
+                if !armed {
+                    fail_unarmed_timeout(shared, &mailbox, epoch);
+                }
             }
         }
         Ok(Err(mut flow)) => {
@@ -1636,6 +1662,21 @@ fn finish_ok(shared: &Shared, flow: Flow, value: Value) {
                 FlowExitReason::Fault,
             );
         }
+    }
+}
+
+fn note_message_sent(shared: &Shared, flow: &Flow) {
+    RuntimeMetrics::inc(&shared.metrics.messages_sent);
+    flow.metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The timeout could not be armed. The flow is already parked; take that
+/// park back and fail it so the wait cannot sit forever.
+fn fail_unarmed_timeout(shared: &Shared, mailbox: &Mailbox, epoch: WaitEpoch) {
+    match mailbox.take_parked_at(epoch) {
+        Ok(Some(flow)) => finish_failed(shared, *flow, "timer unavailable".into()),
+        Ok(None) => {}
+        Err(e) => report_fault(e),
     }
 }
 
@@ -1746,13 +1787,19 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     #[test]
-    fn host_request_ids_skip_zero_instead_of_repeating_one() {
-        let counter = AtomicU64::new(0);
-        assert_eq!(mint_host_request_id(&counter), 1);
-        assert_eq!(mint_host_request_id(&counter), 2);
+    fn host_request_ids_pin_after_wrap_instead_of_reusing_one() {
+        use std::sync::atomic::Ordering;
 
         let counter = AtomicU64::new(1);
-        assert_eq!(mint_host_request_id(&counter), 1);
-        assert_eq!(mint_host_request_id(&counter), 2);
+        assert_eq!(mint_host_request_id(&counter), Some(1));
+        assert_eq!(mint_host_request_id(&counter), Some(2));
+
+        let counter = AtomicU64::new(0);
+        assert_eq!(mint_host_request_id(&counter), None);
+
+        let counter = AtomicU64::new(u64::MAX);
+        assert_eq!(mint_host_request_id(&counter), Some(u64::MAX));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(mint_host_request_id(&counter), None);
     }
 }

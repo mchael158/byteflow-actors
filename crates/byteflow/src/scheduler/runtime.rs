@@ -1313,7 +1313,8 @@ fn grant_caps_in_args(
                 }
                 if message.request_id == 0 {
                     message.request_id =
-                        super::worker::mint_host_request_id(&shared.host_next_request_id);
+                        super::worker::mint_host_request_id(&shared.host_next_request_id)
+                            .ok_or(SpawnError::RequestIdsExhausted)?;
                 }
                 if !message.reply_cap.is_none() {
                     message.reply_cap = match parent {

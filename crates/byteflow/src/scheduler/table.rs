@@ -55,13 +55,10 @@ impl FlowTables {
         if inner.by_owner.contains_key(&owner.as_u64()) {
             return Err("flow already owns a table".into());
         }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if id == 0 {
-            // The add already wrapped the counter to 1. Pin it at 0 so the
-            // next open cannot mint table id 1 again while an old table lives.
-            self.next_id.store(0, Ordering::Relaxed);
-            return Err("table ids exhausted".into());
-        }
+        let id = match allocate_id(&self.next_id) {
+            Ok(id) => id,
+            Err(()) => return Err("table ids exhausted".into()),
+        };
         let cell = Arc::new(RevocationCell::new());
         shared
             .caps
@@ -144,7 +141,10 @@ impl FlowTables {
             if old_at.is_none() && table.rows.len() >= MAX_ROWS {
                 return Err("table row limit".into());
             }
-            let next = match (table.bytes - old).checked_add(add) {
+            let Some(base) = table.bytes.checked_sub(old) else {
+                return Err("table byte accounting diverged".into());
+            };
+            let next = match base.checked_add(add) {
                 Some(sum) => sum,
                 None => return Err("table byte limit".into()),
             };
@@ -189,6 +189,24 @@ impl FlowTables {
         }
         if let Err(err) = shared.caps.revoke_table(id) {
             super::error::report_fault(err);
+        }
+    }
+}
+
+/// Mint `current`, then store `current + 1`. `u64::MAX` pins the counter at
+/// `0`. A later load of `0` fails, so id `1` cannot be issued again.
+fn allocate_id(next_id: &AtomicU64) -> Result<u64, ()> {
+    loop {
+        let id = next_id.load(Ordering::Relaxed);
+        if id == 0 {
+            return Err(());
+        }
+        let next = if id == u64::MAX { 0 } else { id + 1 };
+        if next_id
+            .compare_exchange(id, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Ok(id);
         }
     }
 }
@@ -281,5 +299,26 @@ fn release_account(shared: &Shared, owner: FlowId, bytes: usize) {
     shared.memory.release(bytes);
     if let Ok(Some(quota)) = shared.quotas.get(owner) {
         quota.free(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_ids_start_at_one() {
+        let next = AtomicU64::new(1);
+        assert_eq!(allocate_id(&next), Ok(1));
+        assert_eq!(allocate_id(&next), Ok(2));
+    }
+
+    #[test]
+    fn table_ids_pin_at_zero_instead_of_reusing_one() {
+        let next = AtomicU64::new(u64::MAX);
+        assert_eq!(allocate_id(&next), Ok(u64::MAX));
+        assert_eq!(next.load(Ordering::Relaxed), 0);
+        assert_eq!(allocate_id(&next), Err(()));
+        assert_eq!(next.load(Ordering::Relaxed), 0);
     }
 }

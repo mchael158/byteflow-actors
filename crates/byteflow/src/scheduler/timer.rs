@@ -241,12 +241,26 @@ impl TimerWheel {
         })
     }
 
-    pub fn schedule_sleep(&self, delay: Duration, flow: Box<Flow>) {
+    /// `Err` returns the flow. The wheel lock was poisoned, so the sleeper
+    /// was not stored and must be finalized by the caller.
+    pub fn schedule_sleep(&self, delay: Duration, flow: Box<Flow>) -> Result<(), Box<Flow>> {
         let entry = TimerEntry {
             deadline: deadline_from_now(delay),
             payload: TimerPayload::WakeSleeper(flow),
         };
-        self.push(entry);
+        match self.push(entry) {
+            Ok(()) => Ok(()),
+            Err(entry) => match entry.payload {
+                TimerPayload::WakeSleeper(flow) => Err(flow),
+                TimerPayload::WakeReceiver { .. } => {
+                    unreachable!("schedule_sleep only inserts a sleeper")
+                }
+                #[cfg(test)]
+                TimerPayload::Probe(_) => {
+                    unreachable!("schedule_sleep only inserts a sleeper")
+                }
+            },
+        }
     }
 
     /// Arm a `ReceiveTimeout` deadline for the park identified by `epoch`.
@@ -259,7 +273,7 @@ impl TimerWheel {
         mailbox: Arc<Mailbox>,
         dest_reg: u8,
         epoch: WaitEpoch,
-    ) {
+    ) -> bool {
         let entry = TimerEntry {
             deadline: deadline_from_now(delay),
             payload: TimerPayload::WakeReceiver {
@@ -269,16 +283,20 @@ impl TimerWheel {
                 epoch,
             },
         };
-        self.push(entry);
+        self.push(entry).is_ok()
     }
 
-    fn push(&self, entry: TimerEntry) {
+    fn push(&self, entry: TimerEntry) -> Result<(), TimerEntry> {
         match sync_lock::lock(&self.wheel, "TimerWheel::push") {
             Ok(mut wheel) => {
                 wheel.insert(entry);
                 self.cvar.notify_one();
+                Ok(())
             }
-            Err(e) => report_fault(e),
+            Err(e) => {
+                report_fault(e);
+                Err(entry)
+            }
         }
     }
 

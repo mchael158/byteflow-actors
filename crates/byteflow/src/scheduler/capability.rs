@@ -58,6 +58,8 @@ pub enum CapError {
     Unavailable,
     /// `Message` payload nested past the decoder ceiling.
     TooNested,
+    /// Host correlation counter wrapped. Further mints would reuse id `1`.
+    RequestIdsExhausted,
 }
 
 impl std::fmt::Display for CapError {
@@ -69,6 +71,7 @@ impl std::fmt::Display for CapError {
             CapError::WrongTarget => f.write_str("capability target is not a flow"),
             CapError::Unavailable => f.write_str("capability table unavailable (poisoned lock)"),
             CapError::TooNested => f.write_str("value nesting exceeds limit"),
+            CapError::RequestIdsExhausted => f.write_str("host request ids exhausted"),
         }
     }
 }
