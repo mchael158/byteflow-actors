@@ -265,7 +265,7 @@ pub enum Opcode {
     /// is not a number here. Append-only (`0x76`).
     LtImm = 0x76,
     /// `ListPack ra, rb, imm` → `r[a]` becomes a list of `imm` values
-    /// starting at `r[b]`. `imm` is `0..=32`. Append-only (`0x77`).
+    /// starting at `r[b]`. `imm` is `0..=256`. Append-only (`0x77`).
     ListPack = 0x77,
     /// `ListGet ra, rb, imm` → `r[a] = r[b][imm]`. `r[b]` must be a list
     /// and `imm` a valid index. Append-only (`0x78`).
@@ -311,7 +311,7 @@ pub enum Opcode {
     /// A hop that fails the comparison stays queued. Append-only (`0x83`).
     ReceiveMatchCmp = 0x83,
     /// `MapPack ra, rb, imm` → `r[a]` becomes a map of `imm` pairs starting
-    /// at `r[b]` (`key`, `value`, `key`, `value`, …). `imm` is `0..=32`.
+    /// at `r[b]` (`key`, `value`, `key`, `value`, …). `imm` is `0..=256`.
     /// Keys are `Int` or `Str`. A duplicate key traps. Append-only (`0x84`).
     MapPack = 0x84,
     /// `MapGet ra, rb, rc` → `r[a] = r[b][r[c]]`. Missing key writes `Unit`.
@@ -329,6 +329,14 @@ pub enum Opcode {
     /// `TablePut ra, rb, rc` → store `r[c]` in cap `r[a]` at key `r[b]`.
     /// Requires `SEND`. Append-only (`0x89`).
     TablePut = 0x89,
+    /// `RecordPack ra, rb, imm` → `r[a]` becomes a positional record of
+    /// `imm` fields starting at `r[b]`. `imm` is `0..=256`. Append-only (`0x8A`).
+    RecordPack = 0x8A,
+    /// `RecordGet ra, rb, imm` → `r[a] = r[b][imm]`. `r[b]` must be a record.
+    /// Append-only (`0x8B`).
+    RecordGet = 0x8B,
+    /// `RecordLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x8C`).
+    RecordLen = 0x8C,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -429,6 +437,9 @@ impl Opcode {
             0x87 => TableOpen,
             0x88 => TableGet,
             0x89 => TablePut,
+            0x8A => RecordPack,
+            0x8B => RecordGet,
+            0x8C => RecordLen,
             _ => return None,
         })
     }
@@ -469,6 +480,9 @@ impl std::fmt::Display for Opcode {
             Opcode::TableOpen => "TableOpen",
             Opcode::TableGet => "TableGet",
             Opcode::TablePut => "TablePut",
+            Opcode::RecordPack => "RecordPack",
+            Opcode::RecordGet => "RecordGet",
+            Opcode::RecordLen => "RecordLen",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",

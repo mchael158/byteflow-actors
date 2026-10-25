@@ -6,6 +6,10 @@ All notable changes to **byteflow-actors** are documented here.
 
 ### Added
 
+- **Assembler:** `byteflow asm` reads a disassembly listing back into a verified chunk. `disassemble` prints the ABI `encode` would write.
+- **Records:** `Value::Record` holds at most 256 positional fields. Wire tag `11`. `RecordPack` / `RecordGet` / `RecordLen` are opcodes `0x8A`–`0x8C`. A module that stores a record encodes as **ABI v8**. v5, v6, and v7 reject tag `11`. The JIT stops before these opcodes. `receive` is unchanged.
+- **Collections:** lists and maps hold at most 256 elements. A longer value is an error, not a truncated one.
+- **Log sink:** `RuntimeConfig::log` can receive the same diagnostic lines as `BYTEFLOW_LOG`. Without a sink, stderr gating is unchanged.
 - **Immediates:** `MulImm` (`0x7A`), `EqImm` (`0x7B`), and `LeImm` (`0x7C`).
   `Fn::eq_imm` is one instruction. Equality compares against an `Int`;
   a float is not equal to that immediate. `LeImm` follows `LtImm`,
@@ -27,7 +31,7 @@ All notable changes to **byteflow-actors** are documented here.
   wheel (256 slots, 1 ms). Insert is one bucket. A late receive timeout
   still belongs only to that park's `WaitEpoch`. The drive waits until
   the next exact deadline.
-- **Maps:** `Value::Map` holds at most 32 pairs. Keys are `Int` or `Str`.
+- **Maps:** `Value::Map` holds at most 256 pairs. Keys are `Int` or `Str`.
   `MapPack` (`0x84`), `MapGet` (`0x85`), and `MapLen` (`0x86`). A missing
   key reads as `Unit`. A module that stores a map encodes as **ABI v7**;
   a module without one stays on the ABI it already uses. The JIT stops

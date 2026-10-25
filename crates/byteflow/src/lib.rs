@@ -257,17 +257,23 @@ pub mod docs {
     /// HostAwait: several host ops per flow; completion is a `TAG_SYS_AWAIT` hop.
     #[doc = include_str!("../docs/host-await.md")]
     pub mod host_await {}
+
+    /// Untrusted bytecode: verifier, capabilities, quotas, and attestation
+    /// are separate controls.
+    #[doc = include_str!("../docs/untrusted.md")]
+    pub mod untrusted {}
 }
 
 pub use attest::{decode_attested, fingerprint_bf, AttestError};
 pub use bytecode::{
-    decode, decode_with, disassemble, encode, verify, verify_with, Cap, CapId, CapIdError,
-    CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId, FunctionDef, Instruction,
-    IntCmp, Label, MapKey, Message, NativeIdx, NativeMask, Opcode, Program, Reg, RegWindow,
-    RestartPolicy, RevocationCell, TrustLevel, Value, VerifyConfig, VerifyError, ABI_VERSION,
-    ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC, MAX_MAP_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN,
-    TAG_SYS_EXIT,
+    assemble, decode, decode_with, disassemble, encode, verify, verify_with, AssembleError, Cap,
+    CapId, CapIdError, CapRights, CapTarget, Chunk, ConstantKind, Fn, FormatError, FuncId,
+    FunctionDef, Instruction, IntCmp, Label, MapKey, Message, NativeIdx, NativeMask, Opcode,
+    Program, Reg, RegWindow, RestartPolicy, RevocationCell, TrustLevel, Value, VerifyConfig,
+    VerifyError, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, ABI_VERSION_RECORDS, MAGIC,
+    MAX_LIST_LEN, MAX_MAP_LEN, MAX_RECORD_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT,
 };
+pub use log::LogSink;
 pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemorySnapshot};
 pub use natives::{
     std_native, std_native_map, std_native_table, std_native_table_with, std_natives,
@@ -277,15 +283,15 @@ pub use output::{NullSink, OutputSink, StdoutSink};
 pub use scheduler::JitConfig;
 pub use scheduler::{
     check_admin, check_link, check_monitor, decode_frame, encode_frame, exec_delegate, fault_count,
-    flow_id_from_u64, next_flow_id, report_fault, AdminError, CapError, Capability, ChildSpec,
-    DelegateError, Delivery, DistributionBridge, DownEvent, Flow, FlowExitReason, FlowHandle,
-    FlowId, FlowMetrics, FlowOutcome, FlowQuota, HostAwaitBridge, HostAwaitCompleter,
-    HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError, LinkError, LinkId,
-    Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason,
-    MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, QuotaConfig, QuotaError, RegistryName,
-    RemoteFrameError, RestartStrategy, Runtime, RuntimeConfig, RuntimeError, RuntimeMetrics,
-    RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError, Supervisor, SupervisorConfig,
-    WaitEpoch, DEFAULT_QUANTUM,
+    finish_host_await, flow_id_from_u64, next_flow_id, report_fault, AdminError, CapError,
+    Capability, ChildSpec, DelegateError, Delivery, DistributionBridge, DownEvent, Flow,
+    FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome, FlowQuota, HostAwaitBridge,
+    HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError,
+    LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
+    MailboxFullReason, MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, QuotaConfig,
+    QuotaError, RegistryName, RemoteFrameError, RestartStrategy, Runtime, RuntimeConfig,
+    RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
+    Supervisor, SupervisorConfig, ThreadedHostAwait, WaitEpoch, DEFAULT_QUANTUM,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

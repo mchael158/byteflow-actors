@@ -365,6 +365,73 @@ pub trait HostAwaitBridge: Send + Sync + std::fmt::Debug + 'static {
     fn cancel(&self, _flow: FlowId, _op: HostAwaitOp, _ticket: u64) {}
 }
 
+/// Settle `done` from a host thread.
+///
+/// A ticket already removed by cancel, shutdown, or finalize returns
+/// [`HostAwaitError::Stale`] and does not write a hop. `Err` from the host
+/// work fails the flow only while the ticket is still live.
+pub fn finish_host_await(
+    done: HostAwaitCompleter,
+    result: Result<Value, String>,
+) -> Result<(), HostAwaitError> {
+    if done.is_cancelled() {
+        return done.complete(Value::Unit);
+    }
+    match result {
+        Ok(value) => done.complete(value),
+        Err(err) => done.fail(err),
+    }
+}
+
+type HostAwaitWork =
+    dyn Fn(&HostAwaitRequest, &dyn Fn() -> bool) -> Result<Value, String> + Send + Sync;
+
+/// Runs [`HostAwaitBridge::submit`] on a fresh `std` thread.
+///
+/// `submit` returns after the thread is spawned. The closure sees a
+/// cancellation probe and must not block the worker itself. Tokio is not
+/// required. If the ticket is cancelled before delivery, the result is
+/// dropped and [`finish_host_await`] returns [`HostAwaitError::Stale`].
+pub struct ThreadedHostAwait {
+    work: Arc<HostAwaitWork>,
+}
+
+impl std::fmt::Debug for ThreadedHostAwait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThreadedHostAwait")
+    }
+}
+
+impl ThreadedHostAwait {
+    pub fn new<F>(work: F) -> Self
+    where
+        F: Fn(&HostAwaitRequest, &dyn Fn() -> bool) -> Result<Value, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            work: Arc::new(work),
+        }
+    }
+}
+
+impl HostAwaitBridge for ThreadedHostAwait {
+    fn submit(&self, req: HostAwaitRequest, done: HostAwaitCompleter) {
+        let work = Arc::clone(&self.work);
+        // A failed spawn drops `done` with the closure. That Drop fails the
+        // flow closed; `submit` itself does not wait for `work`.
+        if std::thread::Builder::new()
+            .name("byteflow-host-await".into())
+            .spawn(move || {
+                let result = work(&req, &|| done.is_cancelled());
+                let _ = finish_host_await(done, result);
+            })
+            .is_err()
+        {}
+    }
+}
+
 /// Tell the bridge about tickets removed by finalize, kill, or shutdown.
 pub(crate) fn notify_cancelled(shared: &Shared, notices: Vec<CancelledAwait>) {
     let Some(bridge) = shared.host_await_bridge.as_ref() else {
@@ -1416,6 +1483,232 @@ mod runtime_tests {
         match payload_int(&open_out) {
             Some(22) => Ok(()),
             _ => Err(format!("expected the later hop to arrive, got {open_out:?}").into()),
+        }
+    }
+
+    #[test]
+    fn threaded_host_await_delivers_sys_await() -> Result<(), Box<dyn std::error::Error>> {
+        let bridge = ThreadedHostAwait::new(|req, _cancelled| match req.args {
+            Value::Int(n) => Ok(Value::Int(n + 1)),
+            _ => Err("host args".into()),
+        });
+        let mut program = Program::new("ha-thread");
+        program.function("main", 0, |f| {
+            let args = f.load_i32(41);
+            let _ticket = f.host_await(1, args);
+            let msg = f.receive();
+            f.return_(msg);
+        });
+        let rt = Runtime::with_config(
+            program.build(),
+            RuntimeConfig {
+                workers: 1,
+                host_await: Some(Arc::new(bridge)),
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let outcome = rt
+            .spawn(0, &[])?
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("threaded host await timed out")?;
+        rt.shutdown();
+        match &outcome {
+            FlowOutcome::Completed(Value::Message(msg))
+                if msg.tag == TAG_SYS_AWAIT && matches!(msg.payload.as_ref(), Value::Int(42)) =>
+            {
+                Ok(())
+            }
+            other => Err(format!("expected TAG_SYS_AWAIT 42, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn threaded_submit_returns_while_host_work_is_blocked() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let started = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate_work = Arc::clone(&gate);
+        let started_work = Arc::clone(&started);
+        let bridge = ThreadedHostAwait::new(move |req, cancelled| {
+            if let Ok(mut flag) = started_work.0.lock() {
+                *flag = true;
+                started_work.1.notify_all();
+            }
+            let (lock, cv) = &*gate_work;
+            let mut guard = lock.lock().map_err(|_| "gate".to_string())?;
+            while !*guard {
+                if cancelled() {
+                    return Err("cancelled".into());
+                }
+                let (next, _) = cv
+                    .wait_timeout(guard, Duration::from_millis(20))
+                    .map_err(|_| "gate wait".to_string())?;
+                guard = next;
+            }
+            match req.args {
+                Value::Int(n) => Ok(Value::Int(n)),
+                _ => Ok(Value::Int(0)),
+            }
+        });
+        let mut program = Program::new("ha-block");
+        program.function("main", 0, |f| {
+            let args = f.load_i32(7);
+            let _ticket = f.host_await(1, args);
+            let msg = f.receive();
+            f.return_(msg);
+        });
+        let rt = Runtime::with_config(
+            program.build(),
+            RuntimeConfig {
+                workers: 1,
+                host_await: Some(Arc::new(bridge)),
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        let mut flag = started.0.lock().map_err(|_| "started lock")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !*flag {
+            let (next, timeout) = started
+                .1
+                .wait_timeout(flag, Duration::from_millis(50))
+                .map_err(|_| "started wait")?;
+            flag = next;
+            if timeout.timed_out() && std::time::Instant::now() > deadline {
+                return Err("host work did not start".into());
+            }
+        }
+        drop(flag);
+        if handle.join_timeout(Duration::from_millis(80)).is_some() {
+            return Err("submit blocked the flow until the host work finished".into());
+        }
+        if let Ok(mut release) = gate.0.lock() {
+            *release = true;
+            gate.1.notify_all();
+        }
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("blocked host work did not finish")?;
+        rt.shutdown();
+        match payload_int(&outcome) {
+            Some(7) => Ok(()),
+            _ => Err(format!("expected 7 after release, got {outcome:?}").into()),
+        }
+    }
+
+    #[test]
+    fn threaded_cancel_drops_the_late_result() -> Result<(), Box<dyn std::error::Error>> {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let started = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate_work = Arc::clone(&gate);
+        let started_work = Arc::clone(&started);
+        let bridge = ThreadedHostAwait::new(move |_req, cancelled| {
+            if let Ok(mut flag) = started_work.0.lock() {
+                *flag = true;
+                started_work.1.notify_all();
+            }
+            let (lock, cv) = &*gate_work;
+            let mut guard = lock.lock().map_err(|_| "gate".to_string())?;
+            while !cancelled() && !*guard {
+                let (next, _) = cv
+                    .wait_timeout(guard, Duration::from_millis(20))
+                    .map_err(|_| "gate wait".to_string())?;
+                guard = next;
+            }
+            Ok(Value::Int(99))
+        });
+        let (program, waiter) = waiter_program();
+        let rt = Runtime::with_config(
+            program.build(),
+            RuntimeConfig {
+                workers: 1,
+                host_await: Some(Arc::new(bridge)),
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(waiter, &[])?;
+        let mut flag = started.0.lock().map_err(|_| "started lock")?;
+        while !*flag {
+            flag = started.1.wait(flag).map_err(|_| "started wait")?;
+        }
+        drop(flag);
+        rt.kill(handle.id())?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("kill did not finish")?;
+        if let Ok(mut release) = gate.0.lock() {
+            *release = true;
+            gate.1.notify_all();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Failed(_) => Ok(()),
+            FlowOutcome::Completed(Value::Message(msg))
+                if matches!(msg.payload.as_ref(), Value::Int(99)) =>
+            {
+                Err("late host result resurrected the flow".into())
+            }
+            other => Err(format!("expected the kill outcome, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn finish_after_cancel_is_stale() -> Result<(), Box<dyn std::error::Error>> {
+        let bridge = Arc::new(HoldBridge::new());
+        let (program, waiter) = waiter_program();
+        let rt = Runtime::with_config(
+            program.build(),
+            RuntimeConfig {
+                workers: 1,
+                host_await: Some(Arc::clone(&bridge) as Arc<dyn HostAwaitBridge>),
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let handle = rt.spawn(waiter, &[])?;
+        bridge.wait_for_submissions(1)?;
+        let (_flow, done) = bridge.take_one()?.ok_or("missing completer")?;
+        rt.kill(handle.id())?;
+        let outcome = handle
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("kill join timed out")?;
+        let stale = finish_host_await(done, Ok(Value::Int(1)));
+        rt.shutdown();
+        if !matches!(outcome, FlowOutcome::Failed(_)) {
+            return Err(format!("kill outcome changed, got {outcome:?}").into());
+        }
+        match stale {
+            Err(HostAwaitError::Stale) => Ok(()),
+            other => Err(format!("expected Stale, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn threaded_host_error_fails_the_flow() -> Result<(), Box<dyn std::error::Error>> {
+        let bridge = ThreadedHostAwait::new(|_req, _cancelled| Err("host broke".into()));
+        let mut program = Program::new("ha-err");
+        program.function("main", 0, |f| {
+            let args = f.load_i32(1);
+            let _ticket = f.host_await(1, args);
+            let msg = f.receive();
+            f.return_(msg);
+        });
+        let rt = Runtime::with_config(
+            program.build(),
+            RuntimeConfig {
+                workers: 1,
+                host_await: Some(Arc::new(bridge)),
+                ..RuntimeConfig::default()
+            },
+        )?;
+        let outcome = rt
+            .spawn(0, &[])?
+            .join_timeout(Duration::from_secs(2))
+            .ok_or("host error timed out")?;
+        rt.shutdown();
+        match outcome {
+            FlowOutcome::Failed(msg) if msg.contains("host broke") => Ok(()),
+            other => Err(format!("expected host broke, got {other:?}").into()),
         }
     }
 }

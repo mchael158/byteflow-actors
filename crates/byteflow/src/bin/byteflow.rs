@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use byteflow::samples::{self, add_forty_two, ping_pong};
 use byteflow::{
-    decode, disassemble, encode, std_native_table, verify, FlowOutcome, NativeTable, Runtime,
-    RuntimeConfig,
+    assemble, decode, disassemble, encode, std_native_table, verify, FlowOutcome, NativeTable,
+    Runtime, RuntimeConfig,
 };
 
 fn main() -> ExitCode {
@@ -30,6 +30,15 @@ fn main() -> ExitCode {
             Some(path) => cmd_disasm(&path),
             None => usage("byteflow disasm <file.bf>"),
         },
+        "asm" => {
+            let input = args.next();
+            let flag = args.next();
+            let output = args.next();
+            match (input, flag.as_deref(), output) {
+                (Some(input), Some("-o"), Some(output)) => cmd_asm(&input, &output),
+                _ => usage("byteflow asm <file> -o <out.bf>"),
+            }
+        }
         "run" => match args.next() {
             Some(path) => cmd_run(&path, args.next().as_deref()),
             None => usage("byteflow run <file.bf> [function]"),
@@ -93,6 +102,7 @@ fn print_help() {
 {}
 {}
 {}
+{}
 {}  run/hop demos attach natives print=0 · now_ms=1 · make_msg=2 · … · msg_reply_cap=7
 {}  every Send is an Atomic Hop (Value::Message only)",
         t.bar('╭', "𝕭𝖄𝕿𝕰𝕱𝕷𝕺𝖂", "runtime"),
@@ -105,6 +115,7 @@ fn print_help() {
         cmd("pack  ", "<ping-pong|atomic|ask|add> <out.bf>"),
         cmd("verify", "<file.bf>"),
         cmd("disasm", "<file.bf>"),
+        cmd("asm   ", "<file> -o <out.bf>"),
         cmd("run   ", "<file.bf> [function]"),
         t.paint(BLOOD, "│"),
         t.paint(CRIMSON, "╰─"),
@@ -182,6 +193,24 @@ fn cmd_verify(path: &str) -> Result<(), ()> {
             Err(())
         }
     }
+}
+
+fn cmd_asm(input: &str, output: &str) -> Result<(), ()> {
+    let text = fs::read_to_string(input).map_err(|e| {
+        eprintln!("read {input}: {e}");
+    })?;
+    let chunk = assemble(&text).map_err(|e| {
+        eprintln!("{input}: {e}");
+    })?;
+    let bytes = encode(&chunk);
+    if let Some(dir) = Path::new(output).parent() {
+        if !dir.as_os_str().is_empty() {
+            fs::create_dir_all(dir).map_err(|e| eprintln!("mkdir: {e}"))?;
+        }
+    }
+    fs::write(output, &bytes).map_err(|e| eprintln!("write {output}: {e}"))?;
+    println!("wrote {output} ({} bytes)", bytes.len());
+    Ok(())
 }
 
 fn cmd_disasm(path: &str) -> Result<(), ()> {

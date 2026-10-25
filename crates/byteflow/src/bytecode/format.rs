@@ -1,4 +1,7 @@
-use super::chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC};
+use super::chunk::{
+    Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, ABI_VERSION_RECORDS,
+    MAGIC,
+};
 use super::instruction::Instruction;
 use super::opcode::Opcode;
 use super::value::Value;
@@ -70,17 +73,27 @@ impl std::fmt::Display for FormatError {
 
 impl std::error::Error for FormatError {}
 
-/// Encode `chunk` as a BFV0 module (little-endian). Pure data — no I/O.
-pub fn encode(chunk: &Chunk) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&MAGIC);
-    let abi = if constants_contain_map(&chunk.constants) {
+/// Oldest ABI that can hold `constants`: v8 for a record, otherwise v7 for a
+/// map, otherwise v6 for a list, otherwise v5.
+pub(crate) fn module_abi(constants: &[Value]) -> u32 {
+    if constants_contain_record(constants) {
+        ABI_VERSION_RECORDS
+    } else if constants_contain_map(constants) {
         ABI_VERSION_MAPS
-    } else if constants_contain_list(&chunk.constants) {
+    } else if constants_contain_list(constants) {
         ABI_VERSION_LISTS
     } else {
         ABI_VERSION
-    };
+    }
+}
+
+/// Encode `chunk` as a BFV0 module (little-endian). Pure data — no I/O.
+///
+/// The header is the oldest ABI that can represent the constant pool.
+pub fn encode(chunk: &Chunk) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&MAGIC);
+    let abi = module_abi(&chunk.constants);
     out.extend_from_slice(&abi.to_le_bytes());
     write_string(&mut out, &chunk.name);
     out.extend_from_slice(&(chunk.constants.len() as u32).to_le_bytes());
@@ -123,7 +136,11 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         return Err(FormatError::BadMagic { found: magic });
     }
     let abi = r.read_u32()?;
-    if abi != ABI_VERSION && abi != ABI_VERSION_LISTS && abi != ABI_VERSION_MAPS {
+    if abi != ABI_VERSION
+        && abi != ABI_VERSION_LISTS
+        && abi != ABI_VERSION_MAPS
+        && abi != ABI_VERSION_RECORDS
+    {
         return Err(FormatError::UnsupportedAbi(abi));
     }
     let name = r.read_string()?;
@@ -238,6 +255,13 @@ fn write_value(out: &mut Vec<u8>, value: &Value) {
                 write_value(out, value);
             }
         }
+        Value::Record(fields) => {
+            out.push(11);
+            out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            for field in fields.iter() {
+                write_value(out, field);
+            }
+        }
     }
 }
 
@@ -256,15 +280,28 @@ pub(crate) fn decode_value(bytes: &[u8]) -> Result<(Value, usize), FormatError> 
         data: bytes,
         pos: 0,
     };
-    let value = reader.read_value(TrustLevel::Trusted, 0, ABI_VERSION_MAPS)?;
+    let value = reader.read_value(TrustLevel::Trusted, 0, ABI_VERSION_RECORDS)?;
     Ok((value, reader.pos))
+}
+
+fn constants_contain_record(constants: &[Value]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Record(_) => true,
+            Value::List(items) => items.iter().any(walk),
+            Value::Map(entries) => entries.iter().any(|(_, value)| walk(value)),
+            Value::Message(message) => walk(message.payload.as_ref()),
+            _ => false,
+        }
+    }
+    constants.iter().any(walk)
 }
 
 fn constants_contain_map(constants: &[Value]) -> bool {
     fn walk(value: &Value) -> bool {
         match value {
             Value::Map(_) => true,
-            Value::List(items) => items.iter().any(walk),
+            Value::List(items) | Value::Record(items) => items.iter().any(walk),
             Value::Message(message) => walk(message.payload.as_ref()),
             _ => false,
         }
@@ -276,6 +313,7 @@ fn constants_contain_list(constants: &[Value]) -> bool {
     fn walk(value: &Value) -> bool {
         match value {
             Value::List(_) => true,
+            Value::Record(fields) => fields.iter().any(walk),
             Value::Map(entries) => entries.iter().any(|(_, value)| walk(value)),
             Value::Message(message) => walk(message.payload.as_ref()),
             _ => false,
@@ -464,6 +502,23 @@ impl<'a> Reader<'a> {
                 }
                 super::value::Value::try_map(entries).ok_or(FormatError::ValueTooNested)
             }
+            11 => {
+                if abi < ABI_VERSION_RECORDS {
+                    return Err(FormatError::UnknownValueTag(11));
+                }
+                let n = self.read_u32()?;
+                if n > super::value::MAX_RECORD_LEN as u32 {
+                    return Err(FormatError::LimitExceeded {
+                        what: "record",
+                        got: n,
+                    });
+                }
+                let mut fields = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    fields.push(self.read_value(trust, depth + 1, abi)?);
+                }
+                super::value::Value::try_record(fields).ok_or(FormatError::ValueTooNested)
+            }
             tag => Err(FormatError::UnknownValueTag(tag)),
         }
     }
@@ -599,7 +654,7 @@ mod tests {
         let mut v5 = bytes.clone();
         v5[4..8].copy_from_slice(&5u32.to_le_bytes());
         assert!(matches!(decode(&v5), Err(FormatError::UnknownValueTag(9))));
-        let wide = Value::List(std::sync::Arc::from(vec![Value::Int(1); 33]));
+        let wide = Value::List(std::sync::Arc::from(vec![Value::Int(1); 257]));
         let mut wide_chunk = Chunk {
             name: "wide".into(),
             ..Chunk::default()
@@ -648,9 +703,131 @@ mod tests {
             Some(Value::Map(entries)) => {
                 assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0].1, Value::Int(2));
-                Ok(())
             }
+            _ => return Err(FormatError::Truncated),
+        }
+        let pairs = (0..256)
+            .map(|n| (super::super::value::MapKey::Int(n), Value::Int(n)))
+            .collect();
+        let full = Value::try_map(pairs).ok_or(FormatError::LimitExceeded {
+            what: "map",
+            got: 256,
+        })?;
+        let (decoded, _) = decode_value(&encode_value(&full))?;
+        match decoded {
+            Value::Map(entries) if entries.len() == 256 => {}
+            _ => return Err(FormatError::Truncated),
+        }
+        let too_big = Value::Map(std::sync::Arc::from(vec![
+            (
+                super::super::value::MapKey::Int(0),
+                Value::Int(0),
+            );
+            257
+        ]));
+        match decode_value(&encode_value(&too_big)) {
+            Err(FormatError::LimitExceeded {
+                what: "map",
+                got: 257,
+            }) => Ok(()),
+            Err(err) => Err(err),
+            Ok(_) => Err(FormatError::LimitExceeded {
+                what: "map",
+                got: 257,
+            }),
+        }
+    }
+
+    #[test]
+    fn list_of_256_round_trips_and_257_is_rejected() -> Result<(), FormatError> {
+        let items: Vec<Value> = (0..256).map(Value::Int).collect();
+        let list = Value::try_list(items).ok_or(FormatError::LimitExceeded {
+            what: "list",
+            got: 256,
+        })?;
+        let mut chunk = Chunk {
+            name: "cap".into(),
+            ..Chunk::default()
+        };
+        chunk.constants.push(list);
+        chunk.functions.push(FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        let bytes = encode(&chunk);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4])),
+            ABI_VERSION_LISTS
+        );
+        let back = decode_with(&bytes, TrustLevel::Trusted)?;
+        match back.constants.first() {
+            Some(Value::List(items)) if items.len() == 256 => {}
+            _ => return Err(FormatError::Truncated),
+        }
+        let too_big = Value::List(std::sync::Arc::from(vec![Value::Int(1); 257]));
+        let encoded = encode_value(&too_big);
+        match decode_value(&encoded) {
+            Err(FormatError::LimitExceeded {
+                what: "list",
+                got: 257,
+            }) => Ok(()),
+            Err(err) => Err(err),
+            Ok(_) => Err(FormatError::LimitExceeded {
+                what: "list",
+                got: 257,
+            }),
+        }
+    }
+
+    #[test]
+    fn list_of_32_still_decodes() -> Result<(), FormatError> {
+        let list = Value::try_list((0..32).map(Value::Int).collect()).ok_or(
+            FormatError::LimitExceeded {
+                what: "list",
+                got: 32,
+            },
+        )?;
+        let (back, _) = decode_value(&encode_value(&list))?;
+        match back {
+            Value::List(items) if items.len() == 32 => Ok(()),
             _ => Err(FormatError::Truncated),
+        }
+    }
+
+    #[test]
+    fn record_selects_abi_v8_and_older_headers_reject_the_tag() -> Result<(), FormatError> {
+        let record = Value::try_record(vec![Value::Int(1), Value::Int(2)])
+            .ok_or(FormatError::ValueTooNested)?;
+        let mut chunk = Chunk {
+            name: "rec".into(),
+            ..Chunk::default()
+        };
+        chunk.constants.push(record);
+        chunk.functions.push(FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        let mut bytes = encode(&chunk);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4])),
+            ABI_VERSION_RECORDS
+        );
+        let back = decode_with(&bytes, TrustLevel::Trusted)?;
+        match back.constants.first() {
+            Some(Value::Record(fields)) if fields.len() == 2 => {}
+            _ => return Err(FormatError::Truncated),
+        }
+        bytes[4..8].copy_from_slice(&ABI_VERSION_MAPS.to_le_bytes());
+        match decode_with(&bytes, TrustLevel::Trusted) {
+            Err(FormatError::UnknownValueTag(11)) => Ok(()),
+            Err(err) => Err(err),
+            Ok(_) => Err(FormatError::UnknownValueTag(11)),
         }
     }
 }

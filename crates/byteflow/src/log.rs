@@ -80,3 +80,53 @@ pub fn debug(msg: impl std::fmt::Display) {
         eprintln!("[{}] byteflow DEBUG {}", stamp_ms(), msg);
     }
 }
+
+/// A collector refused or dropped one diagnostic line.
+///
+/// The runtime ignores this. The flow keeps its original outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogRecordError;
+
+impl std::fmt::Display for LogRecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("log sink rejected the line")
+    }
+}
+
+impl std::error::Error for LogRecordError {}
+
+/// Receives the diagnostic line that would be written to stderr.
+///
+/// `try_record` runs on the worker that emitted the event. It must return
+/// promptly and must not panic. [`Err`] is ignored: a collector failure does
+/// not fail the flow. There is no queue inside the runtime.
+pub trait LogSink: Send + Sync + std::fmt::Debug + 'static {
+    fn try_record(&self, line: &str) -> Result<(), LogRecordError>;
+}
+
+pub(crate) fn info_sink(sink: Option<&std::sync::Arc<dyn LogSink>>, msg: impl std::fmt::Display) {
+    forward(sink, INFO, "INFO ", msg);
+}
+
+pub(crate) fn debug_sink(sink: Option<&std::sync::Arc<dyn LogSink>>, msg: impl std::fmt::Display) {
+    forward(sink, DEBUG, "DEBUG", msg);
+}
+
+fn forward(
+    sink: Option<&std::sync::Arc<dyn LogSink>>,
+    min: u8,
+    label: &str,
+    msg: impl std::fmt::Display,
+) {
+    let show = level() >= min;
+    if !show && sink.is_none() {
+        return;
+    }
+    let line = format!("[{}] byteflow {label} {msg}", stamp_ms());
+    if show {
+        eprintln!("{line}");
+    }
+    if let Some(sink) = sink {
+        let _ = sink.try_record(&line);
+    }
+}

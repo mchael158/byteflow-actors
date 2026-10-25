@@ -85,7 +85,7 @@ pub(super) fn heap_charge_of(value: &Value) -> Result<usize, Fault> {
             Value::Str(s) => Ok(s.len()),
             Value::Bytes(b) => Ok(b.len()),
             Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
-            Value::List(items) => {
+            Value::List(items) | Value::Record(items) => {
                 let mut sum = items
                     .len()
                     .checked_mul(std::mem::size_of::<Value>())

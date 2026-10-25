@@ -379,10 +379,13 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
         report_fault(e);
     }
 
-    log::info(format!(
-        "finalize flow#{id} reason={reason} outcome={:?}",
-        pending.outcome
-    ));
+    log::info_sink(
+        shared.log_sink.as_ref(),
+        format!(
+            "finalize flow#{id} reason={reason} outcome={:?}",
+            pending.outcome
+        ),
+    );
 
     if let Err(e) = shared.kill_signals.take(id) {
         report_fault(e);

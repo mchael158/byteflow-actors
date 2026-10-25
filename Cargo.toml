@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.99.1"
 authors = ["Byteflow Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mchael158/bytecode-vm"
+repository = "https://github.com/mchael158/byteflow-actors.git"
 
 [profile.release]
 opt-level = 3

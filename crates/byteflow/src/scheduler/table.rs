@@ -243,7 +243,9 @@ fn value_allowed(value: &Value, depth: u32) -> bool {
     }
     match value {
         Value::Cap(_) | Value::Pid(_) | Value::Message(_) => false,
-        Value::List(items) => items.iter().all(|item| value_allowed(item, depth + 1)),
+        Value::List(items) | Value::Record(items) => {
+            items.iter().all(|item| value_allowed(item, depth + 1))
+        }
         Value::Map(entries) => entries
             .iter()
             .all(|(_, item)| value_allowed(item, depth + 1)),

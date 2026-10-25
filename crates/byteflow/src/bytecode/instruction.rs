@@ -69,15 +69,19 @@ impl fmt::Display for Instruction {
             | Opcode::LeImm => {
                 write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm)
             }
-            Opcode::ListPack => {
+            Opcode::ListPack | Opcode::RecordPack => {
                 write!(
                     f,
                     "{} r{}, r{}, count={}",
                     self.op, self.a, self.b, self.imm
                 )
             }
-            Opcode::ListGet => write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm),
-            Opcode::ListLen | Opcode::MapLen => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
+            Opcode::ListGet | Opcode::RecordGet => {
+                write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm)
+            }
+            Opcode::ListLen | Opcode::MapLen | Opcode::RecordLen => {
+                write!(f, "{} r{}, r{}", self.op, self.a, self.b)
+            }
             Opcode::MapPack => write!(
                 f,
                 "{} r{}, r{}, pairs={}",

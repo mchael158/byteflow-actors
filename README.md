@@ -39,4 +39,4 @@ Atomic Hop (`Value::Message`): see `crates/byteflow/docs/atomic-hop.md`. Set `BY
 [host-await](crates/byteflow/docs/host-await.md) ·
 [security](crates/byteflow/docs/security.md)
 
-License: MIT OR Apache-2.0 · [github.com/mchael158/bytecode-vm](https://github.com/mchael158/bytecode-vm)
+License: MIT OR Apache-2.0 · [github.com/mchael158/byteflow-actors](https://github.com/mchael158/byteflow-actors)

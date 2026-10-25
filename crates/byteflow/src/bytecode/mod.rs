@@ -14,6 +14,7 @@
 //! Current ABI: see [`ABI_VERSION`]. Lists use [`ABI_VERSION_LISTS`].
 //! Maps use [`ABI_VERSION_MAPS`].
 
+mod asm;
 pub(crate) mod builder;
 mod cap;
 mod chunk;
@@ -27,10 +28,14 @@ mod restart;
 mod value;
 mod verify;
 
+pub use asm::{assemble, AssembleError};
 pub use cap::{
     Cap, CapId, CapIdError, CapRights, CapTarget, NativeIdx, NativeMask, RevocationCell,
 };
-pub use chunk::{Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC};
+pub use chunk::{
+    Chunk, FunctionDef, ABI_VERSION, ABI_VERSION_LISTS, ABI_VERSION_MAPS, ABI_VERSION_RECORDS,
+    MAGIC,
+};
 pub use disasm::disassemble;
 pub use format::{decode, decode_with, encode, FormatError};
 pub(crate) use format::{decode_value, encode_value, MAX_VALUE_DEPTH};
@@ -40,6 +45,7 @@ pub use pattern::payload_matches;
 pub use program::{Fn, FuncId, Label, Program, Reg, RegWindow};
 pub use restart::RestartPolicy;
 pub use value::{
-    MapKey, Message, Value, MAX_LIST_LEN, MAX_MAP_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN, TAG_SYS_EXIT,
+    MapKey, Message, Value, MAX_LIST_LEN, MAX_MAP_LEN, MAX_RECORD_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN,
+    TAG_SYS_EXIT,
 };
 pub use verify::{verify, verify_with, ConstantKind, TrustLevel, VerifyConfig, VerifyError};

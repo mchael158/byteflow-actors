@@ -311,6 +311,14 @@ fn screen_value(value: &Value, depth: u32) -> Result<(), RemoteFrameError> {
                 .iter()
                 .try_for_each(|item| screen_value(item, depth + 1))
         }
+        Value::Record(fields) => {
+            if fields.len() > crate::bytecode::MAX_RECORD_LEN {
+                return Err(RemoteFrameError::Unsupported);
+            }
+            fields
+                .iter()
+                .try_for_each(|field| screen_value(field, depth + 1))
+        }
         Value::Map(entries) => {
             if entries.len() > crate::bytecode::MAX_MAP_LEN {
                 return Err(RemoteFrameError::Unsupported);
@@ -489,6 +497,39 @@ mod tests {
             encode_frame(&hop),
             Err(RemoteFrameError::LiveCapability)
         ));
+    }
+
+    #[test]
+    fn frame_rejects_a_list_past_the_cap() {
+        let hop = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(
+                9,
+                1,
+                1,
+                Value::List(std::sync::Arc::from(vec![Value::Int(1); 257])),
+            )
+            .authenticate(9, crate::CapId::NONE),
+        };
+        assert!(matches!(
+            encode_frame(&hop),
+            Err(RemoteFrameError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn frame_accepts_a_list_at_the_cap() -> Result<(), RemoteFrameError> {
+        let list =
+            Value::try_list(vec![Value::Int(1); 256]).ok_or(RemoteFrameError::Unsupported)?;
+        let hop = OutboundHop {
+            sender: FlowId(9),
+            node: 1,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(9, 1, 1, list).authenticate(9, crate::CapId::NONE),
+        };
+        encode_frame(&hop).map(|_| ())
     }
 
     #[test]

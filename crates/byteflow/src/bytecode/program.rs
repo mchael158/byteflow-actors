@@ -333,7 +333,7 @@ impl<'a> Fn<'a> {
     }
 
     /// Pack `items` into a new list local. `items` must already be contiguous
-    /// registers (`rN, rN+1, …`) and at most 32 long.
+    /// registers (`rN, rN+1, …`) and at most [`crate::MAX_LIST_LEN`] long.
     pub fn list_pack(&mut self, items: &[Reg]) -> Reg {
         let dst = self.local();
         let base = match items.first() {
@@ -356,8 +356,32 @@ impl<'a> Fn<'a> {
         dst
     }
 
+    /// Pack contiguous registers into a positional record. Same layout rules
+    /// as [`Self::list_pack`]. At most [`crate::MAX_RECORD_LEN`] fields.
+    pub fn record_pack(&mut self, fields: &[Reg]) -> Reg {
+        let dst = self.local();
+        let base = match fields.first() {
+            Some(reg) => reg.0,
+            None => 0,
+        };
+        self.b.emit_record_pack(dst.0, base, fields.len() as i32);
+        dst
+    }
+
+    pub fn record_get(&mut self, record: Reg, index: i32) -> Reg {
+        let dst = self.local();
+        self.b.emit_record_get(dst.0, record.0, index);
+        dst
+    }
+
+    pub fn record_len(&mut self, record: Reg) -> Reg {
+        let dst = self.local();
+        self.b.emit_record_len(dst.0, record.0);
+        dst
+    }
+
     /// Pack `pairs` into a map. Each pair is `(key, value)` already in
-    /// registers. Keys are `Int` or `Str`. At most 32 pairs.
+    /// registers. Keys are `Int` or `Str`. At most [`crate::MAX_MAP_LEN`] pairs.
     pub fn map_pack(&mut self, pairs: &[(Reg, Reg)]) -> Reg {
         let dst = self.local();
         let base = match pairs.first() {

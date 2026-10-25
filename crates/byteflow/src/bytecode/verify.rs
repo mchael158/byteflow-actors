@@ -75,7 +75,7 @@ fn reject_untrusted_constant(value: &Value, index: usize) -> Result<(), VerifyEr
             index,
             kind: ConstantKind::Message,
         }),
-        Value::List(items) => {
+        Value::List(items) | Value::Record(items) => {
             for item in items.iter() {
                 reject_untrusted_constant(item, index)?;
             }

@@ -18,6 +18,8 @@ pub const MAGIC: [u8; 4] = *b"BFV0";
 /// written only as v6; v5 decoders reject tag `9`.
 /// v7: [`Value::Map`] wire tag `10`. A module without a map stays on v5 or
 /// v6. v5 and v6 decoders reject tag `10`.
+/// v8: [`Value::Record`] wire tag `11`. A module without a record stays on
+/// v5, v6, or v7. Older headers reject tag `11`.
 pub const ABI_VERSION: u32 = 5;
 
 /// ABI that introduces [`Value::List`]. [`encode`](super::encode) emits this
@@ -28,6 +30,10 @@ pub const ABI_VERSION_LISTS: u32 = 6;
 /// ABI that introduces [`Value::Map`]. Emitted only when a constant contains
 /// a map. Decode accepts it alongside v5 and v6.
 pub const ABI_VERSION_MAPS: u32 = 7;
+
+/// ABI that introduces [`Value::Record`]. Emitted only when a constant
+/// contains a record. Decode accepts v5 through v8.
+pub const ABI_VERSION_RECORDS: u32 = 8;
 
 /// A callable entry point inside a [`Chunk`]: either bytecode-defined or a
 /// slot reserved for a native (Rust) function registered with the runtime

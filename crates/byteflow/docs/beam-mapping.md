@@ -30,7 +30,8 @@ See [`atomic-hop.md`](atomic-hop.md) and [`security.md`](security.md) (S1, S6).
 | `Pid ! Msg` | `Fn::send(cap, hop)` | `Send` |
 | `receive` | `Fn::receive()` | `Receive` |
 | selective receive (pattern) | `Fn::receive_match_imm(tag)` / `Fn::receive_match_kind(kind)` / `Fn::receive_match_eq(tag, int)` / `Fn::receive_match_cmp(tag, bound, cmp)` / `Fn::receive_match_value(tag, value)` | Tag, payload wire-tag (`0..=10`), tag + `Int`, tag + `Eq`/`Lt`/`Le` on an `Int`, or tag + any `Value`. No tuples |
-| map | `Fn::map_pack` / `map_get` / `map_len` | At most 32 pairs. Keys are `Int` or `Str`. A missing key is `Unit`. A module that stores a map is ABI v7 |
+| map | `Fn::map_pack` / `map_get` / `map_len` | At most 256 pairs. Keys are `Int` or `Str`. A missing key is `Unit`. A module that stores a map and no record is ABI v7 |
+| record | `RecordPack` / `RecordGet` / `RecordLen` | Positional fields, at most 256. Not a tuple and not a receive pattern. A module that stores a record is ABI v8 |
 | `ets` | `Fn::table_open` / `table_get` / `table_put` | One table per owning flow. `RECV` reads, `SEND` writes. Gone when the owner exits |
 | `receive … after T` | `Fn::receive_match_imm_timeout(tag, ms)` / `Fn::receive_timeout` | Match + timeout writes `Unit` (hops stay queued) |
 | `is_process_alive(Pid)` | `Fn::is_alive(cap)` | Held Cap → live flow? `false` if revoked / not held |
@@ -53,10 +54,12 @@ Message { sender, reply_cap, request_id, tag, payload }
 ```
 
 - `payload` is a nested [`Value`](../src/bytecode/value.rs) — scalars,
-  `Str` / `Bytes`, a `List` of at most 32 elements (ABI v6), a `Map` of at
-  most 32 pairs with `Int` or `Str` keys (ABI v7), or another hop.
-  A module stays on the oldest ABI that can hold its constants: v7 when a
-  map is present, otherwise v6 when a list is present, otherwise v5.
+  `Str` / `Bytes`, a `List` of at most 256 elements (ABI v6), a `Map` of at
+  most 256 pairs with `Int` or `Str` keys (ABI v7), a positional `Record` of
+  at most 256 fields (ABI v8), or another hop.
+  A module stays on the oldest ABI that can hold its constants: v8 when a
+  record is present, otherwise v7 when a map is present, otherwise v6 when a
+  list is present, otherwise v5. Readers accept v5, v6, v7, and v8.
 - `sender` is **authenticated by the runtime** on bytecode `Send` / `Ask`.
   `make_msg` has no sender operand (3-arg: request_id, tag, payload). A
   leftover 4-arg encoding is ignored — see
@@ -115,6 +118,19 @@ Sample helper (same shape): [`samples::server_loop`](../src/samples.rs).
 | **confined spawn** | `Fn::spawn_confined` (child rights `NONE`) |
 | **`child_spec` restart** | `Fn::start_supervisor` chooses `OneForOne` / `OneForAll` / `RestForOne`. `Fn::start_child` attaches to that supervisor, or to the host supervisor that started this flow. `Fn::set_restart_policy` overrides this flow's own restart at exit |
 | **process dictionary** | `Fn::dict_put` / `dict_get` / `dict_erase` — `Int` keys, scalars plus `Str` / `Bytes` |
+
+## Module ABI
+
+`encode` writes the oldest ABI that can represent the constant pool:
+
+| Header | When |
+|--------|------|
+| v5 | No list, map, or record |
+| v6 | A list is present, and no map or record |
+| v7 | A map is present, and no record |
+| v8 | A record is present (`Value::Record`, wire tag `11`) |
+
+Decode accepts v5, v6, v7, and v8. A module whose header is v5 rejects list tag `9`, map tag `10`, and record tag `11`. v6 rejects map and record. v7 rejects record. A module that does not use a record is not written as v8. Lists and maps hold at most 256 elements. A record holds at most 256 positional fields (`RecordPack` / `RecordGet` / `RecordLen`, opcodes `0x8A`–`0x8C`). `receive` does not gain a record pattern; it still matches tag, kind, integer comparison, and `Value` equality.
 
 ## What BEAM has that Byteflow does not (yet)
 

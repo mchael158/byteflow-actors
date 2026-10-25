@@ -1,26 +1,24 @@
 use std::fmt::Write as _;
 
-use super::chunk::{Chunk, ABI_VERSION};
+use super::asm::write_constant;
+use super::chunk::Chunk;
+use super::format::module_abi;
 
-/// Human-readable listing of a [`Chunk`], used by `byteflow-cli disasm`.
+/// Assemblable listing of a [`Chunk`]. [`super::assemble`] reads it back.
+///
+/// The `.abi` line is the version [`super::encode`] would write, not a
+/// hardcoded v5.
 pub fn disassemble(chunk: &Chunk) -> String {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "; chunk {:?} abi={} constants={} functions={} code={}",
-        chunk.name,
-        ABI_VERSION,
-        chunk.constants.len(),
-        chunk.functions.len(),
-        chunk.code.len()
-    );
-    for (i, c) in chunk.constants.iter().enumerate() {
-        let _ = writeln!(out, ";   const[{i}] = {c}");
+    let _ = writeln!(out, ".chunk {}", quote(&chunk.name));
+    let _ = writeln!(out, ".abi {}", module_abi(&chunk.constants));
+    for value in &chunk.constants {
+        write_constant(&mut out, value);
     }
-    for (i, def) in chunk.functions.iter().enumerate() {
+    for def in &chunk.functions {
         let _ = writeln!(
             out,
-            "; fn[{i}] {} entry={} arity={} regs={}",
+            ".fn {} entry={} arity={} regs={}",
             def.name, def.entry, def.arity, def.num_registers
         );
     }
@@ -31,6 +29,20 @@ pub fn disassemble(chunk: &Chunk) -> String {
         };
         let _ = writeln!(out, "{i:04}  {instr}{label}");
     }
+    out
+}
+
+fn quote(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -47,6 +59,7 @@ mod tests {
         let text = super::disassemble(&b.finish());
         assert!(text.contains("LoadImm r0, 1"));
         assert!(text.contains("main"));
+        assert!(text.contains(".abi 5"));
     }
 
     #[test]

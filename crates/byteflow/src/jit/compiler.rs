@@ -1093,6 +1093,9 @@ fn is_effect_opcode(op: Opcode) -> bool {
             | Opcode::TableOpen
             | Opcode::TableGet
             | Opcode::TablePut
+            | Opcode::RecordPack
+            | Opcode::RecordGet
+            | Opcode::RecordLen
             | Opcode::Trap
             | Opcode::Halt
     )

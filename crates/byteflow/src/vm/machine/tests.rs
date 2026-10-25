@@ -3,6 +3,37 @@ use crate::bytecode::builder::ChunkBuilder;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn record_pack_get_and_len() -> TestResult {
+    let mut b = ChunkBuilder::new("rec");
+    b.begin_function("main", 0, 6);
+    b.emit_load_imm(0, 10);
+    b.emit_load_imm(1, 20);
+    b.emit_record_pack(2, 0, 2);
+    b.emit_record_get(3, 2, 1);
+    b.emit_record_len(4, 2);
+    b.emit_return(3);
+    let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+    match vm.run(16) {
+        VmResult::Complete(Value::Int(20)) => {}
+        other => return Err(format!("expected field 20, got {other:?}").into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn record_pack_rejects_257_fields() -> TestResult {
+    let mut b = ChunkBuilder::new("rec");
+    b.begin_function("main", 0, 2);
+    b.emit_record_pack(0, 0, 257);
+    b.emit_return(0);
+    let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+    match vm.run(4) {
+        VmResult::Trap(Fault::TypeMismatch { expected, .. }) if expected.contains("256") => Ok(()),
+        other => Err(format!("expected a length trap, got {other:?}").into()),
+    }
+}
+
 /// `Spawn a=255` reads its arguments from `a+1`, so the first index
 /// already leaves the register space. This used to panic in debug and —
 /// far worse — wrap around to `r0` in release, silently spawning with the

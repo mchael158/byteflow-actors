@@ -107,10 +107,13 @@ impl Message {
 
 /// Most elements a [`Value::List`] may hold. Wider sequences are rejected
 /// by the decoder, `ListPack`, and [`Value::try_list`].
-pub const MAX_LIST_LEN: usize = 32;
+pub const MAX_LIST_LEN: usize = 256;
 
 /// Most pairs a [`Value::Map`] may hold. Keys are [`MapKey`] (`Int` or `Str`).
-pub const MAX_MAP_LEN: usize = 32;
+pub const MAX_MAP_LEN: usize = 256;
+
+/// Most fields a [`Value::Record`] may hold. Positional, not a map.
+pub const MAX_RECORD_LEN: usize = 256;
 
 /// Key of a [`Value::Map`]. Floats are not keys: equality would not be
 /// a useful match, and a NaN key could never be read back.
@@ -199,6 +202,9 @@ pub enum Value {
     /// Bounded map (ABI v7 wire tag `10`). At most [`MAX_MAP_LEN`] pairs.
     /// Insertion order is kept. A duplicate key is rejected at construction.
     Map(Arc<[(MapKey, Value)]>),
+    /// Positional record (ABI v8 wire tag `11`). At most [`MAX_RECORD_LEN`]
+    /// fields. Not a map and not a receive pattern.
+    Record(Arc<[Value]>),
 }
 
 impl Value {
@@ -219,6 +225,7 @@ impl Value {
             Value::Bytes(_) => 8,
             Value::List(_) => 9,
             Value::Map(_) => 10,
+            Value::Record(_) => 11,
         }
     }
 
@@ -269,6 +276,20 @@ impl Value {
         }
     }
 
+    /// Build a [`Value::Record`]. Fails when `fields` is longer than
+    /// [`MAX_RECORD_LEN`] or nesting exceeds the decoder ceiling.
+    pub fn try_record(fields: Vec<Value>) -> Option<Self> {
+        if fields.len() > MAX_RECORD_LEN {
+            return None;
+        }
+        let value = Value::Record(Arc::from(fields));
+        if value.within_nesting_limit() {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     /// Build a [`Value::Str`] from anything string-like.
     #[inline]
     pub fn str(s: impl AsRef<str>) -> Self {
@@ -292,7 +313,9 @@ impl Value {
             }
             match value {
                 Value::Message(message) => walk(message.payload.as_ref(), depth + 1),
-                Value::List(items) => items.iter().all(|item| walk(item, depth + 1)),
+                Value::List(items) | Value::Record(items) => {
+                    items.iter().all(|item| walk(item, depth + 1))
+                }
                 Value::Map(entries) => entries.iter().all(|(_, value)| walk(value, depth + 1)),
                 _ => true,
             }
@@ -346,6 +369,13 @@ impl Value {
                 }
                 Value::try_map(next).ok_or_else(|| too_nested.clone())
             }
+            Value::Record(fields) => {
+                let mut next = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    next.push(field.map_caps(depth + 1, too_nested, on_cap, on_message)?);
+                }
+                Value::try_record(next).ok_or_else(|| too_nested.clone())
+            }
             other => Ok(other.clone()),
         }
     }
@@ -397,6 +427,13 @@ impl Value {
                 }
                 Value::try_map(next)
             }
+            Value::Record(fields) => {
+                let mut next = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    next.push(field.stamp_unset_envelopes(depth + 1, sender_if_unset, mint)?);
+                }
+                Value::try_record(next)
+            }
             other => Some(other.clone()),
         }
     }
@@ -415,7 +452,9 @@ impl Value {
             Value::Message(message) => {
                 !message.reply_cap.is_none() || message.payload.contains_live_cap(depth + 1)
             }
-            Value::List(items) => items.iter().any(|item| item.contains_live_cap(depth + 1)),
+            Value::List(items) | Value::Record(items) => {
+                items.iter().any(|item| item.contains_live_cap(depth + 1))
+            }
             Value::Map(entries) => entries
                 .iter()
                 .any(|(_, value)| value.contains_live_cap(depth + 1)),
@@ -432,7 +471,7 @@ impl Value {
             Value::Unit | Value::Bool(false) | Value::Int(0) => false,
             Value::Str(s) if s.is_empty() => false,
             Value::Bytes(b) if b.is_empty() => false,
-            Value::List(items) if items.is_empty() => false,
+            Value::List(items) | Value::Record(items) if items.is_empty() => false,
             Value::Map(entries) if entries.is_empty() => false,
             _ => true,
         }
@@ -541,7 +580,7 @@ impl Value {
                         cursor = message.payload.as_ref();
                         depth += 1;
                     }
-                    Value::List(items) => {
+                    Value::List(items) | Value::Record(items) => {
                         if depth >= super::MAX_VALUE_DEPTH {
                             return None;
                         }
@@ -593,6 +632,7 @@ impl Value {
             Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Map(_) => "map",
+            Value::Record(_) => "record",
         }
     }
 }
@@ -632,6 +672,16 @@ impl fmt::Display for Value {
                     write!(f, ": {value}")?;
                 }
                 write!(f, "}}")
+            }
+            Value::Record(fields) => {
+                write!(f, "rec(")?;
+                for (index, field) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{field}")?;
+                }
+                write!(f, ")")
             }
         }
     }

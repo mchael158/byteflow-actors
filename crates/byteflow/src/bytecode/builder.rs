@@ -137,6 +137,18 @@ impl ChunkBuilder {
         self.emit(Instruction::abc(Opcode::ListLen, dst, src, 0));
     }
 
+    pub fn emit_record_pack(&mut self, dst: u8, base: u8, count: i32) {
+        self.emit(Instruction::new(Opcode::RecordPack, dst, base, 0, count));
+    }
+
+    pub fn emit_record_get(&mut self, dst: u8, src: u8, index: i32) {
+        self.emit(Instruction::new(Opcode::RecordGet, dst, src, 0, index));
+    }
+
+    pub fn emit_record_len(&mut self, dst: u8, src: u8) {
+        self.emit(Instruction::abc(Opcode::RecordLen, dst, src, 0));
+    }
+
     pub fn emit_map_pack(&mut self, dst: u8, base: u8, pairs: i32) {
         self.emit(Instruction::new(Opcode::MapPack, dst, base, 0, pairs));
     }

@@ -468,7 +468,7 @@ impl Vm {
     fn list_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
         if !(0..=crate::bytecode::MAX_LIST_LEN as i32).contains(&count) {
             return Err(Fault::TypeMismatch {
-                expected: "list length 0..=32",
+                expected: "list length 0..=256",
                 got: "imm-out-of-range",
             });
         }
@@ -518,10 +518,63 @@ impl Vm {
         self.set_reg(dst, Value::Int(items.len() as i64))
     }
 
+    fn record_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
+        if !(0..=crate::bytecode::MAX_RECORD_LEN as i32).contains(&count) {
+            return Err(Fault::TypeMismatch {
+                expected: "record length 0..=256",
+                got: "imm-out-of-range",
+            });
+        }
+        let mut fields = Vec::with_capacity(count as usize);
+        for offset in 0..count {
+            let reg = reg_at(base, offset as u16)?;
+            fields.push(self.get_reg(reg)?);
+        }
+        let record = match Value::try_record(fields) {
+            Some(record) => record,
+            None => return Err(Fault::QuotaExceeded("value nesting exceeds limit".into())),
+        };
+        self.set_reg(dst, record)
+    }
+
+    fn record_get(&mut self, dst: u8, src: u8, index: i32) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::Record(fields) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "record",
+                got: value.type_name(),
+            });
+        };
+        if index < 0 {
+            return Err(Fault::TypeMismatch {
+                expected: "record index",
+                got: "negative-int",
+            });
+        }
+        match fields.get(index as usize) {
+            Some(field) => self.set_reg(dst, field.clone()),
+            None => Err(Fault::TypeMismatch {
+                expected: "record index",
+                got: "out-of-range",
+            }),
+        }
+    }
+
+    fn record_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let value = self.get_reg(src)?;
+        let Value::Record(fields) = value else {
+            return Err(Fault::TypeMismatch {
+                expected: "record",
+                got: value.type_name(),
+            });
+        };
+        self.set_reg(dst, Value::Int(fields.len() as i64))
+    }
+
     fn map_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
         if !(0..=crate::bytecode::MAX_MAP_LEN as i32).contains(&count) {
             return Err(Fault::TypeMismatch {
-                expected: "map length 0..=32",
+                expected: "map length 0..=256",
                 got: "imm-out-of-range",
             });
         }
@@ -847,6 +900,15 @@ impl Vm {
                 }
                 Opcode::ListLen => {
                     trap!(self.list_len(instr.a, instr.b));
+                }
+                Opcode::RecordPack => {
+                    trap!(self.record_pack(instr.a, instr.b, instr.imm));
+                }
+                Opcode::RecordGet => {
+                    trap!(self.record_get(instr.a, instr.b, instr.imm));
+                }
+                Opcode::RecordLen => {
+                    trap!(self.record_len(instr.a, instr.b));
                 }
                 Opcode::MapPack => {
                     trap!(self.map_pack(instr.a, instr.b, instr.imm));

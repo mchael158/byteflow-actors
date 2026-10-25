@@ -88,6 +88,10 @@ pub struct RuntimeConfig {
     /// Where bytecode `print` (native index 0) writes when using
     /// [`crate::std_native_table_with`]. Ignored if you supply your own table.
     pub output: Arc<dyn crate::OutputSink>,
+    /// Scheduler diagnostics (`ask`, `finalize`, …). `None` keeps the
+    /// `BYTEFLOW_LOG` stderr path and adds no collector. The sink is called
+    /// inline and must not block or panic.
+    pub log: Option<Arc<dyn crate::log::LogSink>>,
     /// Per-flow CPU / memory / spawn-send rate budgets.
     pub quota: super::quota::QuotaConfig,
     /// Trace JIT settings (`feature = "jit"`). Ignored when the feature is off.
@@ -140,6 +144,7 @@ impl Default for RuntimeConfig {
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
             output: Arc::new(crate::output::NullSink),
+            log: None,
             quota: super::quota::QuotaConfig::default(),
             #[cfg(feature = "jit")]
             jit: JitConfig::default(),
@@ -209,6 +214,9 @@ pub struct Shared {
     pub(crate) host_await_failures: super::host_await::HostAwaitFailures,
     /// `SendRemote` queue. `None` fails the opcode.
     pub(crate) distribution: Option<Arc<super::distribution::DistributionBridge>>,
+    /// Embedder copy of scheduler diagnostics. `None` leaves stderr gating
+    /// in [`crate::log`] unchanged.
+    pub(crate) log_sink: Option<Arc<dyn crate::log::LogSink>>,
     /// One named table per flow. Empty until `TableOpen`.
     pub(crate) tables: super::table::FlowTables,
     /// Supervisors started by bytecode `StartSupervisor`. Joined from
@@ -358,6 +366,7 @@ impl Runtime {
             host_replay: Mutex::new(None),
             host_await_failures: super::host_await::HostAwaitFailures::new(),
             distribution: config.distribution.clone(),
+            log_sink: config.log.clone(),
             tables: super::table::FlowTables::new(),
             flow_supervisors: Mutex::new(Vec::new()),
             host_next_request_id: AtomicU64::new(1),

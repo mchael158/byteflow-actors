@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/byteflow-actors.svg)](https://crates.io/crates/byteflow-actors)
 [![docs.rs](https://docs.rs/byteflow-actors/badge.svg)](https://docs.rs/byteflow-actors)
-[![license](https://img.shields.io/crates/l/byteflow-actors.svg)](https://github.com/mchael158/bytecode-vm)
+[![license](https://img.shields.io/crates/l/byteflow-actors.svg)](https://github.com/mchael158/byteflow-actors)
 
 **Byteflow** is a small, embeddable **flow** runtime for Rust: register-based bytecode, lightweight flows, **Atomic Hop** messaging (`Value::Message` only on `Send`), cooperative scheduling, and an OTP-style supervisor (`one-for-one` / `one-for-all` / `rest-for-one`) — without a separate scripting language.
 
@@ -22,6 +22,10 @@ Use Byteflow when you need **many isolated units of work** that talk through mes
 - sandboxed “virtual processes” with a host-defined FFI table  
 
 It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
+
+## Module ABI
+
+`encode` writes the oldest header that can hold the constants. v5 has neither lists, maps, nor records. v6 adds lists (wire tag 9). v7 adds maps (wire tag 10). v8 adds positional records (wire tag 11, opcodes `RecordPack` `0x8A`, `RecordGet` `0x8B`, `RecordLen` `0x8C`). Decode accepts all four. A module without a record stays on v5, v6, or v7. Lists, maps, and records each hold at most 256 items. See `docs/beam-mapping.md`.
 
 ---
 
@@ -228,7 +232,7 @@ byteflow run    <file.bf> [function]
 
 ## Status (v0.9.19)
 
-**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**, **ABI v6** when a constant contains a list, **ABI v7** when a constant contains a map: 128-bit `CapId`, nested `Message.payload`, lists and maps of at most 32 elements, map keys `Int` or `Str`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (safe growable ring; `MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, `trap_exit` (`Opcode::SetTrapExit` / `Runtime::set_trap_exit`), `ReceiveMatchKind` (payload wire-tag selective receive), `ReceiveMatchEq` (tag + `Int` payload), `ReceiveMatchValue` (tag + any `Value`), `ReceiveMatch*Timeout` (BEAM `after`), `IsAlive`, `ExitSignal` (BEAM `exit/2`, needs `LINK`), process dictionary (`DictPut` / `DictGet` / `DictErase`; `Int` keys, scalars plus `Str` / `Bytes`), `StartSupervisor` (`0x72`: one-for-one / one-for-all / rest-for-one), `StartChild` (child of that supervisor, or of the host supervisor that started this flow), `SetRestartPolicy` (flow-local restart at exit), `MulImm` / `EqImm` / `LeImm`, integer `BitAnd` / `BitOr` / `BitXor` / `BitNot` / `Shl` / `Shr`, **`HostAwait`** (several in-flight host ops per flow; completion is a `TAG_SYS_AWAIT` hop; `max_host_awaits`), host-side bytecode integrity fingerprint (`fingerprint_bf` / `decode_attested` / `Runtime::with_attested`), Phase 5 relation caps (`max_links` / `max_monitors` / `max_registry_names`), 3-arg `make_msg`, monitors / links / registry (link insert re-checks liveness; teardown is O(degree)), `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows` / `max_ask_waits`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable), Criterion benches, hermetic CI (`cargo fetch` then `--locked --offline`).
+**Included:** register ISA + `Program`/`Fn` assembler, BFV0 (**ABI v5**, **ABI v6** when a constant contains a list, **ABI v7** when a constant contains a map, **ABI v8** when a constant contains a record: 128-bit `CapId`, nested `Message.payload`, lists, maps, and records of at most 256 elements, map keys `Int` or `Str`), verifier (`TrustLevel::Untrusted` rejects `Cap`/`Pid`/`Message` in the constant pool), per-flow VM, M:N scheduler, **bounded mailboxes** (safe growable ring; `MailboxConfig`: 256 hops + 4 MiB / Reject by default), Atomic Hop, FlowCap holder model, `Cap::attenuate` / `Opcode::Delegate`, `NativeMask` gate on `CALL_NATIVE`, per-flow quotas (`QuotaConfig::permissive` / `sandbox`), bytecode `register_name` / `whereis` (SEND Cap, never FlowId), host `Runtime::send` on the same hop auth path (`sender = 0`, `reply_cap = NONE`), `LINK`/`MONITOR`/`ADMIN`, `Fn::spawn_confined`, `trap_exit` (`Opcode::SetTrapExit` / `Runtime::set_trap_exit`), `ReceiveMatchKind` (payload wire-tag selective receive), `ReceiveMatchEq` (tag + `Int` payload), `ReceiveMatchValue` (tag + any `Value`), `ReceiveMatch*Timeout` (BEAM `after`), `IsAlive`, `ExitSignal` (BEAM `exit/2`, needs `LINK`), process dictionary (`DictPut` / `DictGet` / `DictErase`; `Int` keys, scalars plus `Str` / `Bytes`), `StartSupervisor` (`0x72`: one-for-one / one-for-all / rest-for-one), `StartChild` (child of that supervisor, or of the host supervisor that started this flow), `SetRestartPolicy` (flow-local restart at exit), `MulImm` / `EqImm` / `LeImm`, integer `BitAnd` / `BitOr` / `BitXor` / `BitNot` / `Shl` / `Shr`, **`HostAwait`** (several in-flight host ops per flow; completion is a `TAG_SYS_AWAIT` hop; `max_host_awaits`), host-side bytecode integrity fingerprint (`fingerprint_bf` / `decode_attested` / `Runtime::with_attested`), Phase 5 relation caps (`max_links` / `max_monitors` / `max_registry_names`), 3-arg `make_msg`, monitors / links / registry (link insert re-checks liveness; teardown is O(degree)), `WAITING_SEND`, `AskTimeout`, `RuntimeConfig.max_flows` / `max_ask_waits`, OTP supervisor strategies, [`OutputSink`](https://docs.rs/byteflow-actors/latest/byteflow/trait.OutputSink.html) for `print`, std natives, CLI, examples, fail-closed error model, optional trace JIT (`feature = "jit"`), **in-house stress suite** (mailbox / decode / CapTable), Criterion benches, hermetic CI (`cargo fetch` then `--locked --offline`).
 
 **Also included:** `MapPack` / `MapGet` / `MapLen`; `ReceiveMatchCmp` (tag plus `Eq` / `Lt` / `Le` on an `Int` payload — a miss stays queued); one named table per flow (`TableOpen` / `TableGet` / `TablePut`, `RECV` reads, `SEND` writes, gone when the owner exits); remote hop frames (`encode_frame` / `decode_frame` / `Runtime::deliver_frame` — the envelope is a `.bf` value, the header sender is the envelope sender, and a `Cap` or `Pid` stays on the node); sleep and receive timeouts on a hierarchical timing wheel.
 
@@ -250,6 +254,6 @@ See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Links
 
-- Repository: [github.com/mchael158/bytecode-vm](https://github.com/mchael158/bytecode-vm)
+- Repository: [github.com/mchael158/byteflow-actors](https://github.com/mchael158/byteflow-actors)
 - Docs: [docs.rs/byteflow-actors](https://docs.rs/byteflow-actors)
 - License: **MIT OR Apache-2.0**

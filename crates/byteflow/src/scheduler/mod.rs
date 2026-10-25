@@ -59,7 +59,8 @@ pub use distribution::{
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};
 pub use host_await::{
-    HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest,
+    finish_host_await, HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp,
+    HostAwaitRequest, ThreadedHostAwait,
 };
 pub use link::LinkId;
 pub use link_admin::{check_admin, check_link, check_monitor, AdminError, LinkError};

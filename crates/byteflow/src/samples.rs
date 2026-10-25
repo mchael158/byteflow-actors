@@ -992,6 +992,61 @@ mod tests {
     }
 
     #[test]
+    fn log_sink_receives_the_ask_line_and_the_flow_still_returns_42(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug)]
+        struct MemSink {
+            lines: Mutex<Vec<String>>,
+        }
+
+        impl crate::LogSink for MemSink {
+            fn try_record(&self, line: &str) -> Result<(), crate::log::LogRecordError> {
+                match self.lines.lock() {
+                    Ok(mut lines) => {
+                        lines.push(line.to_string());
+                        Err(crate::log::LogRecordError)
+                    }
+                    Err(_) => Err(crate::log::LogRecordError),
+                }
+            }
+        }
+
+        let sink = Arc::new(MemSink {
+            lines: Mutex::new(Vec::new()),
+        });
+        let rt = Runtime::with_natives_and_config(
+            ask_reply(),
+            std_native_table(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 10_000,
+                mailbox: crate::MailboxConfig::DEFAULT,
+                log: Some(Arc::clone(&sink) as Arc<dyn crate::LogSink>),
+                ..Default::default()
+            },
+        )?;
+        let idx = rt.function_index("main").ok_or("main")?;
+        let outcome = rt.spawn(idx, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        let lines = sink.lines.lock().map_err(|_| "log sink")?;
+        let ask = lines.iter().find(|line| line.contains("ask from="));
+        let Some(ask) = ask else {
+            return Err(format!("missing ask line in {lines:?}").into());
+        };
+        assert!(ask.contains("from="), "{ask}");
+        assert!(ask.contains("to="), "{ask}");
+        assert!(ask.contains("req="), "{ask}");
+        assert!(ask.contains("msg="), "{ask}");
+        Ok(())
+    }
+
+    #[test]
     fn ask_timeout_writes_unit() -> Result<(), Box<dyn std::error::Error>> {
         let chunk = ask_timeout_expires();
         assert!(verify(&chunk).is_ok());

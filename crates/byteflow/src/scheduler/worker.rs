@@ -532,12 +532,15 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 ) {
                     Ok(child) => {
                         let child_id = child.id();
-                        log::info(format!(
-                            "spawn parent=flow#{} child=flow#{} fn={}",
-                            flow.id.as_u64(),
-                            child_id.as_u64(),
-                            function
-                        ));
+                        log::info_sink(
+                            shared.log_sink.as_ref(),
+                            format!(
+                                "spawn parent=flow#{} child=flow#{} fn={}",
+                                flow.id.as_u64(),
+                                child_id.as_u64(),
+                                function
+                            ),
+                        );
                         match shared.caps.mint(flow.id, child_id, CapRights::ADDRESSING) {
                             Ok(cap) => {
                                 let Some(f) =
@@ -597,13 +600,16 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     finish_failed(shared, *flow, e.to_string());
                     return;
                 }
-                log::info(format!(
-                    "send from=flow#{} to=flow#{} via={} msg={}",
-                    flow.id.as_u64(),
-                    target.as_u64(),
-                    target_cap,
-                    stamped
-                ));
+                log::info_sink(
+                    shared.log_sink.as_ref(),
+                    format!(
+                        "send from=flow#{} to=flow#{} via={} msg={}",
+                        flow.id.as_u64(),
+                        target.as_u64(),
+                        target_cap,
+                        stamped
+                    ),
+                );
                 match deliver(shared, local, target, stamped.clone()) {
                     DeliverStatus::Ok | DeliverStatus::Dropped => {
                         // Fire-and-forget: DropNewest is intentional loss,
@@ -668,11 +674,14 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         flow.metrics
                             .messages_received
                             .fetch_add(1, Ordering::Relaxed);
-                        log::info(format!(
-                            "recv flow#{} filter={filter:?} msg={}",
-                            flow.id.as_u64(),
-                            msg
-                        ));
+                        log::info_sink(
+                            shared.log_sink.as_ref(),
+                            format!(
+                                "recv flow#{} filter={filter:?} msg={}",
+                                flow.id.as_u64(),
+                                msg
+                            ),
+                        );
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, msg) else {
                             return;
                         };
@@ -680,10 +689,13 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         admit_waiting_on(&flow.mailbox, shared, local);
                     }
                     Ok(None) => {
-                        log::debug(format!(
+                        log::debug_sink(
+                            shared.log_sink.as_ref(),
+                            format!(
                             "park flow#{} waiting mailbox filter={filter:?} timeout={timeout:?}",
                             flow.id.as_u64(),
-                        ));
+                        ),
+                        );
                         park_on_mailbox(shared, flow, dest_reg, timeout, filter);
                         return;
                     }
@@ -745,7 +757,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     expect_sender: Some(target.as_u64()),
                 };
                 flow.last_receive_dest = Some(dest_reg);
-                log::info(format!(
+                log::info_sink(shared.log_sink.as_ref(), format!(
                     "ask from=flow#{} to=flow#{} via={} req={request_id} msg={stamped} wait={filter:?}",
                     flow.id.as_u64(),
                     target.as_u64(),
@@ -802,21 +814,20 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         flow.metrics
                             .messages_received
                             .fetch_add(1, Ordering::Relaxed);
-                        log::info(format!(
-                            "ask-reply ready flow#{} msg={}",
-                            flow.id.as_u64(),
-                            reply
-                        ));
+                        log::info_sink(
+                            shared.log_sink.as_ref(),
+                            format!("ask-reply ready flow#{} msg={}", flow.id.as_u64(), reply),
+                        );
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, reply) else {
                             return;
                         };
                         flow = f;
                     }
                     Ok(None) => {
-                        log::debug(format!(
-                            "ask park flow#{} filter={filter:?}",
-                            flow.id.as_u64()
-                        ));
+                        log::debug_sink(
+                            shared.log_sink.as_ref(),
+                            format!("ask park flow#{} filter={filter:?}", flow.id.as_u64()),
+                        );
                         park_ask(shared, flow, dest_reg, timeout, filter, target);
                         return;
                     }
@@ -1435,19 +1446,28 @@ fn deliver(
     };
     match mailbox.push(message.clone()) {
         Ok(Ok(Delivery::Queued | Delivery::QueuedDropOldest)) => {
-            log::debug(format!("deliver queued → flow#{target} msg={message}"));
+            log::debug_sink(
+                shared.log_sink.as_ref(),
+                format!("deliver queued → flow#{target} msg={message}"),
+            );
             DeliverStatus::Ok
         }
         Ok(Ok(Delivery::DroppedNewest)) => {
-            log::debug(format!("deliver drop-newest → flow#{target} msg={message}"));
+            log::debug_sink(
+                shared.log_sink.as_ref(),
+                format!("deliver drop-newest → flow#{target} msg={message}"),
+            );
             DeliverStatus::Dropped
         }
         Ok(Ok(Delivery::Handoff(flow))) => {
-            log::debug(format!(
-                "deliver handoff → flow#{} msg={}",
-                flow.id.as_u64(),
-                message
-            ));
+            log::debug_sink(
+                shared.log_sink.as_ref(),
+                format!(
+                    "deliver handoff → flow#{} msg={}",
+                    flow.id.as_u64(),
+                    message
+                ),
+            );
             if let Err(e) = shared.ask_waits.remove_asker(flow.id) {
                 report_fault(e);
             }
@@ -1474,9 +1494,10 @@ fn deliver(
             if reason == super::mailbox::MailboxFullReason::Closed {
                 return DeliverStatus::Gone;
             }
-            log::info(format!(
-                "deliver rejected (mailbox full: {reason}) → flow#{target} msg={message}"
-            ));
+            log::info_sink(
+                shared.log_sink.as_ref(),
+                format!("deliver rejected (mailbox full: {reason}) → flow#{target} msg={message}"),
+            );
             DeliverStatus::Full
         }
         Err(e) => {
