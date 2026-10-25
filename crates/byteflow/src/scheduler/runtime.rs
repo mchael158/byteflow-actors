@@ -729,7 +729,11 @@ impl Runtime {
         match self.shared.links.link_if_live(a, b, |id| {
             self.shared.directory.lookup(id).map(|m| m.is_some())
         }) {
-            Ok(inner) => inner,
+            Ok(Ok(super::link::LinkOutcome::Linked(id))) => Ok(id),
+            Ok(Ok(super::link::LinkOutcome::Consumed { dead })) => {
+                Err(super::error::LifecycleError::NoSuchFlow(dead))
+            }
+            Ok(Err(error)) => Err(error),
             Err(e) => Err(self.unavailable(e)),
         }
     }

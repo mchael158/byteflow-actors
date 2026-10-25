@@ -17,8 +17,14 @@ use super::sync_lock;
 ///
 /// Inner id is runtime-minted (`pub(crate)`), same rule as [`crate::CapId`].
 /// Values fit in `i64` so bytecode can store them as [`crate::Value::Int`].
+/// `0` is never minted. Bytecode writes `0` when finalize already consumed
+/// the row, and `Unlink` of that sentinel does nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LinkId(pub(crate) u64);
+
+/// Bytecode sentinel: the peer exited while the link was being armed and
+/// finalize already propagated that exit. Not a row in [`LinkTable`].
+pub const CONSUMED_LINK_ID: u64 = 0;
 
 /// Bytecode stores [`LinkId`] as [`crate::Value::Int`]; never mint past this.
 const MAX_LINK_ID: u64 = i64::MAX as u64;
@@ -187,6 +193,16 @@ impl Default for LinkTable {
     }
 }
 
+/// What [`LinkStore::link_if_live`] observed after the insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkOutcome {
+    /// Both endpoints were live and the row is still in the table.
+    Linked(LinkId),
+    /// Finalize already removed the row and propagated the exit. The id
+    /// must not be published: a later unlink would fail the survivor.
+    Consumed { dead: FlowId },
+}
+
 /// Fail-closed wrapper; process-wide link quota lives here (`table.len()`).
 pub struct LinkStore {
     inner: std::sync::Mutex<LinkTable>,
@@ -209,7 +225,11 @@ impl LinkStore {
         a: FlowId,
         b: FlowId,
     ) -> Result<Result<LinkId, LifecycleError>, RuntimeError> {
-        self.link_if_live(a, b, |_| Ok(true))
+        match self.link_if_live(a, b, |_| Ok(true))? {
+            Ok(LinkOutcome::Linked(id)) => Ok(Ok(id)),
+            Ok(LinkOutcome::Consumed { dead }) => Ok(Err(LifecycleError::NoSuchFlow(dead))),
+            Err(error) => Ok(Err(error)),
+        }
     }
 
     /// Insert, then confirm both endpoints are still live.
@@ -220,14 +240,15 @@ impl LinkStore {
     ///
     /// - the link is still here → rollback and [`LifecycleError::NoSuchFlow`]
     ///   (zombie we created after `remove_links_of`)
-    /// - the link is already gone → finalize won; return the (now stale) id
-    ///   so the caller is not failed a second time on top of link-kill
+    /// - the link is already gone → [`LinkOutcome::Consumed`]. Finalize
+    ///   delivered the exit; the caller must not fail the survivor again
+    ///   and must not hand out the removed id.
     pub fn link_if_live<F>(
         &self,
         a: FlowId,
         b: FlowId,
         is_live: F,
-    ) -> Result<Result<LinkId, LifecycleError>, RuntimeError>
+    ) -> Result<Result<LinkOutcome, LifecycleError>, RuntimeError>
     where
         F: Fn(FlowId) -> Result<bool, RuntimeError>,
     {
@@ -259,7 +280,7 @@ impl LinkStore {
         a: FlowId,
         b: FlowId,
         is_live: F,
-    ) -> Result<Result<LinkId, LifecycleError>, RuntimeError>
+    ) -> Result<Result<LinkOutcome, LifecycleError>, RuntimeError>
     where
         F: Fn(FlowId) -> Result<bool, RuntimeError>,
     {
@@ -278,14 +299,12 @@ impl LinkStore {
             }
         };
         if a_live && b_live {
-            return Ok(Ok(id));
+            return Ok(Ok(LinkOutcome::Linked(id)));
         }
+        let dead = if a_live { b } else { a };
         match self.force_remove(id) {
-            Ok(true) => {
-                let dead = if a_live { b } else { a };
-                Ok(Err(LifecycleError::NoSuchFlow(dead)))
-            }
-            Ok(false) => Ok(Ok(id)),
+            Ok(true) => Ok(Err(LifecycleError::NoSuchFlow(dead))),
+            Ok(false) => Ok(Ok(LinkOutcome::Consumed { dead })),
             Err(e) => Err(e),
         }
     }
@@ -450,7 +469,7 @@ mod tests {
         let a = next_flow_id();
         let b = next_flow_id();
         // Insert as live, tear down as finalize would, then confirm sees a
-        // dead peer but the row is already gone → keep Ok(id).
+        // dead peer and a missing row. The removed id is not returned.
         let id = {
             let mut table = sync_lock::lock(&store.inner, "test")?;
             if table.has_pair(a, b) {
@@ -462,7 +481,7 @@ mod tests {
         };
         let _ = store.remove_links_of(b)?;
         let confirmed = store.confirm_live(id, a, b, |id| Ok(id != b))?;
-        assert_eq!(confirmed, Ok(id));
+        assert_eq!(confirmed, Ok(LinkOutcome::Consumed { dead: b }));
         Ok(())
     }
 }

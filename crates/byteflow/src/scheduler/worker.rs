@@ -21,7 +21,7 @@ use super::finalize::{
     finalize_flow, finalize_if_killed, finalize_if_killed_waiting_send, kill_outcome_message,
     request_kill, resume_or_fail,
 };
-use super::link::LinkId;
+use super::link::{LinkId, LinkOutcome, CONSUMED_LINK_ID};
 use super::mailbox::{AdmitSender, Delivery, Mailbox, ParkSender, WaitEpoch, WaitFilter};
 use super::metrics::RuntimeMetrics;
 use super::monitor::{FlowExitReason, MonitorRef};
@@ -911,13 +911,24 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 match shared.links.link_if_live(flow.id, target, |id| {
                     shared.directory.lookup(id).map(|m| m.is_some())
                 }) {
-                    Ok(Ok(id)) => {
+                    Ok(Ok(LinkOutcome::Linked(id))) => {
                         let Ok(ref_i) = i64::try_from(id.as_u64()) else {
                             finish_failed(shared, *flow, "link id exceeds Int".into());
                             return;
                         };
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Int(ref_i))
                         else {
+                            return;
+                        };
+                        flow = f;
+                    }
+                    Ok(Ok(LinkOutcome::Consumed { .. })) => {
+                        let Some(f) = resume_or_fail(
+                            shared,
+                            flow,
+                            dest_reg,
+                            Value::Int(CONSUMED_LINK_ID as i64),
+                        ) else {
                             return;
                         };
                         flow = f;
@@ -944,15 +955,17 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         return;
                     }
                 };
-                match shared.links.unlink_owned(flow.id, LinkId::from_u64(raw)) {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
-                    }
-                    Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
-                        return;
+                if raw != CONSUMED_LINK_ID {
+                    match shared.links.unlink_owned(flow.id, LinkId::from_u64(raw)) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
+                        Err(e) => {
+                            finish_failed(shared, *flow, e.to_string());
+                            return;
+                        }
                     }
                 }
             }

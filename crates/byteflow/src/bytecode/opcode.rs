@@ -131,9 +131,10 @@ pub enum Opcode {
     /// `Demonitor ra` → drop the monitor in `r[a]` (`Int` ref).
     Demonitor = 0x57,
     /// `Link ra, rb` → bidirectional link with Cap `r[b]`; write
-    /// [`crate::LinkId`] as `Int` into `r[a]`.
+    /// [`crate::LinkId`] as `Int` into `r[a]`. `0` means finalize already
+    /// consumed the row and propagated the exit; that value is not a link.
     Link = 0x58,
-    /// `Unlink ra` → drop the link in `r[a]` (`Int` id).
+    /// `Unlink ra` → drop the link in `r[a]` (`Int` id). `0` does nothing.
     Unlink = 0x59,
     /// `AskTimeout ra, rb, rc, imm` → like `Ask`, but give up after
     /// `r[imm]` milliseconds and write `Value::Unit` into `ra`.
