@@ -1,9 +1,12 @@
 //! Runtime memory accounting.
 //!
 //! The accounting is intentionally explicit:
-//! - allocations are charged when capacity is acquired;
-//! - replacements release the old allocation;
-//! - [`Drop`] releases the final allocation;
+//! - a buffer is charged for the bytes it stores (`len`), the same unit a
+//!   register `Str` / `Bytes` pays on this budget;
+//! - spare capacity the caller allocated before handing the buffer over is
+//!   not charged;
+//! - replacements release the old charge;
+//! - [`Drop`] releases the final charge;
 //! - failed reservations never modify the current value.
 //!
 //! Order for overwrite (S3):
@@ -19,21 +22,16 @@
 //!
 //! # What this does *not* guarantee
 //!
-//! [`HeapStr`] / [`HeapBytes`] charge buffers **they own**. Rust code that
-//! builds a `String` / `Vec` before handing it to [`HeapStr::new`] has already
-//! allocated; the budget only learns about that capacity after the fact.
+//! [`HeapStr`] / [`HeapBytes`] charge the bytes they store. Rust code that
+//! builds a `String` / `Vec` before handing it over has already allocated;
+//! spare capacity in that buffer is invisible to the budget, the same way a
+//! register `Str` pays `str.len()`.
 //! [`RuntimeConfig::max_runtime_bytes`](crate::RuntimeConfig) is therefore a
 //! runtime-managed accounting ceiling, not a global allocator sandbox.
 
 use core::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-/// Hard ceiling for a [`MemoryBudget`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoryLimit {
-    pub limit: usize,
-}
 
 /// Point-in-time view of a budget (read-only observability).
 ///
@@ -173,8 +171,8 @@ impl MemoryBudget {
 
 /// UTF-8 heap buffer charged against a [`MemoryBudget`].
 ///
-/// Charge is based on [`String::capacity`], not just `len`, so growth of the
-/// backing allocation is visible to the budget.
+/// The charge is [`str::len`], the same unit a register `Str` pays. Spare
+/// capacity in the `String` is not charged.
 ///
 /// [`Self::new`] / [`Self::replace`] take an already-built `String` (via
 /// `Into`); any allocation performed by the caller happens **before** the
@@ -188,7 +186,7 @@ pub struct HeapStr {
 impl HeapStr {
     pub fn new(budget: Arc<MemoryBudget>, value: impl Into<String>) -> Result<Self, MemoryError> {
         let value = value.into();
-        let charged = value.capacity();
+        let charged = value.len();
 
         budget.try_charge(charged)?;
 
@@ -211,6 +209,8 @@ impl HeapStr {
         self.value.is_empty()
     }
 
+    /// Bytes the `String` allocator reserved. The budget charges [`Self::len`],
+    /// not this spare room.
     pub fn capacity(&self) -> usize {
         self.value.capacity()
     }
@@ -221,7 +221,7 @@ impl HeapStr {
     /// If reservation fails, the previous value and charge remain unchanged.
     pub fn replace(&mut self, value: impl Into<String>) -> Result<(), MemoryError> {
         let next = value.into();
-        let next_charge = next.capacity();
+        let next_charge = next.len();
 
         // S3: reserve the replacement before touching the old state.
         self.budget.try_charge(next_charge)?;
@@ -246,7 +246,8 @@ impl Drop for HeapStr {
 
 /// Opaque byte buffer charged against a [`MemoryBudget`].
 ///
-/// Same ownership / pre-allocation caveats as [`HeapStr`].
+/// The charge is the slice length, the same unit a register `Bytes` pays.
+/// Spare capacity in the `Vec` is not charged.
 pub struct HeapBytes {
     budget: Arc<MemoryBudget>,
     bytes: Vec<u8>,
@@ -256,7 +257,7 @@ pub struct HeapBytes {
 impl HeapBytes {
     pub fn new(budget: Arc<MemoryBudget>, bytes: impl Into<Vec<u8>>) -> Result<Self, MemoryError> {
         let bytes = bytes.into();
-        let charged = bytes.capacity();
+        let charged = bytes.len();
 
         budget.try_charge(charged)?;
 
@@ -279,6 +280,8 @@ impl HeapBytes {
         self.bytes.is_empty()
     }
 
+    /// Bytes the `Vec` allocator reserved. The budget charges [`Self::len`],
+    /// not this spare room.
     pub fn capacity(&self) -> usize {
         self.bytes.capacity()
     }
@@ -289,7 +292,7 @@ impl HeapBytes {
     /// If reservation fails, the previous value and charge remain unchanged.
     pub fn replace(&mut self, bytes: impl Into<Vec<u8>>) -> Result<(), MemoryError> {
         let next = bytes.into();
-        let next_charge = next.capacity();
+        let next_charge = next.len();
 
         self.budget.try_charge(next_charge)?;
 
@@ -324,7 +327,7 @@ mod tests {
                 Ok(v) => v,
                 Err(e) => panic!("unexpected: {e}"),
             };
-            assert_eq!(budget.used(), value.capacity());
+            assert_eq!(budget.used(), value.len());
         }
 
         assert_eq!(budget.used(), 0);
@@ -339,7 +342,7 @@ mod tests {
                 Ok(v) => v,
                 Err(e) => panic!("unexpected: {e}"),
             };
-            assert_eq!(budget.used(), value.capacity());
+            assert_eq!(budget.used(), value.len());
         }
 
         assert_eq!(budget.used(), 0);
@@ -360,7 +363,7 @@ mod tests {
             panic!("unexpected: {e}");
         }
 
-        assert_eq!(budget.used(), value.capacity());
+        assert_eq!(budget.used(), value.len());
         assert_ne!(first, budget.used());
 
         drop(value);
@@ -424,45 +427,51 @@ mod tests {
     }
 
     #[test]
-    fn same_capacity_replace_needs_peak_headroom() {
-        // S3 peaks at old+new before releasing old. With limit == capacity,
-        // a same-size replace must fail even though steady-state would fit.
-        let buf = vec![0u8; 600];
-        let cap = buf.capacity();
-        let budget = Arc::new(MemoryBudget::new(cap));
-        let mut value = match HeapBytes::new(Arc::clone(&budget), buf) {
+    fn same_len_replace_needs_peak_headroom() {
+        // S3 peaks at old+new before releasing old. With the ceiling equal
+        // to the live length, a same-size replace must fail even though the
+        // steady-state footprint would fit.
+        let budget = Arc::new(MemoryBudget::new(600));
+        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0u8; 600]) {
             Ok(v) => v,
             Err(e) => panic!("unexpected: {e}"),
         };
-        assert_eq!(budget.used(), cap);
+        assert_eq!(budget.used(), 600);
 
-        let next = vec![0u8; 600];
-        assert_eq!(next.capacity(), cap);
-
-        let err = value.replace(next);
+        let err = value.replace(vec![0u8; 600]);
         assert!(
             matches!(err, Err(MemoryError::LimitExceeded { .. })),
             "same-size replace must need peak headroom under S3, got {err:?}"
         );
-        assert_eq!(budget.used(), cap);
+        assert_eq!(budget.used(), 600);
         assert_eq!(value.len(), 600);
     }
 
     #[test]
-    fn same_capacity_replace_succeeds_with_peak_room() {
+    fn same_len_replace_succeeds_with_peak_room() {
         let budget = Arc::new(MemoryBudget::new(2048));
         let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0u8; 64]) {
             Ok(v) => v,
             Err(e) => panic!("unexpected: {e}"),
         };
-        let before = value.capacity();
         if let Err(e) = value.replace(vec![1u8; 64]) {
             panic!("unexpected: {e}");
         }
-        assert_eq!(budget.used(), value.capacity());
-        // Capacity may grow or stay; accounting must track the live buffer.
-        assert!(value.capacity() >= before.min(64));
+        assert_eq!(budget.used(), 64);
         assert_eq!(value.as_slice(), &[1u8; 64]);
+    }
+
+    #[test]
+    fn spare_capacity_is_not_charged() {
+        let budget = Arc::new(MemoryBudget::new(64));
+        let mut buf = Vec::with_capacity(10_000);
+        buf.extend_from_slice(&[1, 2, 3, 4]);
+        let value = match HeapBytes::new(Arc::clone(&budget), buf) {
+            Ok(v) => v,
+            Err(e) => panic!("unexpected: {e}"),
+        };
+        assert!(value.capacity() > value.len());
+        assert_eq!(budget.used(), 4);
     }
 
     #[test]

@@ -63,14 +63,14 @@ pub mod std_native {
 /// slot once assembled.
 pub fn std_native_map() -> HashMap<String, u32> {
     HashMap::from([
-        ("print".to_owned(), 0),
-        ("now_ms".to_owned(), 1),
-        ("make_msg".to_owned(), 2),
-        ("msg_sender".to_owned(), 3),
-        ("msg_request_id".to_owned(), 4),
-        ("msg_tag".to_owned(), 5),
-        ("msg_payload".to_owned(), 6),
-        ("msg_reply_cap".to_owned(), 7),
+        ("print".to_owned(), std_native::PRINT),
+        ("now_ms".to_owned(), std_native::NOW_MS),
+        ("make_msg".to_owned(), std_native::MAKE_MSG),
+        ("msg_sender".to_owned(), std_native::MSG_SENDER),
+        ("msg_request_id".to_owned(), std_native::MSG_REQUEST_ID),
+        ("msg_tag".to_owned(), std_native::MSG_TAG),
+        ("msg_payload".to_owned(), std_native::MSG_PAYLOAD),
+        ("msg_reply_cap".to_owned(), std_native::MSG_REPLY_CAP),
     ])
 }
 
@@ -83,7 +83,7 @@ pub fn std_native_table() -> Arc<NativeTable> {
 /// Std natives with an explicit print sink (`NullSink` in tests / libraries).
 pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
     let built = NativeTable::builder()
-        .register("print", {
+        .register_at(std_native::PRINT, "print", {
             let output = Arc::clone(&output);
             move |args| {
                 output.write(args);
@@ -91,7 +91,7 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
             }
         })
         .and_then(|b| {
-            b.register("now_ms", |_| {
+            b.register_at(std_native::NOW_MS, "now_ms", |_| {
                 let duration = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| Fault::NativeError(format!("system clock error: {e}")))?;
@@ -101,7 +101,7 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
             })
         })
         .and_then(|b| {
-            b.register("make_msg", |args| {
+            b.register_at(std_native::MAKE_MSG, "make_msg", |args| {
                 // 3-arg form: (request_id, tag, payload).
                 // 4-arg legacy: (sender, request_id, tag, payload) — the sender
                 // operand is discarded. Message.sender is always 0 here;
@@ -126,26 +126,28 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
             })
         })
         .and_then(|b| {
-            b.register("msg_sender", |args| {
+            b.register_at(std_native::MSG_SENDER, "msg_sender", |args| {
                 Ok(Value::Pid(expect_message(args, 0, "msg_sender")?.sender))
             })
         })
         .and_then(|b| {
-            b.register("msg_request_id", |args| {
-                Ok(Value::Int(
-                    expect_message(args, 0, "msg_request_id")?.request_id as i64,
-                ))
+            b.register_at(std_native::MSG_REQUEST_ID, "msg_request_id", |args| {
+                let id = expect_message(args, 0, "msg_request_id")?.request_id;
+                let id = i64::try_from(id).map_err(|_| {
+                    Fault::NativeError(format!("msg_request_id: request_id {id} exceeds i64"))
+                })?;
+                Ok(Value::Int(id))
             })
         })
         .and_then(|b| {
-            b.register("msg_tag", |args| {
+            b.register_at(std_native::MSG_TAG, "msg_tag", |args| {
                 Ok(Value::Int(i64::from(
                     expect_message(args, 0, "msg_tag")?.tag,
                 )))
             })
         })
         .and_then(|b| {
-            b.register("msg_payload", |args| {
+            b.register_at(std_native::MSG_PAYLOAD, "msg_payload", |args| {
                 Ok(expect_message(args, 0, "msg_payload")?
                     .payload
                     .as_ref()
@@ -153,7 +155,7 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
             })
         })
         .and_then(|b| {
-            b.register("msg_reply_cap", |args| {
+            b.register_at(std_native::MSG_REPLY_CAP, "msg_reply_cap", |args| {
                 Ok(Value::Cap(
                     expect_message(args, 0, "msg_reply_cap")?.reply_cap,
                 ))
@@ -161,7 +163,10 @@ pub fn std_native_table_with(output: Arc<dyn OutputSink>) -> Arc<NativeTable> {
         });
     match built {
         Ok(b) => b.build(),
-        Err(_) => NativeTable::empty(),
+        // The eight names are distinct and the slots are the stable constants.
+        // An empty table would hide a collision and turn every CallNative
+        // into a missing native.
+        Err(error) => panic!("std native table: {error}"),
     }
 }
 
@@ -182,6 +187,10 @@ pub fn std_natives() -> (Arc<NativeTable>, HashMap<String, u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::{CapId, MapKey};
+    use crate::output::NullSink;
+    use crate::Fault;
+    use std::sync::Arc;
 
     #[test]
     fn std_native_indices_are_stable() {
@@ -199,8 +208,10 @@ mod tests {
     #[test]
     fn std_native_table_matches_map() {
         let (table, map) = std_natives();
+        let declared = std_native_map();
         assert_eq!(table.len(), 8);
-        for (name, idx) in &map {
+        assert_eq!(map, declared);
+        for (name, idx) in &declared {
             assert_eq!(table.index_of(name), Some(*idx));
         }
     }
@@ -213,8 +224,6 @@ mod tests {
         assert!(matches!(value, Value::Int(ms) if ms >= 0));
         Ok(())
     }
-
-    use crate::bytecode::CapId;
 
     #[test]
     fn make_msg_and_unpack_round_trip() -> Result<(), Box<dyn std::error::Error>> {
@@ -237,9 +246,27 @@ mod tests {
     }
 
     #[test]
+    fn msg_request_id_rejects_values_past_i64() -> Result<(), Box<dyn std::error::Error>> {
+        let table = std_native_table_with(Arc::new(NullSink));
+        let unpack = table
+            .get(std_native::MSG_REQUEST_ID)
+            .ok_or("msg_request_id")?;
+        let fits = Value::Message(Message::new(0, i64::MAX as u64, 1, Value::Int(0)));
+        assert_eq!(unpack(std::slice::from_ref(&fits))?, Value::Int(i64::MAX));
+        let too_wide = Value::Message(Message::new(0, u64::MAX, 1, Value::Int(0)));
+        match unpack(std::slice::from_ref(&too_wide)) {
+            Err(Fault::NativeError(text)) => assert!(text.contains("exceeds i64")),
+            other => panic!("expected NativeError, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn print_accepts_all_current_values() -> Result<(), Box<dyn std::error::Error>> {
-        let table = std_native_table();
-        let print = table.get(0).ok_or("print native")?;
+        let table = std_native_table_with(Arc::new(NullSink));
+        let print = table.get(std_native::PRINT).ok_or("print native")?;
+        let list = Value::try_list(vec![Value::Int(1)]).ok_or("list")?;
+        let map = Value::try_map(vec![(MapKey::Int(1), Value::Int(2))]).ok_or("map")?;
         let values = [
             Value::Unit,
             Value::Bool(true),
@@ -250,6 +277,8 @@ mod tests {
             Value::Cap(CapId::from_raw(9)),
             Value::str("hello"),
             Value::bytes([1u8, 2, 3]),
+            list,
+            map,
         ];
         assert_eq!(print(&values)?, Value::Unit);
         Ok(())

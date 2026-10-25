@@ -268,7 +268,7 @@ pub use bytecode::{
     ABI_VERSION_LISTS, ABI_VERSION_MAPS, MAGIC, MAX_MAP_LEN, TAG_SYS_AWAIT, TAG_SYS_DOWN,
     TAG_SYS_EXIT,
 };
-pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemoryLimit, MemorySnapshot};
+pub use memory::{HeapBytes, HeapStr, MemoryBudget, MemoryError, MemorySnapshot};
 pub use natives::{
     std_native, std_native_map, std_native_table, std_native_table_with, std_natives,
 };
