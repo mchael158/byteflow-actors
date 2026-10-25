@@ -19,15 +19,33 @@ pub fn disassemble(chunk: &Chunk) -> String {
         let _ = writeln!(
             out,
             ".fn {} entry={} arity={} regs={}",
-            def.name, def.entry, def.arity, def.num_registers
+            quote(&def.name),
+            def.entry,
+            def.arity,
+            def.num_registers
         );
     }
     for (i, instr) in chunk.code.iter().enumerate() {
         let label = match chunk.functions.iter().find(|f| f.entry as usize == i) {
-            Some(f) => format!("  ; {}", f.name),
+            Some(f) => format!("  ; {}", one_line(&f.name)),
             None => String::new(),
         };
         let _ = writeln!(out, "{i:04}  {instr}{label}");
+    }
+    out
+}
+
+/// Comment text must stay on the instruction line. A raw newline in a
+/// function name would otherwise become a second listing line and be parsed
+/// as an opcode.
+fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
     }
     out
 }

@@ -137,14 +137,18 @@ fn strip_comment(line: &str) -> &str {
 
 fn split_index(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
-    if bytes.len() < 6 || !bytes[..4].iter().all(u8::is_ascii_digit) {
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    // At least one digit, then whitespace. A fixed width of 4 drops every
+    // instruction from index 10000 onward (`10000  Op` has a digit where the
+    // old parser required a space).
+    if i == 0 || i == bytes.len() || bytes[i] != b' ' {
         return None;
     }
-    if bytes[4] != b' ' {
-        return None;
-    }
-    let index = line[..4].parse().ok()?;
-    Some((index, line[4..].trim()))
+    let index = line[..i].parse().ok()?;
+    Some((index, line[i..].trim()))
 }
 
 fn parse_u32(text: &str, line: usize, what: &str) -> Result<u32, AssembleError> {
@@ -152,38 +156,66 @@ fn parse_u32(text: &str, line: usize, what: &str) -> Result<u32, AssembleError> 
 }
 
 fn parse_quoted(text: &str, line: usize) -> Result<String, AssembleError> {
-    let text = text.trim();
+    let (out, rest) = take_quoted(text, line)?;
+    if !rest.trim().is_empty() {
+        return Err(syn(line, "trailing junk after string"));
+    }
+    Ok(out)
+}
+
+/// Quoted string and the unparsed tail after the closing quote.
+///
+/// Byte offsets follow the source, including multi-byte characters. Escape
+/// bodies are ASCII (`\\`, `\"`, `\n`).
+fn take_quoted(text: &str, line: usize) -> Result<(String, &str), AssembleError> {
+    let text = text.trim_start();
     if !text.starts_with('"') {
         return Err(syn(line, "expected quoted string"));
     }
     let mut out = String::new();
     let mut chars = text[1..].chars();
+    let mut consumed = 1usize;
     loop {
         match chars.next() {
-            Some('\\') => match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('n') => out.push('\n'),
-                _ => return Err(syn(line, "bad escape")),
-            },
-            Some('"') => {
-                if chars.next().is_some() {
-                    return Err(syn(line, "trailing junk after string"));
+            Some('\\') => {
+                consumed += 1;
+                match chars.next() {
+                    Some('\\') => out.push('\\'),
+                    Some('"') => out.push('"'),
+                    Some('n') => out.push('\n'),
+                    _ => return Err(syn(line, "bad escape")),
                 }
-                return Ok(out);
+                consumed += 1;
             }
-            Some(c) => out.push(c),
+            Some('"') => {
+                consumed += 1;
+                let after = match text.get(consumed..) {
+                    Some(rest) => rest,
+                    None => "",
+                };
+                return Ok((out, after));
+            }
+            Some(c) => {
+                out.push(c);
+                consumed += c.len_utf8();
+            }
             None => return Err(syn(line, "unterminated string")),
         }
     }
 }
 
 fn parse_fn(text: &str, line: usize) -> Result<FunctionDef, AssembleError> {
-    let mut parts = text.split_whitespace();
-    let name = parts
-        .next()
-        .ok_or_else(|| syn(line, "function name"))?
-        .to_string();
+    let text = text.trim_start();
+    let (name, rest) = if text.starts_with('"') {
+        take_quoted(text, line)?
+    } else {
+        let (name, rest) = token_span(text);
+        if name.is_empty() {
+            return Err(syn(line, "function name"));
+        }
+        (name.to_string(), rest)
+    };
+    let mut parts = rest.split_whitespace();
     let entry = field(parts.next(), "entry=", line)?;
     let arity = field(parts.next(), "arity=", line)?;
     let regs = field(parts.next(), "regs=", line)?;
@@ -224,9 +256,7 @@ fn write_value(out: &mut String, value: &Value) {
         Value::Int(n) => {
             let _ = write!(out, "int {n}");
         }
-        Value::Float(n) => {
-            let _ = write!(out, "float {n}");
-        }
+        Value::Float(n) => write_float(out, *n),
         Value::Pid(n) => {
             let _ = write!(out, "pid {n}");
         }
@@ -297,6 +327,22 @@ fn write_value(out: &mut String, value: &Value) {
     }
 }
 
+/// Decimal when that text parses back to the same bits. `NaN` payloads and
+/// `-0.0` do not: `Display` collapses every NaN, and `-0.0 == 0.0`.
+fn write_float(out: &mut String, n: f64) {
+    use std::fmt::Write as _;
+    let decimal = n.to_string();
+    let round_trips = decimal
+        .parse::<f64>()
+        .ok()
+        .is_some_and(|parsed| parsed.to_bits() == n.to_bits());
+    if round_trips {
+        let _ = write!(out, "float {decimal}");
+    } else {
+        let _ = write!(out, "float bits {:#x}", n.to_bits());
+    }
+}
+
 fn push_quoted(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {
@@ -339,7 +385,13 @@ fn take_value(text: &str, line: usize) -> Result<(Value, &str), AssembleError> {
         return Ok((Value::Int(n), rest));
     }
     if let Some(rest) = text.strip_prefix("float ") {
-        let (token, rest) = token_span(rest.trim_start());
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix("bits ") {
+            let (token, rest) = token_span(rest.trim_start());
+            let bits = parse_u64_token(token).map_err(|_| syn(line, "bad float bits"))?;
+            return Ok((Value::Float(f64::from_bits(bits)), rest));
+        }
+        let (token, rest) = token_span(rest);
         let n = token.parse::<f64>().map_err(|_| syn(line, "bad float"))?;
         return Ok((Value::Float(n), rest));
     }
@@ -421,6 +473,16 @@ fn take_value(text: &str, line: usize) -> Result<(Value, &str), AssembleError> {
         return take_msg(rest, line);
     }
     Err(syn(line, "unknown constant"))
+}
+
+fn parse_u64_token(token: &str) -> Result<u64, ()> {
+    if let Some(hex) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16).map_err(|_| ());
+    }
+    token.parse().map_err(|_| ())
 }
 
 fn token_span(text: &str) -> (&str, &str) {
@@ -1284,6 +1346,101 @@ mod tests {
                     message: format!("{text} parsed as {parsed:?}, want {instr:?}"),
                 });
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn instruction_index_past_four_digits_round_trips() -> Result<(), AssembleError> {
+        let mut b = ChunkBuilder::new("wide");
+        b.begin_function("main", 0, 1);
+        for _ in 0..10_000 {
+            b.emit_load_imm(0, 0);
+        }
+        b.emit_return(0);
+        let chunk = b.finish();
+        let text = disassemble(&chunk);
+        if !text.contains("\n10000  Return r0") {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: "listing did not print a five-digit index".into(),
+            });
+        }
+        round_trip(chunk)
+    }
+
+    #[test]
+    fn function_names_with_spaces_and_semicolons_round_trip() -> Result<(), AssembleError> {
+        let mut b = ChunkBuilder::new("names");
+        b.begin_function("my fn; still one", 0, 1);
+        b.emit_return(0);
+        b.begin_function("say \"hi\"\nnext", 0, 1);
+        b.emit_halt();
+        let chunk = b.finish();
+        let text = disassemble(&chunk);
+        if !text.contains(".fn \"my fn; still one\"") {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: format!("function name was not quoted:\n{text}"),
+            });
+        }
+        if text.lines().any(|line| {
+            let line = line.trim();
+            line == "next" || line.starts_with("next ")
+        }) {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: format!("newline in a name split the listing:\n{text}"),
+            });
+        }
+        let bare = "\
+.chunk \"names\"
+.abi 5
+.fn main entry=0 arity=0 regs=1
+0000  Return r0
+";
+        let parsed = assemble(bare)?;
+        if parsed.functions.first().map(|f| f.name.as_str()) != Some("main") {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: "unquoted function name".into(),
+            });
+        }
+        round_trip(chunk)
+    }
+
+    #[test]
+    fn float_nan_and_negative_zero_keep_their_bits() -> Result<(), AssembleError> {
+        let nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let neg_zero = -0.0f64;
+        let mut b = ChunkBuilder::new("floats");
+        b.const_(Value::Float(nan));
+        b.const_(Value::Float(neg_zero));
+        b.const_(Value::Float(1.5));
+        b.begin_function("main", 0, 1);
+        b.emit_return(0);
+        let chunk = b.finish();
+        let text = disassemble(&chunk);
+        if !text.contains("float bits 0x") {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: format!("non-finite float was printed in decimal:\n{text}"),
+            });
+        }
+        let parsed = assemble(&text)?;
+        let bits: Vec<u64> = parsed
+            .constants
+            .iter()
+            .filter_map(|value| match value {
+                Value::Float(n) => Some(n.to_bits()),
+                _ => None,
+            })
+            .collect();
+        if bits != [nan.to_bits(), neg_zero.to_bits(), 1.5f64.to_bits()] {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: format!("float bits {bits:x?} from\n{text}"),
+            });
         }
         Ok(())
     }

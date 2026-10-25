@@ -2,6 +2,17 @@
 
 All notable changes to **byteflow-actors** are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Assembler:** instruction indexes wider than four digits round-trip.
+  A listing used to require a space in column 5, so instruction 10000 was
+  read as an opcode name. Function names are quoted, and a newline in a
+  name stays inside that directive. `NaN` payloads and `-0.0` are written
+  as `float bits`, so the text form keeps the bits `encode` would write.
+  Unquoted names and decimal floats still parse.
+
 ## [0.9.19] — 2026-10-21
 
 ### Added
