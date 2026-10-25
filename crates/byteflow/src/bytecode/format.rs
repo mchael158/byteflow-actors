@@ -851,4 +851,44 @@ mod tests {
             Ok(_) => Err(FormatError::UnknownValueTag(11)),
         }
     }
+
+    #[test]
+    fn record_nested_in_a_list_or_holding_a_map_selects_abi_v8() -> Result<(), FormatError> {
+        let record = Value::try_record(vec![Value::Int(1)]).ok_or(FormatError::ValueTooNested)?;
+        let list = Value::try_list(vec![record]).ok_or(FormatError::ValueTooNested)?;
+        abi_v8_rejects_a_v7_header(list)?;
+
+        let map = Value::try_map(vec![(
+            crate::bytecode::value::MapKey::Int(1),
+            Value::Int(2),
+        )])
+        .ok_or(FormatError::ValueTooNested)?;
+        let holding = Value::try_record(vec![map]).ok_or(FormatError::ValueTooNested)?;
+        abi_v8_rejects_a_v7_header(holding)
+    }
+
+    fn abi_v8_rejects_a_v7_header(constant: Value) -> Result<(), FormatError> {
+        let mut chunk = Chunk {
+            name: "nested".into(),
+            ..Chunk::default()
+        };
+        chunk.constants.push(constant);
+        chunk.functions.push(FunctionDef {
+            name: "main".into(),
+            entry: 0,
+            arity: 0,
+            num_registers: 1,
+        });
+        chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+        let mut bytes = encode(&chunk);
+        if u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4])) != ABI_VERSION_RECORDS {
+            return Err(FormatError::UnsupportedAbi(0));
+        }
+        bytes[4..8].copy_from_slice(&ABI_VERSION_MAPS.to_le_bytes());
+        match decode_with(&bytes, TrustLevel::Trusted) {
+            Err(FormatError::UnknownValueTag(11)) => Ok(()),
+            Err(err) => Err(err),
+            Ok(_) => Err(FormatError::UnknownValueTag(11)),
+        }
+    }
 }

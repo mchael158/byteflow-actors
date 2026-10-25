@@ -484,6 +484,27 @@ mod tests {
     }
 
     #[test]
+    fn frame_round_trips_a_record_without_a_cap() -> Result<(), RemoteFrameError> {
+        use crate::CapId;
+        let record = Value::try_record(vec![Value::Int(1), Value::Int(2)])
+            .ok_or(RemoteFrameError::Unsupported)?;
+        let hop = OutboundHop {
+            sender: FlowId(9),
+            node: 3,
+            name: std::sync::Arc::from("svc"),
+            message: Message::new(9, 4, 1, record).authenticate(9, CapId::NONE),
+        };
+        let back = decode_frame(&encode_frame(&hop)?)?;
+        if back.sender.as_u64() != 9 || !back.message.reply_cap.is_none() {
+            return Err(RemoteFrameError::Unsupported);
+        }
+        match back.message.payload.as_ref() {
+            Value::Record(fields) if fields.len() == 2 => Ok(()),
+            _ => Err(RemoteFrameError::Unsupported),
+        }
+    }
+
+    #[test]
     fn frame_rejects_a_live_cap() {
         use crate::CapId;
         let hop = OutboundHop {

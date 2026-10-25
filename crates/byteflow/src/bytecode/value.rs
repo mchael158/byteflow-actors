@@ -222,9 +222,11 @@ pub(crate) fn map_has_duplicate_key(entries: &[(MapKey, Value)]) -> bool {
 }
 
 impl Value {
-    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`, `Map=10`).
+    /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`, `Map=10`,
+    /// `Record=11`).
     ///
-    /// Used by [`crate::Opcode::ReceiveMatchKind`] selective receive.
+    /// Used by [`crate::Opcode::ReceiveMatchKind`] selective receive, which
+    /// names tags `0..=10`. A record is tag `11` and is not a receive pattern.
     #[inline]
     pub fn wire_tag(&self) -> u8 {
         match self {
@@ -471,7 +473,7 @@ impl Value {
 
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
     /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], empty
-    /// [`Value::List`], and empty [`Value::Map`].
+    /// [`Value::List`], empty [`Value::Map`], and empty [`Value::Record`].
     #[inline]
     pub fn is_truthy(&self) -> bool {
         match self {

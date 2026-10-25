@@ -23,6 +23,11 @@ All notable changes to **byteflow-actors** are documented here.
   that is not `Eq`, `Lt`, or `Le`. `Vm::run` without `verify` still traps.
 - **Decode:** a map constant with a repeated key is
   `FormatError::DuplicateMapKey`. It used to surface as `ValueTooNested`.
+- **Records:** `Value::is_truthy` names an empty record as falsy, which is
+  what `Branch` already does. `wire_tag` names tag `11`. A list that
+  holds a record, and a record that holds a map, still select ABI v8.
+  A remote frame round-trips a record that carries no capability.
+  `ReceiveMatchKind` `11` stays a trap when `verify` was skipped.
 
 ## [0.9.19] — 2026-10-21
 

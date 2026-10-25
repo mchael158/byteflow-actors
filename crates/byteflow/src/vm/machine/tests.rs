@@ -1023,3 +1023,52 @@ fn call_native_without_gate_is_typed_denied() -> TestResult {
         other => Err(format!("expected NativeDenied(NoNativeRight), got {other:?}").into()),
     }
 }
+
+#[test]
+fn branch_treats_an_empty_record_as_falsy() -> TestResult {
+    // `Branch` jumps when the condition is falsy.
+    branch_on_record(Value::try_record(vec![]), 1)
+}
+
+#[test]
+fn branch_treats_a_record_with_a_field_as_truthy() -> TestResult {
+    let record = Value::try_record(vec![Value::Int(1)]);
+    branch_on_record(record, 0)
+}
+
+fn branch_on_record(record: Option<Value>, expect: i64) -> TestResult {
+    let Some(record) = record else {
+        return Err("record did not build".into());
+    };
+    let mut b = ChunkBuilder::new("truth");
+    b.begin_function("main", 0, 2);
+    let constant = b.const_(record);
+    b.emit_load_const(0, constant);
+    let taken = b.new_label();
+    b.emit_branch(0, taken);
+    b.emit_load_imm(1, 0);
+    b.emit_return(1);
+    b.bind_label(taken);
+    b.emit_load_imm(1, 1);
+    b.emit_return(1);
+    let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+    match vm.run(16) {
+        VmResult::Complete(Value::Int(n)) if n == expect => Ok(()),
+        other => Err(format!("expected {expect}, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn receive_kind_eleven_traps_when_verify_was_skipped() -> TestResult {
+    let mut b = ChunkBuilder::new("kind");
+    b.begin_function("main", 0, 1);
+    b.emit_receive_match_kind(0, 11);
+    b.emit_return(0);
+    let mut vm = Vm::new(Arc::new(b.finish()), NativeTable::empty(), 0, &[])?;
+    match vm.run(4) {
+        VmResult::Trap(Fault::TypeMismatch { expected, .. }) if expected.contains("0..=10") => {
+            Ok(())
+        }
+        other => Err(format!("expected a kind trap, got {other:?}").into()),
+    }
+}
