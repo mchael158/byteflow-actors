@@ -62,9 +62,13 @@
 //! copying a `CapId`. Host spawn is `ROOT`; bytecode [`Fn::spawn_confined`]
 //! starts at `NONE`.
 //!
-//! # Values (ABI v5)
+//! # Values
 //!
-//! `Unit | Bool | Int | Float | Pid | Message | Cap | Str | Bytes`
+//! Scalars are ABI v5: `Unit | Bool | Int | Float | Pid | Message | Cap | Str | Bytes`.
+//! A [`Value::List`] selects v6, a [`Value::Map`] selects v7, and a
+//! [`Value::Record`] selects v8. [`encode`] writes the oldest of those
+//! headers that can hold the constant pool, including a value nested in a
+//! list, map, record, or message. [`decode`] accepts v5 through v8.
 //!
 //! `CapId` is a 128-bit CSPRNG token. `Message.payload` is a nested
 //! [`Value`]. `Str` / `Bytes` are `Arc`-backed for cheap register/mailbox

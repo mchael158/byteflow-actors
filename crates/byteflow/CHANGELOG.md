@@ -23,6 +23,11 @@ All notable changes to **byteflow-actors** are documented here.
   that is not `Eq`, `Lt`, or `Le`. `Vm::run` without `verify` still traps.
 - **Decode:** a map constant with a repeated key is
   `FormatError::DuplicateMapKey`. It used to surface as `ValueTooNested`.
+  A map key byte other than `Int` or `Str` is `FormatError::UnknownMapKey`
+  carrying that byte. It used to be reported as value tag `10`.
+- **ABI docs:** the crate and module docs name v5 through v8. v6 is written
+  for a list with no map or record. v7 is written for a map with no record.
+  A record, including one nested in a list, map, or message, is v8.
 - **Records:** `Value::is_truthy` names an empty record as falsy, which is
   what `Branch` already does. `wire_tag` names tag `11`. A list that
   holds a record, and a record that holds a map, still select ABI v8.

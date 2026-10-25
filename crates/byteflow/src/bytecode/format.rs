@@ -28,6 +28,10 @@ pub enum FormatError {
     },
     BadUtf8,
     UnknownValueTag(u8),
+    /// The byte after a map tag is not a key kind (`0` = `Int`, `1` = `Str`).
+    /// This used to be reported as [`FormatError::UnknownValueTag`]`(10)`,
+    /// which is the map's own tag.
+    UnknownMapKey(u8),
     UnknownOpcode {
         at: usize,
         byte: u8,
@@ -57,6 +61,7 @@ impl std::fmt::Display for FormatError {
             }
             FormatError::BadUtf8 => write!(f, "name is not valid UTF-8"),
             FormatError::UnknownValueTag(t) => write!(f, "unknown value tag 0x{t:02X}"),
+            FormatError::UnknownMapKey(t) => write!(f, "unknown map key tag 0x{t:02X}"),
             FormatError::UnknownOpcode { at, byte } => {
                 write!(f, "unknown opcode 0x{byte:02X} at instruction {at}")
             }
@@ -499,7 +504,7 @@ impl<'a> Reader<'a> {
                                 std::str::from_utf8(bytes).map_err(|_| FormatError::BadUtf8)?;
                             super::value::MapKey::str(text)
                         }
-                        _ => return Err(FormatError::UnknownValueTag(10)),
+                        tag => return Err(FormatError::UnknownMapKey(tag)),
                     };
                     let value = self.read_value(trust, depth + 1, abi)?;
                     entries.push((key, value));
@@ -801,6 +806,15 @@ mod tests {
             bytes.extend_from_slice(&7i64.to_le_bytes());
         }
         assert_eq!(decode_value(&bytes), Err(FormatError::DuplicateMapKey));
+    }
+
+    #[test]
+    fn unknown_map_key_keeps_the_discriminant() {
+        let mut bytes = Vec::new();
+        bytes.push(10);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(2);
+        assert_eq!(decode_value(&bytes), Err(FormatError::UnknownMapKey(2)));
     }
 
     #[test]

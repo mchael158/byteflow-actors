@@ -11,8 +11,10 @@
 //! | [`encode`] / [`decode`] | `.bf` module bytes (`MAGIC` + [`ABI_VERSION`]) |
 //! | [`verify`] | Structural checks before a [`crate::Runtime`] starts |
 //!
-//! Current ABI: see [`ABI_VERSION`]. Lists use [`ABI_VERSION_LISTS`].
-//! Maps use [`ABI_VERSION_MAPS`].
+//! Headers: [`ABI_VERSION`] (scalars, v5), [`ABI_VERSION_LISTS`] (v6),
+//! [`ABI_VERSION_MAPS`] (v7), and [`ABI_VERSION_RECORDS`] (v8). [`encode`]
+//! writes the oldest of these that can hold the constant pool. [`decode`]
+//! accepts all four.
 
 mod asm;
 pub(crate) mod builder;

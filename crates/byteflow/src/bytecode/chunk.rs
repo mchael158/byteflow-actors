@@ -6,8 +6,10 @@ use super::value::Value;
 /// rather than partway through decoding.
 pub const MAGIC: [u8; 4] = *b"BFV0";
 
-/// Current ABI version. Bump on any breaking change to instruction
-/// encoding, constant representation, or function-table layout.
+/// Scalar module header (v5). A list, map, or record raises the header to
+/// [`ABI_VERSION_LISTS`], [`ABI_VERSION_MAPS`], or [`ABI_VERSION_RECORDS`].
+/// Bump on any breaking change to instruction encoding, constant
+/// representation, or function-table layout.
 ///
 /// v2: [`Value::Message`] wire tag `5`.
 /// v3: `Message.reply_cap`; [`Value::Cap`] wire tag `6` (FlowCap).
@@ -23,16 +25,19 @@ pub const MAGIC: [u8; 4] = *b"BFV0";
 pub const ABI_VERSION: u32 = 5;
 
 /// ABI that introduces [`Value::List`]. [`encode`](super::encode) emits this
-/// only when the chunk contains a list and no map. [`decode`](super::decode)
-/// accepts v5, v6, and v7.
+/// when the pool contains a list and no map or record. [`decode`](super::decode)
+/// accepts v5 through v8. A v5 header rejects tag `9`.
 pub const ABI_VERSION_LISTS: u32 = 6;
 
-/// ABI that introduces [`Value::Map`]. Emitted only when a constant contains
-/// a map. Decode accepts it alongside v5 and v6.
+/// ABI that introduces [`Value::Map`]. Emitted when a constant contains a
+/// map and no record. A map nested in a record is written as
+/// [`ABI_VERSION_RECORDS`]. Decode accepts v5 through v8. A header below v7
+/// rejects tag `10`.
 pub const ABI_VERSION_MAPS: u32 = 7;
 
-/// ABI that introduces [`Value::Record`]. Emitted only when a constant
-/// contains a record. Decode accepts v5 through v8.
+/// ABI that introduces [`Value::Record`]. Emitted when a constant contains
+/// a record, including one nested in a list, map, or message. Decode accepts
+/// v5 through v8. A header below v8 rejects tag `11`.
 pub const ABI_VERSION_RECORDS: u32 = 8;
 
 /// A callable entry point inside a [`Chunk`]: either bytecode-defined or a
