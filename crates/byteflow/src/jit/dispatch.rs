@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::{Chunk, Fault, Value, Vm, VmResult};
+use crate::{Chunk, Fault, Opcode, Value, Vm, VmResult};
 
 use super::compiler::TraceCompiler;
 use super::exit::{ExitReason, JitReturn, JIT_BUDGET, JIT_DEOPT};
@@ -228,7 +228,13 @@ fn run_vm_with_jit_loop(
             }
             JitProbe::Miss => {}
         }
+        // `vm.run(1)` returns `Yield` both when its one-instruction slice
+        // ends and when the bytecode itself executes `Yield`. Only the
+        // opcode hands the flow back to the scheduler; the slice end stays
+        // inside this quantum.
+        let pc_before = vm.current_pc();
         match vm.run(1) {
+            VmResult::Yield if explicit_yield(vm, pc_before) => return VmResult::Yield,
             VmResult::Yield => {
                 remaining -= 1;
             }
@@ -236,6 +242,20 @@ fn run_vm_with_jit_loop(
         }
     }
     VmResult::Yield
+}
+
+/// `true` when the instruction just interpreted was `Opcode::Yield`.
+///
+/// `fetch` advances the pc before the opcode runs, so the executed word is
+/// the one at `pc_before`, not the pc the VM holds now.
+fn explicit_yield(vm: &Vm, pc_before: Option<usize>) -> bool {
+    let Some(pc) = pc_before else {
+        return false;
+    };
+    vm.chunk_arc()
+        .code
+        .get(pc)
+        .is_some_and(|instr| instr.op == Opcode::Yield)
 }
 
 fn slot_capacity(vm: &Vm) -> usize {
@@ -1119,6 +1139,80 @@ mod tests {
         let ret = run_compiled_trace_ref(trace, &mut slots, 0, 2, 0, 1);
         assert!(matches!(ret.into_reason(), ExitReason::Budget { pc: 2 }));
         Ok(())
+    }
+
+    #[test]
+    fn explicit_yield_stops_the_quantum() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-yield");
+        b.begin_function("main", 0, 1);
+        b.emit_load_imm(0, 1);
+        b.emit_yield();
+        b.emit_load_imm(0, 2);
+        b.emit_return(0);
+        let chunk = Arc::new(b.finish());
+
+        let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+        ctx.hot_threshold = u32::MAX;
+        let mut vm = Vm::new(Arc::clone(&chunk), NativeTable::empty(), 0, &[])?;
+        let first = run_vm_with_jit(&mut vm, 100, &mut ctx);
+        if !matches!(first, VmResult::Yield) {
+            return Err(format!("yield was swallowed, got {first:?}").into());
+        }
+        match vm.top_registers().and_then(|regs| regs.first().cloned()) {
+            Some(Value::Int(1)) => {}
+            other => return Err(format!("register after yield is {other:?}").into()),
+        }
+        let second = run_vm_with_jit(&mut vm, 100, &mut ctx);
+        if !matches!(second, VmResult::Complete(Value::Int(2))) {
+            return Err(format!("resume after yield finished as {second:?}").into());
+        }
+
+        force_compile(
+            &mut ctx,
+            &chunk,
+            TraceKey {
+                function: 0,
+                entry_pc: 0,
+                floats: false,
+            },
+        )?;
+        let mut compiled = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let stopped = run_vm_with_jit(&mut compiled, 100, &mut ctx);
+        if !matches!(stopped, VmResult::Yield) {
+            return Err(format!("compiled prefix ran through yield, got {stopped:?}").into());
+        }
+        match compiled
+            .top_registers()
+            .and_then(|regs| regs.first().cloned())
+        {
+            Some(Value::Int(1)) => Ok(()),
+            other => Err(format!("compiled prefix left {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn budget_end_still_runs_the_rest_of_the_quantum() -> TestResult {
+        let mut b = ChunkBuilder::new("jit-budget-step");
+        b.begin_function("main", 0, 1);
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(0, 2);
+        b.emit_load_imm(0, 3);
+        b.emit_return(0);
+        let chunk = Arc::new(b.finish());
+        let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+        ctx.hot_threshold = u32::MAX;
+        let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
+        let result = run_vm_with_jit(&mut vm, 2, &mut ctx);
+        if !matches!(result, VmResult::Yield) {
+            return Err(format!("budget 2 finished as {result:?}").into());
+        }
+        if vm.instructions_executed() != 2 {
+            return Err(format!("ran {} instructions", vm.instructions_executed()).into());
+        }
+        match vm.top_registers().and_then(|regs| regs.first().cloned()) {
+            Some(Value::Int(2)) => Ok(()),
+            other => Err(format!("expected the second load, got {other:?}").into()),
+        }
     }
 
     #[test]

@@ -35,10 +35,13 @@ pub struct RuntimeConfig {
     /// Number of worker OS threads. Defaults to the number of logical CPUs
     /// — one worker per core is the right starting point for a CPU-bound
     /// M:N scheduler; embedders running alongside other CPU-heavy work on
-    /// the same machine may want fewer.
+    /// the same machine may want fewer. `0` is raised to `1`: a runtime
+    /// with no worker cannot run a flow.
     pub workers: usize,
     /// Instructions a flow runs before being preempted back to the
-    /// scheduler even if it never hits `Yield`.
+    /// scheduler even if it never hits `Yield`. `0` is raised to `1`.
+    /// A zero slice returns `Yield` without executing anything, and the
+    /// worker would requeue that flow forever.
     pub quantum: u32,
     /// Memory + overflow contract applied to **every** flow mailbox
     /// spawned by this runtime (bytecode `Spawn` and host `spawn`).
@@ -312,6 +315,7 @@ impl Runtime {
         .map_err(SpawnError::VerifyFailed)?;
         let chunk = Arc::new(chunk);
         let workers_n = config.workers.max(1);
+        let quantum = config.quantum.max(1);
 
         let locals: Vec<LocalDeque<Box<Flow>>> =
             (0..workers_n).map(|_| LocalDeque::new()).collect();
@@ -336,7 +340,7 @@ impl Runtime {
             notify: (Mutex::new(()), Condvar::new()),
             metrics: RuntimeMetrics::default(),
             shutdown: AtomicBool::new(false),
-            quantum: config.quantum,
+            quantum,
             mailbox: config.mailbox,
             flow_limit: super::flow_limit::FlowLimit::new(config.max_flows),
             memory: Arc::new(crate::MemoryBudget::new(config.max_runtime_bytes)),
@@ -923,9 +927,8 @@ impl Runtime {
         Ok(())
     }
 
-    /// Signal workers and the timer to stop. Does **not** join those threads —
-    /// use [`Self::shutdown`] for a deterministic join. [`Drop`] signals, then
-    /// joins flow-owned supervisors so their spawner does not keep `Shared` alive.
+    /// Signal workers and the timer to stop. Does **not** join those threads.
+    /// [`Self::finish`] joins them and finalizes flows still parked.
     fn request_shutdown(&self) {
         self.shared.shutdown.store(true, Ordering::Release);
         // Settle parked HostAwaits before joining workers: otherwise a bridge
@@ -985,14 +988,28 @@ impl Runtime {
     ///
     /// Mid-quantum bytecode is not aborted mid-instruction — the worker
     /// finalizes at the next loop check (cooperative preemption).
+    ///
+    /// [`Drop`] does the same work when it runs off a worker thread. On a
+    /// worker thread it only signals: joining that thread from itself would
+    /// deadlock the pool.
     pub fn shutdown(mut self) {
-        self.request_shutdown();
-        for w in self.workers.drain(..) {
-            let _ = w.join();
+        self.finish();
+    }
+
+    /// Join the threads started by [`Self::with_natives_and_config`] and
+    /// finalize every flow they did not finish. Safe to call again after
+    /// [`Self::shutdown`]: the handles are already taken and the second
+    /// sweep finds an empty directory.
+    fn finish(&mut self) {
+        if !self.shared.shutdown.load(Ordering::Acquire) {
+            self.request_shutdown();
+        }
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
         }
         super::flow_supervisor::shutdown_all(&self.shared.flow_supervisors);
-        if let Some(t) = self.timer_thread.take() {
-            let _ = t.join();
+        if let Some(timer) = self.timer_thread.take() {
+            let _ = timer.join();
         }
         finalize_stranded(&self.shared);
     }
@@ -1065,10 +1082,14 @@ fn finalize_stranded(shared: &Shared) {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        if !self.shared.shutdown.load(Ordering::Acquire) {
-            self.request_shutdown();
+        if super::worker::is_on_worker() {
+            if !self.shared.shutdown.load(Ordering::Acquire) {
+                self.request_shutdown();
+            }
+            super::flow_supervisor::shutdown_all(&self.shared.flow_supervisors);
+            return;
         }
-        super::flow_supervisor::shutdown_all(&self.shared.flow_supervisors);
+        self.finish();
     }
 }
 
@@ -1601,6 +1622,46 @@ mod tests {
             FlowOutcome::Failed(msg) if msg.contains("runtime shutdown") => Ok(()),
             other => Err(format!("expected sleeper shutdown, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn drop_finalizes_a_parked_sleeper() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::with_config(
+            sleep_then_return_chunk(60_000),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 1_000,
+                mailbox: MailboxConfig::DEFAULT,
+                ..Default::default()
+            },
+        )?;
+        let handle = rt.spawn(0, &[])?;
+        std::thread::sleep(Duration::from_millis(30));
+        drop(rt);
+        match handle.join() {
+            FlowOutcome::Failed(msg) if msg.contains("runtime shutdown") => Ok(()),
+            other => Err(format!("expected drop to finalize the sleeper, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn zero_quantum_still_runs_the_flow() -> Result<(), Box<dyn std::error::Error>> {
+        let rt = Runtime::with_config(
+            add_chunk(),
+            RuntimeConfig {
+                workers: 1,
+                quantum: 0,
+                mailbox: MailboxConfig::DEFAULT,
+                ..Default::default()
+            },
+        )?;
+        let outcome = rt.spawn(0, &[])?.join();
+        rt.shutdown();
+        assert!(
+            matches!(outcome, FlowOutcome::Completed(Value::Int(42))),
+            "got {outcome:?}"
+        );
+        Ok(())
     }
 
     #[test]
