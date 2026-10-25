@@ -181,8 +181,19 @@ impl<'a> Fn<'a> {
     }
 
     /// Allocate `count` contiguous locals; useful before [`Self::native_n`].
+    ///
+    /// When the window does not fit, one `Trap` is emitted and `next_reg`
+    /// stays put. Calling [`Self::local`] for the overflow used to emit a
+    /// trap per missing slot and still report the original length.
     pub fn window(&mut self, count: u8) -> RegWindow {
         let base_idx = self.next_reg;
+        if count > 0 && u16::from(base_idx) + u16::from(count) > 255 {
+            self.b.emit_trap(0);
+            return RegWindow {
+                base: Reg(base_idx),
+                len: count,
+            };
+        }
         for _ in 0..count {
             let _ = self.local();
         }
@@ -193,13 +204,18 @@ impl<'a> Fn<'a> {
     }
 
     /// Fresh contiguous locals `r[start .. start+count]`, or `None` if that
-    /// window would leave the `u8` register space.
+    /// window would leave the register file.
+    ///
+    /// A frame holds at most 255 slots, indexes `0..=254`. The exclusive end
+    /// `start + count` is therefore at most 255. The old bound allowed 256,
+    /// so the last `local` emitted `Trap` and returned `r0` before this
+    /// function gave up.
     fn alloc_contig(&mut self, count: u8) -> Option<Reg> {
         if count == 0 {
             return None;
         }
         let start = self.next_reg;
-        if u16::from(start) + u16::from(count) > 256 {
+        if u16::from(start) + u16::from(count) > 255 {
             return None;
         }
         for i in 0..count {
@@ -213,10 +229,15 @@ impl<'a> Fn<'a> {
 
     fn copy_window(&mut self, base: Reg, args: &[Reg]) {
         for (i, &src) in args.iter().enumerate() {
-            let slot = match u8::try_from(i) {
-                Ok(off) => Reg(base.0.saturating_add(off)),
-                Err(_) => continue,
+            let Ok(off) = u8::try_from(i) else {
+                self.b.emit_trap(0);
+                return;
             };
+            let Some(idx) = base.0.checked_add(off) else {
+                self.b.emit_trap(0);
+                return;
+            };
+            let slot = Reg(idx);
             if slot != src {
                 self.b.emit_move(slot.0, src.0);
             }
@@ -332,16 +353,14 @@ impl<'a> Fn<'a> {
         dst
     }
 
-    /// Pack `items` into a new list local. `items` must already be contiguous
-    /// registers (`rN, rN+1, …`) and at most [`crate::MAX_LIST_LEN`] long.
+    /// Pack `items` into a new list local.
+    ///
+    /// `items` must be contiguous (`rN, rN+1, …`), at most
+    /// [`crate::MAX_LIST_LEN`] long, and inside indexes `0..=254`. A gap is
+    /// not packed from the first register: that used to read whatever sat
+    /// between the holes. The failure is a `Trap`, same as an unbound label.
     pub fn list_pack(&mut self, items: &[Reg]) -> Reg {
-        let dst = self.local();
-        let base = match items.first() {
-            Some(reg) => reg.0,
-            None => 0,
-        };
-        self.b.emit_list_pack(dst.0, base, items.len() as i32);
-        dst
+        self.pack_sequence(items, crate::MAX_LIST_LEN, true)
     }
 
     pub fn list_get(&mut self, list: Reg, index: i32) -> Reg {
@@ -359,13 +378,7 @@ impl<'a> Fn<'a> {
     /// Pack contiguous registers into a positional record. Same layout rules
     /// as [`Self::list_pack`]. At most [`crate::MAX_RECORD_LEN`] fields.
     pub fn record_pack(&mut self, fields: &[Reg]) -> Reg {
-        let dst = self.local();
-        let base = match fields.first() {
-            Some(reg) => reg.0,
-            None => 0,
-        };
-        self.b.emit_record_pack(dst.0, base, fields.len() as i32);
-        dst
+        self.pack_sequence(fields, crate::MAX_RECORD_LEN, false)
     }
 
     pub fn record_get(&mut self, record: Reg, index: i32) -> Reg {
@@ -381,14 +394,47 @@ impl<'a> Fn<'a> {
     }
 
     /// Pack `pairs` into a map. Each pair is `(key, value)` already in
-    /// registers. Keys are `Int` or `Str`. At most [`crate::MAX_MAP_LEN`] pairs.
+    /// registers, laid out as `key, value, key, value` from the first key.
+    /// Keys are `Int` or `Str`. At most [`crate::MAX_MAP_LEN`] pairs.
+    ///
+    /// A hole or a value that is not the next register traps. The previous
+    /// encoding counted the pairs and started at the first key, so the
+    /// instruction read the registers in between.
     pub fn map_pack(&mut self, pairs: &[(Reg, Reg)]) -> Reg {
+        if !contiguous_pairs(pairs) {
+            return self.fail_pack();
+        }
         let dst = self.local();
         let base = match pairs.first() {
             Some((key, _)) => key.0,
             None => 0,
         };
-        self.b.emit_map_pack(dst.0, base, pairs.len() as i32);
+        let count = match i32::try_from(pairs.len()) {
+            Ok(n) => n,
+            Err(_) => return self.fail_pack(),
+        };
+        self.b.emit_map_pack(dst.0, base, count);
+        dst
+    }
+
+    fn pack_sequence(&mut self, items: &[Reg], max_len: usize, list: bool) -> Reg {
+        if items.len() > max_len || !contiguous_regs(items) {
+            return self.fail_pack();
+        }
+        let dst = self.local();
+        let base = match items.first() {
+            Some(reg) => reg.0,
+            None => 0,
+        };
+        let count = match i32::try_from(items.len()) {
+            Ok(n) => n,
+            Err(_) => return self.fail_pack(),
+        };
+        if list {
+            self.b.emit_list_pack(dst.0, base, count);
+        } else {
+            self.b.emit_record_pack(dst.0, base, count);
+        }
         dst
     }
 
@@ -1058,6 +1104,50 @@ impl<'a> Fn<'a> {
     }
 }
 
+/// `r[start], r[start+1], …` with every index in `0..=254`.
+fn contiguous_regs(regs: &[Reg]) -> bool {
+    if regs.is_empty() {
+        return true;
+    }
+    if regs.len() > 255 {
+        return false;
+    }
+    let start = u16::from(regs[0].0);
+    for (i, reg) in regs.iter().enumerate() {
+        let expect = start + i as u16;
+        if u16::from(reg.0) != expect || expect > 254 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Pairs occupy `r[start], r[start+1], r[start+2], r[start+3], …`.
+fn contiguous_pairs(pairs: &[(Reg, Reg)]) -> bool {
+    if pairs.is_empty() {
+        return true;
+    }
+    if pairs.len() > crate::MAX_MAP_LEN {
+        return false;
+    }
+    let start = u16::from(pairs[0].0 .0);
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        let Some(step) = u16::try_from(i).ok().and_then(|n| n.checked_mul(2)) else {
+            return false;
+        };
+        let Some(key_at) = start.checked_add(step) else {
+            return false;
+        };
+        let Some(val_at) = key_at.checked_add(1) else {
+            return false;
+        };
+        if u16::from(key.0) != key_at || u16::from(value.0) != val_at || val_at > 254 {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,5 +1340,88 @@ mod tests {
         assert_eq!(delegates[0].c, 255);
         assert_ne!(delegates[1].c, 255);
         Ok(())
+    }
+
+    #[test]
+    fn list_and_map_pack_refuse_a_hole() {
+        let mut program = Program::new("hole");
+        program.function("main", 0, |f| {
+            let a = f.load_i32(1);
+            let b = f.load_i32(2);
+            let c = f.load_i32(3);
+            let _ = f.list_pack(&[a, c]);
+            let _ = f.record_pack(&[a, c]);
+            let k2 = f.load_i32(4);
+            let v2 = f.load_i32(5);
+            let _ = f.map_pack(&[(a, b), (k2, v2)]);
+            f.return_(b);
+        });
+        let chunk = program.build();
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::Trap));
+        assert!(chunk.code.iter().all(|instr| !matches!(
+            instr.op,
+            Opcode::ListPack | Opcode::RecordPack | Opcode::MapPack
+        )));
+    }
+
+    #[test]
+    fn contiguous_pack_still_emits_the_window() -> TestResult {
+        let mut program = Program::new("packed");
+        program.function("main", 0, |f| {
+            let a = f.load_i32(1);
+            let b = f.load_i32(2);
+            let packed = f.list_pack(&[a, b]);
+            f.return_(packed);
+        });
+        let chunk = program.build();
+        crate::verify(&chunk)?;
+        assert!(chunk.code.iter().any(|instr| instr.op == Opcode::ListPack));
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_window_that_does_not_fit_traps_once() {
+        let mut program = Program::new("edge");
+        let child = program.function("child", 0, |f| {
+            let n = f.load_i32(1);
+            f.return_(n);
+        });
+        program.function("main", 0, |f| {
+            while f.next_reg < 254 {
+                let _ = f.local();
+            }
+            let arg = f.reg(0);
+            let _ = f.spawn(child, &[arg]);
+            f.halt();
+        });
+        let chunk = program.build();
+        let traps = chunk
+            .code
+            .iter()
+            .filter(|instr| instr.op == Opcode::Trap)
+            .count();
+        assert_eq!(traps, 1);
+        assert!(chunk.code.iter().all(|instr| instr.op != Opcode::Spawn));
+    }
+
+    #[test]
+    fn window_past_the_file_does_not_grow_the_frame() {
+        let mut program = Program::new("window");
+        program.function("main", 0, |f| {
+            while f.next_reg < 254 {
+                let _ = f.local();
+            }
+            let _ = f.window(2);
+            f.halt();
+        });
+        let chunk = program.build();
+        let main = chunk.functions.iter().find(|def| def.name == "main");
+        assert_eq!(main.map(|def| def.num_registers), Some(254));
+        let traps = chunk
+            .code
+            .iter()
+            .filter(|instr| instr.op == Opcode::Trap)
+            .count();
+        assert_eq!(traps, 1);
     }
 }

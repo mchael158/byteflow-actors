@@ -161,6 +161,16 @@ pub enum VerifyError {
         at: usize,
         next_entry: usize,
     },
+    /// An immediate or a register window is not a value the ISA can execute.
+    ///
+    /// Pack lengths above the value cap, a window that would address register
+    /// 255, a `ReceiveMatchKind` outside `0..=10`, and a `ReceiveMatchCmp`
+    /// selector outside `Eq` / `Lt` / `Le` are properties of the instruction
+    /// word. The VM still traps if `verify` was skipped.
+    BadImmediate {
+        at: usize,
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -218,6 +228,9 @@ impl fmt::Display for VerifyError {
                 f,
                 "function {function} falls through at instruction {at} into the function at {next_entry}"
             ),
+            VerifyError::BadImmediate { at, what } => {
+                write!(f, "instruction {at} has an invalid {what}")
+            }
         }
     }
 }
@@ -337,6 +350,33 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
             // comment. Not checked here; checked as `Fault::BadNative` at
             // call time instead.
             Opcode::CallNative | Opcode::CallNativeFrom => {}
+            Opcode::ListPack | Opcode::RecordPack => {
+                let max = if instr.op == Opcode::ListPack {
+                    super::value::MAX_LIST_LEN
+                } else {
+                    super::value::MAX_RECORD_LEN
+                };
+                check_pack(at, instr.b, instr.imm, 1, max)?;
+            }
+            Opcode::MapPack => {
+                check_pack(at, instr.b, instr.imm, 2, super::value::MAX_MAP_LEN)?;
+            }
+            Opcode::ReceiveMatchKind => {
+                if !(0..=10).contains(&instr.imm) {
+                    return Err(VerifyError::BadImmediate {
+                        at,
+                        what: "payload kind",
+                    });
+                }
+            }
+            Opcode::ReceiveMatchCmp => {
+                if super::opcode::IntCmp::from_imm(instr.imm).is_none() {
+                    return Err(VerifyError::BadImmediate {
+                        at,
+                        what: "compare immediate",
+                    });
+                }
+            }
             Opcode::Jump | Opcode::Branch => {
                 let target = at as i64 + 1 + instr.imm as i64;
                 if target < 0 || target as usize > len {
@@ -359,6 +399,58 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
     }
 
     reject_fallthrough(chunk)?;
+    Ok(())
+}
+
+/// `width` is 1 for a list or record and 2 for a map pair.
+///
+/// Register 255 is not a slot: `num_registers` is a `u8`, so the highest
+/// index a frame can name is 254. A pack whose exclusive end is above 255
+/// would gather that index.
+fn check_pack(
+    at: usize,
+    base: u8,
+    count: i32,
+    width: u32,
+    max_len: usize,
+) -> Result<(), VerifyError> {
+    let max = match i32::try_from(max_len) {
+        Ok(n) => n,
+        Err(_) => i32::MAX,
+    };
+    if !(0..=max).contains(&count) {
+        return Err(VerifyError::BadImmediate {
+            at,
+            what: "pack length",
+        });
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let span = match u32::try_from(count).ok().and_then(|n| n.checked_mul(width)) {
+        Some(n) => n,
+        None => {
+            return Err(VerifyError::BadImmediate {
+                at,
+                what: "pack window",
+            })
+        }
+    };
+    let end = match u32::from(base).checked_add(span) {
+        Some(n) => n,
+        None => {
+            return Err(VerifyError::BadImmediate {
+                at,
+                what: "pack window",
+            })
+        }
+    };
+    if end > 255 {
+        return Err(VerifyError::BadImmediate {
+            at,
+            what: "pack window",
+        });
+    }
     Ok(())
 }
 
@@ -755,5 +847,80 @@ mod tests {
             )
             .is_ok());
         }
+    }
+
+    #[test]
+    fn pack_window_past_the_register_file_is_rejected() {
+        let mut b = ChunkBuilder::new("wide");
+        b.begin_function("main", 0, 255);
+        b.emit_list_pack(0, 250, 10);
+        b.emit_return(0);
+        let chunk = b.finish();
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::BadImmediate {
+                at: 0,
+                what: "pack window",
+            })
+        );
+    }
+
+    #[test]
+    fn pack_length_above_the_value_cap_is_rejected() {
+        let mut b = ChunkBuilder::new("long");
+        b.begin_function("main", 0, 1);
+        b.emit_record_pack(0, 0, 257);
+        b.emit_return(0);
+        let chunk = b.finish();
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::BadImmediate {
+                at: 0,
+                what: "pack length",
+            })
+        );
+    }
+
+    #[test]
+    fn receive_kind_outside_the_scalar_range_is_rejected() {
+        let mut b = ChunkBuilder::new("kind");
+        b.begin_function("main", 0, 1);
+        b.emit_receive_match_kind(0, 11);
+        b.emit_return(0);
+        let chunk = b.finish();
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::BadImmediate {
+                at: 0,
+                what: "payload kind",
+            })
+        );
+    }
+
+    #[test]
+    fn receive_compare_outside_int_cmp_is_rejected() {
+        let mut b = ChunkBuilder::new("cmp");
+        b.begin_function("main", 0, 2);
+        b.emit_receive_match_cmp(0, 0, 1, crate::bytecode::opcode::IntCmp::Eq);
+        b.emit_return(0);
+        let mut chunk = b.finish();
+        chunk.code[0].imm = 9;
+        assert_eq!(
+            verify(&chunk),
+            Err(VerifyError::BadImmediate {
+                at: 0,
+                what: "compare immediate",
+            })
+        );
+    }
+
+    #[test]
+    fn a_short_list_pack_still_verifies() {
+        let mut b = ChunkBuilder::new("ok-pack");
+        b.begin_function("main", 0, 3);
+        b.emit_list_pack(2, 0, 2);
+        b.emit_return(2);
+        let chunk = b.finish();
+        assert!(verify(&chunk).is_ok());
     }
 }

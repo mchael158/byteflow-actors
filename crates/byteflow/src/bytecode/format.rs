@@ -34,6 +34,9 @@ pub enum FormatError {
     },
     ForbiddenConstant(super::verify::ConstantKind),
     ValueTooNested,
+    /// A map constant repeats a key. [`Value::try_map`] also rejects this,
+    /// but the decoder used to report it as [`FormatError::ValueTooNested`].
+    DuplicateMapKey,
     /// Bytes left after a complete module. Ignoring them would accept a
     /// buffer that is not the module the caller hashed or transmitted.
     Trailing {
@@ -64,6 +67,7 @@ impl std::fmt::Display for FormatError {
                 )
             }
             FormatError::ValueTooNested => write!(f, "value nesting exceeds decoder limit"),
+            FormatError::DuplicateMapKey => write!(f, "map constant repeats a key"),
             FormatError::Trailing { leftover } => {
                 write!(f, "trailing {leftover} bytes after module")
             }
@@ -500,6 +504,9 @@ impl<'a> Reader<'a> {
                     let value = self.read_value(trust, depth + 1, abi)?;
                     entries.push((key, value));
                 }
+                if super::value::map_has_duplicate_key(&entries) {
+                    return Err(FormatError::DuplicateMapKey);
+                }
                 super::value::Value::try_map(entries).ok_or(FormatError::ValueTooNested)
             }
             11 => {
@@ -780,6 +787,20 @@ mod tests {
                 got: 257,
             }),
         }
+    }
+
+    #[test]
+    fn duplicate_map_key_is_not_reported_as_nesting() {
+        let mut bytes = Vec::new();
+        bytes.push(10);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            bytes.push(0);
+            bytes.extend_from_slice(&1i64.to_le_bytes());
+            bytes.push(2);
+            bytes.extend_from_slice(&7i64.to_le_bytes());
+        }
+        assert_eq!(decode_value(&bytes), Err(FormatError::DuplicateMapKey));
     }
 
     #[test]

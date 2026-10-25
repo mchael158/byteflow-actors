@@ -48,6 +48,7 @@ holds right now), which no static pass can settle.
 | `JumpOutOfRange` | Offset is chunk data; the hot loop must not re-add it per jump |
 | `ArityExceedsRegisters` | Such a function cannot be entered *at all*; per-call checking only repeats the same verdict |
 | `UnknownOpcode` | Opcode byte is chunk data |
+| `BadImmediate` | Pack length, pack window, payload kind, and compare selector are part of the instruction word |
 
 | Checked per step by the `Vm` | Why not `verify` |
 | ---------------------------- | ------------------ |

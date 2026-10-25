@@ -12,6 +12,17 @@ All notable changes to **byteflow-actors** are documented here.
   name stays inside that directive. `NaN` payloads and `-0.0` are written
   as `float bits`, so the text form keeps the bits `encode` would write.
   Unquoted names and decimal floats still parse.
+- **Builder:** `list_pack`, `record_pack`, and `map_pack` trap when the
+  source registers are not contiguous or would address register 255.
+  They used to pack from the first register and read the gap. `window`
+  and `alloc_contig` stop at the same exclusive end (255) and emit one
+  `Trap` instead of one per missing slot.
+- **Verify:** `VerifyError::BadImmediate` rejects a pack longer than the
+  value cap, a pack window that includes register 255, a
+  `ReceiveMatchKind` outside `0..=10`, and a `ReceiveMatchCmp` selector
+  that is not `Eq`, `Lt`, or `Le`. `Vm::run` without `verify` still traps.
+- **Decode:** a map constant with a repeated key is
+  `FormatError::DuplicateMapKey`. It used to surface as `ValueTooNested`.
 
 ## [0.9.19] — 2026-10-21
 

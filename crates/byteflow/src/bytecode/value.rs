@@ -207,6 +207,20 @@ pub enum Value {
     Record(Arc<[Value]>),
 }
 
+/// A repeated [`MapKey`] is a distinct failure from nesting or length.
+/// [`Value::try_map`] rejects both; the decoder reports the duplicate on its
+/// own so a hostile module is not described as too deep.
+pub(crate) fn map_has_duplicate_key(entries: &[(MapKey, Value)]) -> bool {
+    for index in 0..entries.len() {
+        for earlier in 0..index {
+            if entries[index].0 == entries[earlier].0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl Value {
     /// BFV0 wire tag for this value (`Unit=0` … `Bytes=8`, `List=9`, `Map=10`).
     ///
@@ -243,15 +257,8 @@ impl Value {
     /// Build a [`Value::Map`]. Fails when there are more than [`MAX_MAP_LEN`]
     /// pairs, a key is repeated, or nesting exceeds the decoder ceiling.
     pub fn try_map(entries: Vec<(MapKey, Value)>) -> Option<Self> {
-        if entries.len() > MAX_MAP_LEN {
+        if entries.len() > MAX_MAP_LEN || map_has_duplicate_key(&entries) {
             return None;
-        }
-        for index in 0..entries.len() {
-            for earlier in 0..index {
-                if entries[index].0 == entries[earlier].0 {
-                    return None;
-                }
-            }
         }
         let value = Value::Map(Arc::from(entries));
         if value.within_nesting_limit() {
