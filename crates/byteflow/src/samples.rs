@@ -214,11 +214,11 @@ pub fn process_alive() -> Chunk {
         let hop = f.hop(rid, TAG_REQ, z);
         f.cast(live_cap, hop);
         let _down = f.receive_match_imm(crate::TAG_SYS_DOWN);
-        let now_dead = f.is_alive(live_cap);
+        let still_alive = f.is_alive(live_cap);
         let bad = f.label();
         let ok = f.label();
         f.branch_if_falsy(was_live, bad);
-        f.branch_if_falsy(now_dead, ok);
+        f.branch_if_falsy(still_alive, ok);
         f.bind(bad);
         f.trap(1);
         f.bind(ok);
