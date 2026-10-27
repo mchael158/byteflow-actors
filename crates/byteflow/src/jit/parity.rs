@@ -322,6 +322,14 @@ fn map_and_record_reads_match_after_the_trace_stops() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn trap_and_halt_match_after_the_trace_stops() -> TestResult {
+    deopts("trap", trap_after_load(7), Opcode::Trap)?;
+    deopts("trap-neg", trap_after_load(-1), Opcode::Trap)?;
+    deopts("halt", halt_after_load(7), Opcode::Halt)?;
+    Ok(())
+}
+
 /// Run both paths. An empty trace is a miss: the interpreter executes the
 /// effect. Any other compile failure is a broken program.
 fn observe(name: &str, chunk: &Arc<crate::Chunk>) -> TestResult {
@@ -854,6 +862,22 @@ fn record_get_at(index: i32) -> crate::Chunk {
         b.emit_record_pack(2, 0, 2);
         b.emit_record_get(3, 2, index);
         b.emit_return(3);
+    })
+}
+
+fn trap_after_load(code: i32) -> crate::Chunk {
+    main("trap", 1, |b| {
+        b.emit_load_imm(0, 1);
+        b.emit_trap(code);
+        b.emit_return(0);
+    })
+}
+
+fn halt_after_load(value: i32) -> crate::Chunk {
+    main("halt", 1, |b| {
+        b.emit_load_imm(0, value);
+        b.emit_halt();
+        b.emit_return(0);
     })
 }
 
