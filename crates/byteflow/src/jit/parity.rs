@@ -124,6 +124,18 @@ fn integer_trace_opcodes_match_the_interpreter() -> TestResult {
     Ok(())
 }
 
+/// Both successors of `Branch` are effects, so neither is inside the trace.
+/// A truthy register must fall through. An unconditional exit to the branch
+/// target would return the other list.
+#[test]
+fn branch_with_both_successors_outside_the_trace_matches() -> TestResult {
+    for (name, cond) in [("truthy", 1i32), ("falsy", 0)] {
+        let chunk = Arc::new(branch_both_sides_are_effects(cond));
+        match_paths(name, &chunk, 0, false)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn shifts_match_across_the_mask_boundary() -> TestResult {
     let amounts = [0i64, 1, 31, 32, 63, 64, 65, 127, -1, i64::MIN, i64::MAX];
@@ -525,6 +537,20 @@ fn shift(op: Opcode, value: i64, amount: i64) -> crate::Chunk {
     b.emit_bit_binop(op, 2, 0, 1);
     b.emit_return(2);
     b.finish()
+}
+
+fn branch_both_sides_are_effects(cond: i32) -> crate::Chunk {
+    main("branch-exit", 4, |b| {
+        let taken = b.new_label();
+        b.emit_load_imm(0, cond);
+        b.emit_load_imm(2, 4);
+        b.emit_branch(0, taken);
+        b.emit_list_pack(1, 0, 0);
+        b.emit_return(1);
+        b.bind_label(taken);
+        b.emit_list_pack(1, 2, 1);
+        b.emit_return(1);
+    })
 }
 
 fn jump() -> crate::Chunk {

@@ -848,7 +848,17 @@ fn emit_instruction(
                     write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, fall_pc, 0);
                 }
                 (None, None) => {
+                    let falsy_side = builder.create_block();
+                    let truthy_side = builder.create_block();
+                    builder
+                        .ins()
+                        .brif(is_falsy, falsy_side, &[], truthy_side, &[]);
+                    builder.switch_to_block(falsy_side);
+                    builder.seal_block(falsy_side);
                     write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, falsy_pc, 0);
+                    builder.switch_to_block(truthy_side);
+                    builder.seal_block(truthy_side);
+                    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, fall_pc, 0);
                 }
             }
         }
