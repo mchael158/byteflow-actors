@@ -304,6 +304,24 @@ fn list_get_and_len_match_after_the_trace_stops() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn map_and_record_reads_match_after_the_trace_stops() -> TestResult {
+    deopts("map-get", map_get_key(1), Opcode::MapGet)?;
+    deopts("map-miss", map_get_key(99), Opcode::MapGet)?;
+    deopts("map-len", map_len_of_one(), Opcode::MapLen)?;
+    deopts("map-len-type", len_of_int(Opcode::MapLen), Opcode::MapLen)?;
+    deopts("record-get", record_get_at(0), Opcode::RecordGet)?;
+    deopts("record-oob", record_get_at(3), Opcode::RecordGet)?;
+    deopts("record-neg", record_get_at(-1), Opcode::RecordGet)?;
+    deopts("record-len", record_len_of_two(), Opcode::RecordLen)?;
+    deopts(
+        "record-len-type",
+        len_of_int(Opcode::RecordLen),
+        Opcode::RecordLen,
+    )?;
+    Ok(())
+}
+
 /// Run both paths. An empty trace is a miss: the interpreter executes the
 /// effect. Any other compile failure is a broken program.
 fn observe(name: &str, chunk: &Arc<crate::Chunk>) -> TestResult {
@@ -804,6 +822,47 @@ fn list_len_of_two() -> crate::Chunk {
         b.emit_load_imm(1, 20);
         b.emit_list_pack(2, 0, 2);
         b.emit_list_len(3, 2);
+        b.emit_return(3);
+    })
+}
+
+fn map_get_key(key: i32) -> crate::Chunk {
+    main("mget", 5, |b| {
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 8);
+        b.emit_map_pack(2, 0, 1);
+        b.emit_load_imm(3, key);
+        b.emit_map_get(4, 2, 3);
+        b.emit_return(4);
+    })
+}
+
+fn map_len_of_one() -> crate::Chunk {
+    main("mlen", 4, |b| {
+        b.emit_load_imm(0, 1);
+        b.emit_load_imm(1, 8);
+        b.emit_map_pack(2, 0, 1);
+        b.emit_map_len(3, 2);
+        b.emit_return(3);
+    })
+}
+
+fn record_get_at(index: i32) -> crate::Chunk {
+    main("rget", 4, |b| {
+        b.emit_load_imm(0, 3);
+        b.emit_load_imm(1, 4);
+        b.emit_record_pack(2, 0, 2);
+        b.emit_record_get(3, 2, index);
+        b.emit_return(3);
+    })
+}
+
+fn record_len_of_two() -> crate::Chunk {
+    main("rlen", 4, |b| {
+        b.emit_load_imm(0, 3);
+        b.emit_load_imm(1, 4);
+        b.emit_record_pack(2, 0, 2);
+        b.emit_record_len(3, 2);
         b.emit_return(3);
     })
 }
