@@ -809,12 +809,24 @@ fn emit_instruction(
         }
         Opcode::Branch => {
             let cond = load_reg(builder, registers, slots_ptr, pointer_type, instr.a, pc)?;
+            // `Value::is_truthy` treats every float as truthy, including `0.0`
+            // and `NaN`. Their bit patterns are zero or nonzero integers, so a
+            // plain `icmp == 0` would take the branch for `0.0`.
+            let tag = registers.defined_tag(instr.a as usize);
             flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
-            let zero = builder.ins().iconst(types::I64, 0);
-            let is_falsy =
-                builder
-                    .ins()
-                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, cond, zero);
+            let is_falsy = match tag {
+                Some(SlotTag::Float) => builder.ins().iconst(types::I8, 0),
+                Some(SlotTag::Int | SlotTag::Bool) => {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder
+                        .ins()
+                        .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, cond, zero)
+                }
+                Some(SlotTag::Inherited(src)) => {
+                    falsy_unless_float(builder, frame_ptr, pointer_type, cond, src)
+                }
+                None => falsy_unless_float(builder, frame_ptr, pointer_type, cond, instr.a),
+            };
             let fall_pc = pc + 1;
             let falsy_pc = branch_target(pc, instr.imm);
             match (pc_to_block.get(&fall_pc), pc_to_block.get(&falsy_pc)) {
@@ -1179,6 +1191,35 @@ fn store_slot(
             );
         }
     }
+}
+
+/// Zero bits are falsy for `Int`, `Bool`, and `Unit`. A float tag is not:
+/// `0.0` is truthy. `reg` is the register whose tag bit applies.
+fn falsy_unless_float(
+    builder: &mut FunctionBuilder<'_>,
+    frame_ptr: ClifValue,
+    pointer_type: types::Type,
+    cond: ClifValue,
+    reg: u8,
+) -> ClifValue {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let is_zero = builder
+        .ins()
+        .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, cond, zero);
+    let float_bit = inherited_bit(
+        builder,
+        frame_ptr,
+        pointer_type,
+        reg,
+        OFF_AS_FLOAT,
+        OFF_ENTRY_FLOAT,
+    );
+    let not_float = builder.ins().icmp(
+        cranelift_codegen::ir::condcodes::IntCC::Equal,
+        float_bit,
+        zero,
+    );
+    builder.ins().band(is_zero, not_float)
 }
 
 /// `written[src]` selects the tag this execution already stored; otherwise

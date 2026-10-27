@@ -8,7 +8,7 @@ use super::trace::{HotCounter, TraceCache, TraceKey, HOT_THRESHOLD};
 use super::CompiledTrace;
 
 /// Runtime-wide JIT state: compiled traces are shared; each worker thread owns
-/// its own Cranelift module for compilation ([`super::module_local`]).
+/// its own Cranelift module for compilation (the private `module_local` helper).
 pub struct JitRuntime {
     chunk: RwLock<Arc<Chunk>>,
     pub hot_threshold: u32,

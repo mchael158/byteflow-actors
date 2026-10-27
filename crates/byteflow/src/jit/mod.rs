@@ -1,16 +1,22 @@
 //! Trace JIT for Byteflow — Cranelift backend, isolated `unsafe`.
 //!
-//! Compiles int-specialized traces (`LoadImm`, `AddImm`, `SubImm`, `MulImm`,
-//! `EqImm`, `LeImm`, `LoadConst`, `Move`, binops, bitwise ops, `Neg`, `Branch`,
-//! `Jump`, `Call`, `Return`). Scheduler effects stop recording.
+//! Compiles int traces (`LoadImm`, `AddImm`, `SubImm`, `MulImm`, `LtImm`,
+//! `EqImm`, `LeImm`, `LoadConst`, `Move`, `Nop`, arithmetic, `Div`, `Mod`,
+//! bitwise ops including `Shl`/`Shr`, `Neg`, `Branch`, `Jump`, `Call`,
+//! `Return`). A float trace covers `LoadConst` of `Float`, `Move`, `Add`,
+//! `Sub`, `Mul`, `Div`, `Eq`, `Lt`, `Le`, `Neg`, and the same control
+//! opcodes. Scheduler effects, lists, maps, and records stop recording.
 
 mod call;
 mod compiler;
+
 mod dispatch;
 mod error;
 mod exit;
 mod frame;
 mod module_local;
+#[cfg(test)]
+mod parity;
 mod runtime;
 mod trace;
 

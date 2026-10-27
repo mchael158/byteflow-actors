@@ -151,7 +151,7 @@ impl Vm {
     /// Mint a per-flow correlation id.
     ///
     /// Stays in the `Value::Int` (`i64`) domain so
-    /// `FreshRequestId` → `Int` → [`request_id_from_value`] never produces a
+    /// `FreshRequestId` → `Int` → `request_id_from_value` never produces a
     /// negative id. Never returns `0` (`next_request_id` starts at 1).
     pub fn fresh_request_id(&mut self) -> u64 {
         let id = self.next_request_id;

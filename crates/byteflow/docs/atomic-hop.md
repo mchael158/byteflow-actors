@@ -25,8 +25,8 @@ Message { sender, reply_cap, request_id, tag, payload }
 - **reply_cap** — SEND-only Cap back to the sender. One live token per
   `(recipient, sender)` pair (`CapTable::mint_or_reuse`); correlation is
   `request_id`, not a fresh Cap per hop.
-- **request_id** — correlation token. Prefer [`Fn::fresh_request_id`] /
-  [`Fn::hop_fresh`] (per-flow, starts at 1). `0` is “unset”: `Send` / `Ask`
+- **request_id** — correlation token. Prefer [`crate::Fn::fresh_request_id`] /
+  [`crate::Fn::hop_fresh`] (per-flow, starts at 1). `0` is “unset”: `Send` / `Ask`
   mint a fresh id at the hop boundary. `Ask` refuses a second in-flight
   `Ask` that reuses a still-pending id.
 - **tag** — protocol discriminator (opaque to the VM)

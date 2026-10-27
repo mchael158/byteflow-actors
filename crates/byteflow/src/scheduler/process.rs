@@ -47,7 +47,7 @@ static NEXT_FLOW_ID: AtomicU64 = AtomicU64::new(1);
 static FLOW_IDS_EXHAUSTED: AtomicBool = AtomicBool::new(false);
 
 /// Allocate the next id. Tests and host helpers; spawn uses
-/// [`try_next_flow_id`] so wrap-around cannot mint [`FlowId::HOST`].
+/// `try_next_flow_id` so wrap-around cannot mint [`FlowId::HOST`].
 pub fn next_flow_id() -> FlowId {
     match try_next_flow_id() {
         Ok(id) => id,

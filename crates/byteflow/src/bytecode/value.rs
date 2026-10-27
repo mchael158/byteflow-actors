@@ -176,7 +176,7 @@ impl fmt::Display for Message {
 /// A dynamically-tagged runtime value.
 ///
 /// [`Value::Cap`] is an opaque [`CapId`] for `Send` / `Ask`. Authority lives
-/// in the runtime [`crate::CapTable`], keyed by holder — not in this tag.
+/// in the runtime capability table, keyed by holder — not in this tag.
 /// [`Value::Pid`] remains for **identity** inside authenticated messages.
 ///
 /// [`Value::Str`] / [`Value::Bytes`] are heap payloads shared via [`Arc`].
@@ -197,7 +197,7 @@ pub enum Value {
     /// Opaque byte buffer (constant pool, natives, host).
     Bytes(Arc<[u8]>),
     /// Bounded sequence (ABI v6 wire tag `9`). At most [`MAX_LIST_LEN`]
-    /// elements; nesting shares [`super::MAX_VALUE_DEPTH`] with `Message`.
+    /// elements; nesting shares the decoder depth ceiling with `Message`.
     List(Arc<[Value]>),
     /// Bounded map (ABI v7 wire tag `10`). At most [`MAX_MAP_LEN`] pairs.
     /// Insertion order is kept. A duplicate key is rejected at construction.
@@ -548,7 +548,7 @@ impl Value {
     /// same buffer cloned into N mailboxes exists once in memory, but each
     /// mailbox is charged the full length. That over-counts on purpose.
     ///
-    /// A `Message` chain deeper than [`super::MAX_VALUE_DEPTH`] does not
+    /// A `Message` chain deeper than the decoder depth ceiling does not
     /// walk the tail. The returned size is [`usize::MAX`], which no mailbox
     /// budget can admit.
     #[inline]

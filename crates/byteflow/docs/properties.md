@@ -7,8 +7,8 @@ Coverage uses **in-house** logic (`std` + our PRNG) — no nested fuzz crate.
 
 | Harness | Surface | Invariants |
 |---------|---------|------------|
-| `tests/properties_mailbox.rs` | [`Mailbox`] + overflow policies | Occupancy ≤ capacity; `DropNewest` keeps the head; `Reject` reports `MessageLimit` |
-| `tests/properties_decode.rs` | [`decode`] / [`verify`] / encode round-trip | Arbitrary bytes never panic; verified programs survive encode→decode |
+| `tests/properties_mailbox.rs` | [`crate::Mailbox`] + overflow policies | Occupancy ≤ capacity; `DropNewest` keeps the head; `Reject` reports `MessageLimit` |
+| `tests/properties_decode.rs` | [`crate::decode`] / [`crate::verify`] / encode round-trip | Arbitrary bytes never panic; verified programs survive encode→decode |
 | `src/scheduler/capability.rs` (`properties`) | `CapTable` mint / resolve / revoke | Holder-only resolve; `mint_or_reuse` stable; revoke invalidates tokens |
 
 ```bash

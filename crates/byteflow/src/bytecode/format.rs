@@ -32,6 +32,9 @@ pub enum FormatError {
     /// This used to be reported as [`FormatError::UnknownValueTag`]`(10)`,
     /// which is the map's own tag.
     UnknownMapKey(u8),
+    /// Tag `1` was followed by a byte other than `0` or `1`. The encoder
+    /// writes only those two. Any other byte used to decode as `true`.
+    NonCanonicalBool(u8),
     UnknownOpcode {
         at: usize,
         byte: u8,
@@ -62,6 +65,9 @@ impl std::fmt::Display for FormatError {
             FormatError::BadUtf8 => write!(f, "name is not valid UTF-8"),
             FormatError::UnknownValueTag(t) => write!(f, "unknown value tag 0x{t:02X}"),
             FormatError::UnknownMapKey(t) => write!(f, "unknown map key tag 0x{t:02X}"),
+            FormatError::NonCanonicalBool(b) => {
+                write!(f, "non-canonical bool byte 0x{b:02X}")
+            }
             FormatError::UnknownOpcode { at, byte } => {
                 write!(f, "unknown opcode 0x{byte:02X} at instruction {at}")
             }
@@ -425,7 +431,11 @@ impl<'a> Reader<'a> {
         }
         match self.read_u8()? {
             0 => Ok(Value::Unit),
-            1 => Ok(Value::Bool(self.read_u8()? != 0)),
+            1 => match self.read_u8()? {
+                0 => Ok(Value::Bool(false)),
+                1 => Ok(Value::Bool(true)),
+                byte => Err(FormatError::NonCanonicalBool(byte)),
+            },
             2 => Ok(Value::Int(self.read_i64()?)),
             3 => Ok(Value::Float(self.read_f64()?)),
             4 => {
@@ -815,6 +825,59 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(2);
         assert_eq!(decode_value(&bytes), Err(FormatError::UnknownMapKey(2)));
+    }
+
+    #[test]
+    fn bool_false_and_true_round_trip_as_zero_and_one() -> Result<(), FormatError> {
+        for (value, byte) in [(Value::Bool(false), 0u8), (Value::Bool(true), 1)] {
+            let bytes = encode_value(&value);
+            if bytes != [1, byte] {
+                return Err(FormatError::NonCanonicalBool(byte));
+            }
+            let (back, used) = decode_value(&bytes)?;
+            if used != 2 || back != value {
+                return Err(FormatError::Truncated);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn non_canonical_bool_bytes_are_rejected() {
+        for byte in [2u8, 127, 255] {
+            assert_eq!(
+                decode_value(&[1, byte]),
+                Err(FormatError::NonCanonicalBool(byte))
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_header_is_module_abi() -> Result<(), FormatError> {
+        let list = Value::try_list(vec![Value::Int(1)]).ok_or(FormatError::ValueTooNested)?;
+        let map = Value::try_map(vec![(crate::MapKey::Int(1), list.clone())])
+            .ok_or(FormatError::ValueTooNested)?;
+        let record = Value::try_record(vec![map.clone()]).ok_or(FormatError::ValueTooNested)?;
+        for value in [Value::Int(1), list, map, record] {
+            let mut chunk = Chunk {
+                name: "abi".into(),
+                ..Chunk::default()
+            };
+            chunk.constants.push(value);
+            chunk.functions.push(FunctionDef {
+                name: "main".into(),
+                entry: 0,
+                arity: 0,
+                num_registers: 1,
+            });
+            chunk.code.push(Instruction::abc(Opcode::Return, 0, 0, 0));
+            let bytes = encode(&chunk);
+            let header = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
+            if header != module_abi(&chunk.constants) {
+                return Err(FormatError::UnsupportedAbi(header));
+            }
+        }
+        Ok(())
     }
 
     #[test]

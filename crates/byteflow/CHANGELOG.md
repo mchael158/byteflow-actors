@@ -25,6 +25,9 @@ All notable changes to **byteflow-actors** are documented here.
   `FormatError::DuplicateMapKey`. It used to surface as `ValueTooNested`.
   A map key byte other than `Int` or `Str` is `FormatError::UnknownMapKey`
   carrying that byte. It used to be reported as value tag `10`.
+- **Decode:** a bool constant must be byte `0` or `1`. Any other byte is
+  `FormatError::NonCanonicalBool`. It used to decode as `true` and become
+  `0` or `1` on the next encode.
 - **ABI docs:** the crate and module docs name v5 through v8. v6 is written
   for a list with no map or record. v7 is written for a map with no record.
   A record, including one nested in a list, map, or message, is v8.

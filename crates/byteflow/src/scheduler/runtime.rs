@@ -60,16 +60,16 @@ pub struct RuntimeConfig {
     pub max_host_awaits: u32,
     /// Hard cap on live process-wide links (`0` = unlimited).
     ///
-    /// Accounting is performed by [`super::link::LinkStore`] itself, under
+    /// Accounting is performed by the link store itself, under
     /// the same synchronization that protects the link table.
     pub max_links: u32,
     /// Hard cap on live process-wide monitors (`0` = unlimited).
     ///
-    /// Accounting is performed by [`super::monitor::MonitorStore`] itself.
+    /// Accounting is performed by the monitor store itself.
     pub max_monitors: u32,
     /// Hard cap on live process-wide registry names (`0` = unlimited).
     ///
-    /// [`super::registry::RegistryStore`] counts only successfully registered names.
+    /// The registry store counts only successfully registered names.
     pub max_registry_names: u32,
     /// Host async bridge for [`crate::Opcode::HostAwait`]. `None` fails
     /// any `HostAwait` closed. Not a `CallNative` / std-native slot.
@@ -235,7 +235,7 @@ pub struct Shared {
 ///
 /// Owns M:N scheduling for **flows** (spawn, yield, sleep, mailboxes,
 /// FlowCap resolution, supervised restarts). Optional trace JIT when built
-/// with `feature = "jit"` and enabled in [`RuntimeConfig::jit`].
+/// with `feature = "jit"` and enabled in `RuntimeConfig`'s `jit` field.
 ///
 /// Construct with [`Runtime::new`] (no natives) or
 /// [`Runtime::with_natives`] when the chunk uses `CallNative` /
@@ -465,7 +465,7 @@ impl Runtime {
     ///
     /// Sharded sum without a global snapshot — fine for dashboards
     /// ([`Self::metrics`]), **not** for admission control (see
-    /// [`super::flow_limit::FlowLimit`] / `max_flows`).
+    /// the flow limit / `max_flows`).
     pub fn live_flows(&self) -> usize {
         self.shared.directory.len()
     }
@@ -675,7 +675,7 @@ impl Runtime {
 
     /// Watch `target`; when it exits, `owner` receives a [`crate::TAG_SYS_DOWN`] hop.
     ///
-    /// Both flows must be live. `owner == target` is [`LifecycleError::SelfRelation`].
+    /// Both flows must be live. `owner == target` is `LifecycleError::SelfRelation`.
     pub fn monitor(
         &self,
         owner: FlowId,

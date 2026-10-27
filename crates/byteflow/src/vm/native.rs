@@ -78,7 +78,7 @@ impl NativeTable {
 pub const MAX_NATIVE_SLOTS: usize = 4096;
 
 /// Host error while building a [`NativeTable`] (duplicate name, occupied slot,
-/// or an index past [`MAX_NATIVE_SLOTS`]).
+/// or an index past `MAX_NATIVE_SLOTS`).
 ///
 /// Category A: the embedder misconfigured FFI. Never a panic — `std_native_table`
 /// and host tables must surface this as `Result`.
@@ -89,7 +89,7 @@ pub enum NativeTableError {
         index: u32,
         name: String,
     },
-    /// `register_at` asked for an index at or past [`MAX_NATIVE_SLOTS`].
+    /// `register_at` asked for an index at or past `MAX_NATIVE_SLOTS`.
     IndexTooLarge {
         index: u32,
         limit: u32,

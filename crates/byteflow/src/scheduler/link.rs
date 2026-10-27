@@ -13,7 +13,7 @@ use super::error::{LifecycleError, RuntimeError};
 use super::process::FlowId;
 use super::sync_lock;
 
-/// Opaque link identifier returned by [`LinkTable::link`].
+/// Opaque link identifier returned by `LinkTable::link`.
 ///
 /// Inner id is runtime-minted (`pub(crate)`), same rule as [`crate::CapId`].
 /// Values fit in `i64` so bytecode can store them as [`crate::Value::Int`].

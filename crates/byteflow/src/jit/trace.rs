@@ -62,6 +62,14 @@ impl TraceCache {
     pub(crate) fn has_float_trace(&self) -> bool {
         self.traces.keys().any(|key| key.floats)
     }
+
+    /// `pc` lies in a trace compiled with `TraceKey::floats`.
+    #[cfg(test)]
+    pub(crate) fn float_trace_covers(&self, pc: u32) -> bool {
+        self.traces.iter().any(|(key, trace)| {
+            key.floats && trace.span.function == key.function && trace.span.range.contains(&pc)
+        })
+    }
 }
 
 impl Default for TraceCache {

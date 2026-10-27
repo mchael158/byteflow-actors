@@ -6,7 +6,7 @@ use super::opcode::Opcode;
 use super::value::Value;
 
 /// An unresolved jump target, patched to a relative offset once its address
-/// is known (see [`ChunkBuilder::bind_label`]).
+/// is known (see `ChunkBuilder::bind_label`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(u32);
 

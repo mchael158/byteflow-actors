@@ -47,7 +47,7 @@ impl Capability {
     }
 }
 
-/// Why [`CapTable::resolve`] / [`CapTable::delegate`] refused.
+/// Why `CapTable::resolve` / `CapTable::delegate` refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapError {
     Unknown,
