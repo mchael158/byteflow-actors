@@ -289,6 +289,21 @@ fn a_trace_that_starts_on_an_effect_is_empty() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn list_get_and_len_match_after_the_trace_stops() -> TestResult {
+    deopts("list-get", list_get_at(0), Opcode::ListGet)?;
+    deopts("list-get-tail", list_get_at(1), Opcode::ListGet)?;
+    deopts("list-get-oob", list_get_at(5), Opcode::ListGet)?;
+    deopts("list-get-neg", list_get_at(-1), Opcode::ListGet)?;
+    deopts("list-len", list_len_of_two(), Opcode::ListLen)?;
+    deopts(
+        "list-len-type",
+        len_of_int(Opcode::ListLen),
+        Opcode::ListLen,
+    )?;
+    Ok(())
+}
+
 /// Run both paths. An empty trace is a miss: the interpreter executes the
 /// effect. Any other compile failure is a broken program.
 fn observe(name: &str, chunk: &Arc<crate::Chunk>) -> TestResult {
@@ -313,6 +328,36 @@ fn observe(name: &str, chunk: &Arc<crate::Chunk>) -> TestResult {
         Ok(())
     } else {
         Err(format!("{name}: interpreter {left:?} jit {right:?}").into())
+    }
+}
+
+/// The named opcode stops the trace. Both paths still return the same
+/// `VmResult`, and a compiled prefix does not contain that instruction.
+fn deopts(name: &str, chunk: crate::Chunk, op: Opcode) -> TestResult {
+    let chunk = Arc::new(chunk);
+    observe(name, &chunk)?;
+    let key = TraceKey {
+        function: 0,
+        entry_pc: 0,
+        floats: false,
+    };
+    let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+    match force_compile(&mut ctx, &chunk, key) {
+        Ok(()) => {}
+        Err(CompileError::EmptyTrace { .. }) => return Ok(()),
+        Err(err) => return Err(format!("{name}: {err}").into()),
+    }
+    let Some(pc) = chunk.code.iter().position(|instr| instr.op == op) else {
+        return Err(format!("{name}: missing {op:?}").into());
+    };
+    let inside = ctx
+        .cache
+        .get(&key)
+        .is_some_and(|trace| trace.span.range.contains(&(pc as u32)));
+    if inside {
+        Err(format!("{name}: {op:?} was compiled into the trace").into())
+    } else {
+        Ok(())
     }
 }
 
@@ -740,6 +785,39 @@ fn yield_only() -> crate::Chunk {
     main("yield", 1, |b| {
         b.emit_yield();
         b.emit_return(0);
+    })
+}
+
+fn list_get_at(index: i32) -> crate::Chunk {
+    main("lget", 4, |b| {
+        b.emit_load_imm(0, 10);
+        b.emit_load_imm(1, 20);
+        b.emit_list_pack(2, 0, 2);
+        b.emit_list_get(3, 2, index);
+        b.emit_return(3);
+    })
+}
+
+fn list_len_of_two() -> crate::Chunk {
+    main("llen", 4, |b| {
+        b.emit_load_imm(0, 10);
+        b.emit_load_imm(1, 20);
+        b.emit_list_pack(2, 0, 2);
+        b.emit_list_len(3, 2);
+        b.emit_return(3);
+    })
+}
+
+fn len_of_int(op: Opcode) -> crate::Chunk {
+    main("len-ty", 2, |b| {
+        b.emit_load_imm(0, 1);
+        match op {
+            Opcode::ListLen => b.emit_list_len(1, 0),
+            Opcode::MapLen => b.emit_map_len(1, 0),
+            Opcode::RecordLen => b.emit_record_len(1, 0),
+            _ => b.emit_list_len(1, 0),
+        }
+        b.emit_return(1);
     })
 }
 
