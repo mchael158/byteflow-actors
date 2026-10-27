@@ -556,6 +556,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::value::MapKey;
     use super::*;
     use crate::bytecode::builder::ChunkBuilder;
     use crate::bytecode::opcode::Opcode;
@@ -855,7 +856,7 @@ mod tests {
     #[test]
     fn encoded_header_is_module_abi() -> Result<(), FormatError> {
         let list = Value::try_list(vec![Value::Int(1)]).ok_or(FormatError::ValueTooNested)?;
-        let map = Value::try_map(vec![(crate::MapKey::Int(1), list.clone())])
+        let map = Value::try_map(vec![(MapKey::Int(1), list.clone())])
             .ok_or(FormatError::ValueTooNested)?;
         let record = Value::try_record(vec![map.clone()]).ok_or(FormatError::ValueTooNested)?;
         for value in [Value::Int(1), list, map, record] {
@@ -935,11 +936,8 @@ mod tests {
         let list = Value::try_list(vec![record]).ok_or(FormatError::ValueTooNested)?;
         abi_v8_rejects_a_v7_header(list)?;
 
-        let map = Value::try_map(vec![(
-            crate::bytecode::value::MapKey::Int(1),
-            Value::Int(2),
-        )])
-        .ok_or(FormatError::ValueTooNested)?;
+        let map = Value::try_map(vec![(MapKey::Int(1), Value::Int(2))])
+            .ok_or(FormatError::ValueTooNested)?;
         let holding = Value::try_record(vec![map]).ok_or(FormatError::ValueTooNested)?;
         abi_v8_rejects_a_v7_header(holding)
     }
