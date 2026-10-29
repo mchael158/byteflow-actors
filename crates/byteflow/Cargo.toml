@@ -43,6 +43,10 @@ name = "jit_loop"
 path = "examples/jit_loop.rs"
 required-features = ["jit"]
 
+[[example]]
+name = "remote_hop_tcp"
+path = "examples/remote_hop_tcp.rs"
+
 [dependencies]
 getrandom = { version = "0.4", features = ["std"] }
 cranelift-codegen = { version = "0.136.3", optional = true }

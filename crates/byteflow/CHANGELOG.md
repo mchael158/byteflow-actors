@@ -4,8 +4,61 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Transport:** reference TCP/UDP wire helpers (`BFT1` envelope, bounded outbound
+  queue, inbound session cap, `NodeRouter`, `wait_bridge_drained` /
+  `wait_wire_drained`). Documented in [`docs/remote-transport.md`](docs/remote-transport.md);
+  example `remote_hop_tcp`; tests `remote_transport_tcp`, `wire_decode_stress`.
+
 ### Fixed
 
+- **Transport:** TCP writer retries the same frame after a write failure; inbound
+  refuses excess sessions with an explicit `shutdown`; outbound pump stops (fail
+  closed) when `encode_frame` fails instead of dropping hops silently.
+
+## [0.9.21] — 2026-10-28
+
+### Added
+
+- **Verify:** the destination / gather windows of `Call`, `Spawn`,
+  `StartChild`, `CallNative`, and `CallNativeFrom` are settled against the
+  enclosing function's `num_registers`. A window that reaches past the
+  frame used to pass `verify` and trap only per step. Bare destinations
+  (`argc == 0`) are checked too. Functions sharing an `entry` pool the
+  smallest `num_registers` of the group; instructions outside any span
+  (unreachable from any entry) stay outside the check.
+- **Verify:** `VerifyError::BadImmediate` also rejects a
+  `ReceiveMatchImm` / `ReceiveMatchCorrImm` tag outside `u16`, a
+  `SetRestartPolicy` immediate outside `0..=2`, a `StartChild` policy byte
+  outside `0..=2`, and an `AskTimeout` timeout register past the calling
+  frame's register file. All four used to trap only at runtime.
+
+### Fixed
+
+- **Decode:** a header claiming up to a million constants, functions, or
+  instructions now caps the `Vec` reserve by the smallest possible encoded
+  size of one item. A ~16-byte buffer used to drive an 8–40 MB allocation
+  (`with_capacity` before any payload byte was read) per decode attempt;
+  the read still fails fast with `Truncated`.
+
+### Docs
+
+- The crate README "Values today" line now lists `Map` and `Record`
+  (present since 0.9.18/0.9.19 but missing there), and `docs/untrusted.md`
+  is linked from both READMEs' design-guides lists.
+
+## [0.9.20] — 2026-10-27
+
+### Fixed
+
+- **Assembler:** a carriage return in a chunk name, a function name, or a
+  string constant is written as `\r`. A raw `\r` used to split the listing,
+  because `lines()` treats it as a line ending.
+- **JIT:** a call chain past the 32-frame JIT stack returns to the
+  interpreter with those frames installed. It used to be reported as
+  `Fault::DivideByZero`. Divide and modulo by zero stay `DivideByZero`.
+  The interpreter call limit stays 4096.
 - **Assembler:** instruction indexes wider than four digits round-trip.
   A listing used to require a space in column 5, so instruction 10000 was
   read as an opcode name. Function names are quoted, and a newline in a

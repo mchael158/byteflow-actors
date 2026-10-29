@@ -214,6 +214,7 @@ pub mod output;
 pub mod prng;
 pub mod samples;
 pub mod scheduler;
+pub mod transport;
 pub mod vm;
 
 #[cfg(feature = "jit")]
@@ -262,6 +263,10 @@ pub mod docs {
     #[doc = include_str!("../docs/host-await.md")]
     pub mod host_await {}
 
+    /// Reference TCP/UDP framing for remote hops (host-owned socket I/O).
+    #[doc = include_str!("../docs/remote-transport.md")]
+    pub mod remote_transport {}
+
     /// Untrusted bytecode: verifier, capabilities, quotas, and attestation
     /// are separate controls.
     #[doc = include_str!("../docs/untrusted.md")]
@@ -296,6 +301,12 @@ pub use scheduler::{
     QuotaError, RegistryName, RemoteFrameError, RestartStrategy, Runtime, RuntimeConfig,
     RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
     Supervisor, SupervisorConfig, ThreadedHostAwait, WaitEpoch, DEFAULT_QUANTUM,
+};
+pub use transport::{
+    read_wire_frame, recv_wire_frame_udp, send_wire_frame_udp, spawn_tcp_inbound,
+    spawn_tcp_outbound, wait_bridge_drained, write_wire_frame, NodeRouter, StaticNodeRouter,
+    TcpInboundConfig, TcpInboundHandle, TcpOutboundConfig, TcpOutboundHandle, TransportError,
+    DEFAULT_MAX_WIRE_BYTES,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,
