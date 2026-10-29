@@ -267,6 +267,14 @@ pub mod docs {
     #[doc = include_str!("../docs/remote-transport.md")]
     pub mod remote_transport {}
 
+    /// Production embedding: shutdown, remote I/O, untrusted modules.
+    #[doc = include_str!("../docs/production-embedding.md")]
+    pub mod production_embedding {}
+
+    /// Audit-derived engineering checklist (track hardening PRs).
+    #[doc = include_str!("../docs/audit-checklist.md")]
+    pub mod audit_checklist {}
+
     /// Untrusted bytecode: verifier, capabilities, quotas, and attestation
     /// are separate controls.
     #[doc = include_str!("../docs/untrusted.md")]
@@ -298,9 +306,10 @@ pub use scheduler::{
     HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError,
     LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
     MailboxFullReason, MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, QuotaConfig,
-    QuotaError, RegistryName, RemoteFrameError, RestartStrategy, Runtime, RuntimeConfig,
-    RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSpawner, SendError, SpawnError,
-    Supervisor, SupervisorConfig, ThreadedHostAwait, WaitEpoch, DEFAULT_QUANTUM,
+    QuotaError, RegistryName, RemoteFrameDedup, RemoteFrameError, RestartStrategy, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSnapshot,
+    RuntimeSpawner, SendError, SpawnError, Supervisor, SupervisorConfig, ThreadedHostAwait,
+    WaitEpoch, DEFAULT_QUANTUM,
 };
 pub use transport::{
     read_wire_frame, recv_wire_frame_udp, send_wire_frame_udp, spawn_tcp_inbound,

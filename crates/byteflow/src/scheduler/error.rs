@@ -58,6 +58,8 @@ pub enum RuntimeError {
     LinkIdExhausted,
     /// Monitor-id counter wrapped or exceeded `i64::MAX` (bytecode `Int` bound).
     MonitorIdExhausted,
+    /// A table operation failed (name, capacity, or liveness).
+    Table(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -99,10 +101,16 @@ impl fmt::Display for RuntimeError {
             RuntimeError::MonitorIdExhausted => {
                 write!(f, "monitor id space exhausted (counter wrapped)")
             }
+            RuntimeError::Table(msg) => write!(f, "table: {msg}"),
         }
     }
 }
 
+impl From<String> for RuntimeError {
+    fn from(msg: String) -> Self {
+        RuntimeError::Table(msg)
+    }
+}
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

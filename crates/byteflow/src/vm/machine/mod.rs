@@ -223,8 +223,8 @@ impl Vm {
     }
 
     /// Number of registers in the active frame.
-    pub fn current_num_registers(&self) -> Option<u8> {
-        self.frames.last().map(|f| f.registers().len() as u8)
+    pub fn current_num_registers(&self) -> Option<usize> {
+        self.frames.last().map(|f| f.registers().len())
     }
 
     /// Read-only view of the active register file.
@@ -242,6 +242,58 @@ impl Vm {
         if let Some(frame) = self.frames.last_mut() {
             frame.set_pc(pc);
         }
+    }
+
+    /// Write the active frame back to the state a JIT call left it in, then
+    /// push the callees the trace already entered.
+    ///
+    /// The caller is the frame that was live when the trace started. `frames`
+    /// are the nested activations, outermost first. Nothing is pushed when
+    /// the installed stack would pass [`MAX_CALL_DEPTH`].
+    #[cfg(feature = "jit")]
+    pub(crate) fn install_jit_frames(
+        &mut self,
+        caller_pc: usize,
+        caller_regs: &[(u8, Value)],
+        frames: Vec<(u32, u8, usize, Vec<Value>)>,
+    ) -> Result<(), Fault> {
+        if self.frames.len().saturating_add(frames.len()) > MAX_CALL_DEPTH {
+            return Err(Fault::CallStackOverflow {
+                depth: MAX_CALL_DEPTH,
+            });
+        }
+        let frame_size = self
+            .frames
+            .last()
+            .ok_or(Fault::Invariant(
+                "empty frame stack while installing jit frames",
+            ))?
+            .registers()
+            .len();
+        for (reg, _) in caller_regs {
+            if usize::from(*reg) >= frame_size {
+                return Err(Fault::RegisterOutOfRange {
+                    reg: *reg,
+                    frame_size: frame_size as u8,
+                });
+            }
+        }
+        self.set_pc(caller_pc);
+        for (reg, value) in caller_regs {
+            self.set_register(*reg, value.clone())?;
+        }
+        for (function, dest_reg, pc, registers) in frames {
+            let Some(num_registers) = u8::try_from(registers.len()).ok() else {
+                return Err(Fault::Invariant("jit frame is wider than a register file"));
+            };
+            let mut frame = Frame::new(function, num_registers, Some(dest_reg));
+            frame.set_pc(pc);
+            for (slot, value) in frame.registers_mut().iter_mut().zip(registers) {
+                *slot = value;
+            }
+            self.frames.push(frame);
+        }
+        Ok(())
     }
 
     /// Write one register in the active frame (JIT sync path).

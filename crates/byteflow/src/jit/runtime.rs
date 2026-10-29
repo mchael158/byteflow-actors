@@ -61,6 +61,20 @@ impl JitRuntime {
         cache.get(key).map(|t| JitEntryCopy { entry: t.entry })
     }
 
+    pub fn is_failed(&self, key: &TraceKey) -> bool {
+        self.cache
+            .read()
+            .ok()
+            .map(|c| c.is_failed(key))
+            .unwrap_or(false)
+    }
+
+    pub fn mark_failed(&self, key: TraceKey) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.mark_failed(key);
+        }
+    }
+
     pub fn insert_trace(&self, key: TraceKey, trace: CompiledTrace) {
         if let Ok(mut cache) = self.cache.write() {
             cache.insert(key, trace);

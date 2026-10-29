@@ -318,6 +318,12 @@ impl CapTable {
         Ok(())
     }
 
+    pub(crate) fn table_cell(&self, id: u64) -> Option<Arc<RevocationCell>> {
+        self.lock("CapTable::table_cell")
+            .ok()
+            .and_then(|g| g.table_cells.get(&id).cloned())
+    }
+
     /// Revoke every Cap that addresses `id` and drop the table cell.
     pub fn revoke_table(&self, id: u64) -> Result<(), RuntimeError> {
         let mut table = self.lock("CapTable::revoke_table")?;

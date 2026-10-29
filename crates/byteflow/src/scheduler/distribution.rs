@@ -66,6 +66,12 @@ impl DistributionBridge {
         Ok(queue.pop_front())
     }
 
+    /// Hops waiting for the host to encode and send (`SendRemote` backpressure).
+    pub fn outbound_pending(&self) -> Result<usize, RuntimeError> {
+        let queue = sync_lock::lock(&self.queue, "DistributionBridge::outbound_pending")?;
+        Ok(queue.len())
+    }
+
     /// Block until a hop arrives or `timeout` elapses.
     pub fn recv_timeout(
         &self,
@@ -88,6 +94,37 @@ impl DistributionBridge {
                 return Ok(None);
             }
         }
+    }
+}
+
+/// Sliding-window replay filter for [`crate::Runtime::deliver_frame`].
+#[derive(Debug)]
+pub struct RemoteFrameDedup {
+    capacity: usize,
+    seen: Mutex<VecDeque<(u64, u64)>>,
+}
+
+impl RemoteFrameDedup {
+    pub fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(RemoteFrameDedup {
+            capacity: capacity.max(1),
+            seen: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// `true` when this `(sender, request_id)` was already accepted in the window.
+    pub fn is_duplicate(&self, sender: u64, request_id: u64) -> Result<bool, RuntimeError> {
+        let mut queue = sync_lock::lock(&self.seen, "RemoteFrameDedup::is_duplicate")?;
+        for &(s, id) in queue.iter() {
+            if s == sender && id == request_id {
+                return Ok(true);
+            }
+        }
+        queue.push_back((sender, request_id));
+        while queue.len() > self.capacity {
+            queue.pop_front();
+        }
+        Ok(false)
     }
 }
 
@@ -551,6 +588,15 @@ mod tests {
             message: Message::new(9, 1, 1, list).authenticate(9, crate::CapId::NONE),
         };
         encode_frame(&hop).map(|_| ())
+    }
+
+    #[test]
+    fn remote_frame_dedup_detects_replay() -> Result<(), RuntimeError> {
+        let dedup = RemoteFrameDedup::new(4);
+        assert!(!dedup.is_duplicate(1, 100)?);
+        assert!(dedup.is_duplicate(1, 100)?);
+        assert!(!dedup.is_duplicate(1, 101)?);
+        Ok(())
     }
 
     #[test]

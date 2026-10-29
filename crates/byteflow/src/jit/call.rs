@@ -1,14 +1,18 @@
-//! In-trace `Opcode::Call` for a straight-line scalar leaf.
+//! In-trace `Opcode::Call`.
 //!
-//! The slot file is one array. A leaf call spills the caller window, runs
-//! the callee in that same array, then restores the caller and writes the
-//! result into the destination register. The `Call` itself does not return
-//! to the interpreter.
+//! The slot file is one array. A call whose callee is already in the trace
+//! spills the caller window, runs the callee in that same array, then
+//! restores the caller and writes the result into the destination register.
 //!
-//! Anything that is not a short leaf (branch, nested effect, heap constant)
-//! still exits at the `Call` so the interpreter pushes a real frame. Budget
-//! exits inside the leaf are not emitted: the call site charges the leaf
-//! length up front and refuses to enter when the slice cannot finish it.
+//! A callee that is not in the trace still exits at the `Call` so the
+//! interpreter pushes a real frame. At [`MAX_JIT_CALL_DEPTH`] the trace
+//! exits at the `Call` as well. The VM installs the spilled frames and keeps
+//! going. That ceiling is not a divide-by-zero: the trap block stays reserved
+//! for `Div` and `Mod`.
+//!
+//! A straight-line leaf is charged up front and is not entered when the
+//! slice cannot finish it. Anything with a branch ticks one instruction at
+//! a time.
 
 use std::collections::HashMap;
 
@@ -33,7 +37,6 @@ use super::frame::{
 const MAX_LEAF_INSNS: usize = 32;
 
 pub(super) struct LeafBody {
-    pub entry: u32,
     pub num_registers: u8,
     pub arity: u8,
     pub pcs: Vec<u32>,
@@ -56,7 +59,6 @@ pub(super) fn leaf_body(chunk: &Chunk, function: u32) -> Option<LeafBody> {
         match instr.op {
             Opcode::Return => {
                 return Some(LeafBody {
-                    entry: def.entry,
                     num_registers: def.num_registers,
                     arity: def.arity,
                     pcs,
@@ -116,42 +118,27 @@ pub(super) fn emit_call(
     pc_to_block: &HashMap<u32, Block>,
     call_depth_ptr: ClifValue,
     call_stack_ptr: ClifValue,
-    trap_block: Block,
     pc: u32,
     instr: Instruction,
 ) -> Result<(), super::error::CompileError> {
     flush_registers(builder, registers, slots_ptr, frame_ptr, pointer_type);
-    let Some(leaf) = leaf_body(chunk, instr.imm as u32) else {
+    let function = instr.imm as u32;
+    let Some(def) = chunk.function(function) else {
         write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
         return Ok(());
     };
-    if instr.b != leaf.arity {
+    if instr.b != def.arity {
         write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
         return Ok(());
     }
-    let Some(callee) = pc_to_block.get(&leaf.entry).copied() else {
+    let Some(callee) = pc_to_block.get(&def.entry).copied() else {
         write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
         return Ok(());
     };
+    let leaf = leaf_body(chunk, function);
 
-    let budget_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_BUDGET);
-    let budget = builder.ins().load(I32, MachMemFlags::new(), budget_ptr, 0);
-    let need = builder.ins().iconst(I32, leaf.pcs.len() as i64);
-    let short = builder.ins().icmp(IntCC::UnsignedLessThan, budget, need);
-    let proceed = builder.create_block();
-    let leave = builder.create_block();
-    builder.ins().brif(short, leave, &[], proceed, &[]);
-    builder.switch_to_block(leave);
-    builder.seal_block(leave);
-    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
-    builder.switch_to_block(proceed);
-    builder.seal_block(proceed);
-
-    let new_budget = builder.ins().isub(budget, need);
-    builder
-        .ins()
-        .store(MachMemFlags::new(), new_budget, budget_ptr, 0);
-
+    // Stop before spilling. `Div`/`Mod` by zero own `trap_block`; a full
+    // call stack has to come back as the `Call` the interpreter will run.
     let depth = builder
         .ins()
         .load(I32, MachMemFlags::new(), call_depth_ptr, 0);
@@ -160,9 +147,42 @@ pub(super) fn emit_call(
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, max_depth);
     let enter = builder.create_block();
-    builder.ins().brif(overflow, trap_block, &[], enter, &[]);
+    let unwind = builder.create_block();
+    builder.ins().brif(overflow, unwind, &[], enter, &[]);
+    builder.switch_to_block(unwind);
+    builder.seal_block(unwind);
+    let budget_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_BUDGET);
+    let budget = builder.ins().load(I32, MachMemFlags::new(), budget_ptr, 0);
+    let refund = builder.ins().iconst(I32, 1);
+    let restored = builder.ins().iadd(budget, refund);
+    builder
+        .ins()
+        .store(MachMemFlags::new(), restored, budget_ptr, 0);
+    write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
     builder.switch_to_block(enter);
     builder.seal_block(enter);
+
+    let num_registers = if let Some(leaf) = leaf {
+        let budget_ptr = field_ptr(builder, frame_ptr, pointer_type, OFF_BUDGET);
+        let budget = builder.ins().load(I32, MachMemFlags::new(), budget_ptr, 0);
+        let need = builder.ins().iconst(I32, leaf.pcs.len() as i64);
+        let short = builder.ins().icmp(IntCC::UnsignedLessThan, budget, need);
+        let proceed = builder.create_block();
+        let leave = builder.create_block();
+        builder.ins().brif(short, leave, &[], proceed, &[]);
+        builder.switch_to_block(leave);
+        builder.seal_block(leave);
+        write_exit(builder, frame_ptr, pointer_type, JIT_CONTINUE, pc, 0);
+        builder.switch_to_block(proceed);
+        builder.seal_block(proceed);
+        let new_budget = builder.ins().isub(budget, need);
+        builder
+            .ins()
+            .store(MachMemFlags::new(), new_budget, budget_ptr, 0);
+        leaf.num_registers
+    } else {
+        def.num_registers
+    };
 
     let spill_ptr = {
         let addr = field_ptr(builder, frame_ptr, pointer_type, OFF_SPILL);
@@ -243,11 +263,11 @@ pub(super) fn emit_call(
     }
 
     clear_tag_words(builder, frame_ptr, pointer_type);
-    zero_slots(builder, pointer_type, slots_ptr, leaf.num_registers);
+    zero_slots(builder, pointer_type, slots_ptr, num_registers);
     copy_args_from_spill(builder, pointer_type, window, slots_ptr, instr.a, instr.b);
     // A fresh interpreter frame is `Unit`. An unread leaf register must stay
     // that way; `zero_slots` only writes the integer 0.
-    for reg in 0..leaf.num_registers {
+    for reg in 0..num_registers {
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, reg, true);
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, true);
@@ -256,7 +276,7 @@ pub(super) fn emit_call(
         let Ok(reg) = u8::try_from(reg) else {
             break;
         };
-        if reg >= leaf.num_registers {
+        if reg >= num_registers {
             break;
         }
         set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, as_bool);
@@ -268,7 +288,7 @@ pub(super) fn emit_call(
         frame_ptr,
         pointer_type,
         OFF_REGISTER_COUNT,
-        u32::from(leaf.num_registers),
+        u32::from(num_registers),
     );
     write_u32_field(
         builder,

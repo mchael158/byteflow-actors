@@ -10,6 +10,12 @@ All notable changes to **byteflow-actors** are documented here.
   queue, inbound session cap, `NodeRouter`, `wait_bridge_drained` /
   `wait_wire_drained`). Documented in [`docs/remote-transport.md`](docs/remote-transport.md);
   example `remote_hop_tcp`; tests `remote_transport_tcp`, `wire_decode_stress`.
+- **Samples:** `ask_reply` uses `actor_loop`; demo/test servers prefer
+  `receive_match_imm` with explicit protocol tags.
+- **Ops:** [`Runtime::snapshot`], [`RemoteFrameDedup`] +
+  `RuntimeConfig::remote_dedup_window`, [`DistributionBridge::outbound_pending`],
+  docs [`production-embedding.md`](docs/production-embedding.md) and
+  [`audit-checklist.md`](docs/audit-checklist.md).
 
 ### Fixed
 

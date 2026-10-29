@@ -99,3 +99,32 @@ impl std::fmt::Display for RuntimeMetricsSnapshot {
         Ok(())
     }
 }
+
+/// Point-in-time runtime view for dashboards and debug tooling.
+#[derive(Debug, Clone)]
+pub struct RuntimeSnapshot {
+    pub metrics: RuntimeMetricsSnapshot,
+    pub live_flows: usize,
+    pub flow_limit_live: usize,
+    pub max_flows: u32,
+    pub distribution_pending: Option<usize>,
+    pub memory: crate::MemorySnapshot,
+    pub workers: usize,
+}
+
+impl std::fmt::Display for RuntimeSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} live_flows={} flow_limit={}/{} bridge_pending={:?} memory={}/{} workers={}",
+            self.metrics,
+            self.live_flows,
+            self.flow_limit_live,
+            self.max_flows,
+            self.distribution_pending,
+            self.memory.used,
+            self.memory.limit,
+            self.workers,
+        )
+    }
+}

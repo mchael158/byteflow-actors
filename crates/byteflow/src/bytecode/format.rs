@@ -159,13 +159,21 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         return Err(FormatError::UnsupportedAbi(abi));
     }
     let name = r.read_string()?;
+    // A hostile header can claim up to `MAX_ITEMS` items after a few bytes.
+    // Reserving the claimed capacity before any payload byte is read would
+    // let a ~16-byte buffer drive a multi-megabyte allocation. Cap every
+    // reserve by the smallest possible encoded size of one item; the reads
+    // below fail fast with `Truncated` either way.
+    let remaining = bytes.len().saturating_sub(r.pos);
     let n_const = r.read_count("constants")?;
-    let mut constants = Vec::with_capacity(n_const as usize);
+    let mut constants = Vec::with_capacity(reserved_for(n_const, remaining, 1));
     for _ in 0..n_const {
         constants.push(r.read_value(trust, 0, abi)?);
     }
     let n_fn = r.read_count("functions")?;
-    let mut functions = Vec::with_capacity(n_fn as usize);
+    // FunctionDef: 4 bytes of name length + the name + 4 (entry) + 1 + 1.
+    let remaining = bytes.len().saturating_sub(r.pos);
+    let mut functions = Vec::with_capacity(reserved_for(n_fn, remaining, 10));
     for _ in 0..n_fn {
         functions.push(FunctionDef {
             name: r.read_string()?,
@@ -175,7 +183,9 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         });
     }
     let n_code = r.read_count("code")?;
-    let mut code = Vec::with_capacity(n_code as usize);
+    // Instruction: op + a + b + c + imm, 8 bytes fixed.
+    let remaining = bytes.len().saturating_sub(r.pos);
+    let mut code = Vec::with_capacity(reserved_for(n_code, remaining, 8));
     for at in 0..n_code as usize {
         let byte = r.read_u8()?;
         let op = Opcode::from_u8(byte).ok_or(FormatError::UnknownOpcode { at, byte })?;
@@ -198,6 +208,15 @@ pub fn decode_with(bytes: &[u8], trust: TrustLevel) -> Result<Chunk, FormatError
         code,
         functions,
     })
+}
+
+/// Reserve capacity bounded by the bytes that could plausibly carry
+/// `count` items: at most `remaining / min_bytes_per_item` items are
+/// decodable before `Truncated`, so a larger claim cannot justify the
+/// heap reserve.
+fn reserved_for(count: u32, remaining: usize, min_bytes_per_item: usize) -> usize {
+    let plausible = remaining / min_bytes_per_item.max(1);
+    (count as usize).min(plausible)
 }
 
 fn write_string(out: &mut Vec<u8>, s: &str) {
@@ -964,6 +983,54 @@ mod tests {
             Err(FormatError::UnknownValueTag(11)) => Ok(()),
             Err(err) => Err(err),
             Ok(_) => Err(FormatError::UnknownValueTag(11)),
+        }
+    }
+
+    /// A tiny header claiming a million items must fail with `Truncated`
+    /// without the decoder reserving for the claim. Used to reserve a
+    /// million constants / functions / instructions *before* reading any
+    /// payload byte, so a ~16-byte buffer drove an 8–40 MB allocation per
+    /// decode attempt.
+    fn tiny_module_claiming(count: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&ABI_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // empty name
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_small_buffer_claiming_a_million_constants_fails_without_reserving(
+    ) -> Result<(), FormatError> {
+        let bytes = tiny_module_claiming(1_000_000);
+        match decode(&bytes) {
+            Err(FormatError::Truncated) => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
+    #[test]
+    fn a_small_buffer_claiming_a_million_functions_fails_without_reserving(
+    ) -> Result<(), FormatError> {
+        let mut bytes = tiny_module_claiming(0);
+        // 0 constants, then the functions claim.
+        bytes.extend_from_slice(&1_000_000u32.to_le_bytes());
+        match decode(&bytes) {
+            Err(FormatError::Truncated) => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
+    #[test]
+    fn a_small_buffer_claiming_a_million_instructions_fails_without_reserving(
+    ) -> Result<(), FormatError> {
+        let mut bytes = tiny_module_claiming(0);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // 0 functions
+        bytes.extend_from_slice(&1_000_000u32.to_le_bytes());
+        match decode(&bytes) {
+            Err(FormatError::Truncated) => Ok(()),
+            other => other.map(|_| ()),
         }
     }
 }

@@ -44,15 +44,15 @@ holds right now), which no static pass can settle.
 | `EmptyFunctionTable` | Nothing to enter; no execution to fault |
 | `EntryOutOfRange` | Function entry is chunk data |
 | `ConstOutOfRange` | Constant pool is chunk data |
-| `FunctionOutOfRange` (`Call` / `Spawn`) | Function table is chunk data |
+| `FunctionOutOfRange` (`Call` / `Spawn` / `StartChild`) | Function table is chunk data |
 | `JumpOutOfRange` | Offset is chunk data; the hot loop must not re-add it per jump |
 | `ArityExceedsRegisters` | Such a function cannot be entered *at all*; per-call checking only repeats the same verdict |
 | `UnknownOpcode` | Opcode byte is chunk data |
-| `BadImmediate` | Pack length, pack window, payload kind, and compare selector are part of the instruction word |
+| `BadImmediate` | Pack length, pack window, payload kind, compare selector, `u16` receive tags, restart policies, the `AskTimeout` timeout register, and the `Call` / `Spawn` / `CallNative` / `CallNativeFrom` / `StartChild` gather windows are part of the instruction word |
 
 | Checked per step by the `Vm` | Why not `verify` |
 | ---------------------------- | ------------------ |
-| `RegisterOutOfRange` | v0 has no dataflow pass; a cheap array bounds check beats proving liveness statically |
+| `RegisterOutOfRange` | v0 has no dataflow pass; a cheap array bounds check beats proving liveness statically. The multi-register gather windows above are the exception — a window that reaches past the frame is static instruction-word data, so `verify` settles it |
 | `RegisterIndexOverflow` | Depends on the operand plus the gather offset |
 | `TypeMismatch` | Depends on what the register holds at that instant |
 | `DivideByZero` | Depends on a runtime value |
@@ -123,6 +123,12 @@ runs outside the `catch_unwind` that isolates `Vm::run`.
 Multi-operand opcodes gather arguments from consecutive registers. `Spawn`
 is the sharp case: it reads them from `a+1..`, so `a = 255` leaves the index
 space on the very first argument, before any bounds check gets a say.
+
+Since 0.9.21, `verify` settles these windows statically: a `Call` / `Spawn`
+/ `CallNative` / `CallNativeFrom` / `StartChild` gather that would address
+a register past the enclosing frame's `num_registers` is
+[`VerifyError::BadImmediate`](crate::VerifyError::BadImmediate). The
+runtime faults below are the backstop for a chunk that skipped `verify`.
 
 Written as `instr.a + 1 + i` on `u8`, that addition has two behaviours and
 both are wrong:

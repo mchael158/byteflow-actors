@@ -57,6 +57,7 @@ fn quote(text: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             c => out.push(c),
         }
     }

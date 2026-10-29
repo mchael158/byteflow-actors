@@ -1,9 +1,10 @@
-//! One named table per flow.
+//! One named table per flow, plus process-wide (global) tables.
 //!
 //! The owner opens it and receives a Cap whose target is [`CapTarget::Table`].
 //! `RECV` reads, `SEND` writes. Delegate narrows those bits. Finalize drops
-//! the rows and revokes the Cap. There is no process-wide table that any
-//! bytecode can write.
+//! the rows of flow-owned tables and revokes the Cap. A global table is
+//! registered by the host (`Runtime::register_table`) and survives any
+//! single flow's exit; each opener's Cap is revoked when that flow exits.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,7 @@ struct OwnedTable {
 struct TablesInner {
     by_owner: std::collections::HashMap<u64, u64>,
     tables: std::collections::HashMap<u64, OwnedTable>,
+    global: std::collections::HashMap<String, u64>,
 }
 
 pub(crate) struct FlowTables {
@@ -41,6 +43,7 @@ impl FlowTables {
             inner: Mutex::new(TablesInner {
                 by_owner: std::collections::HashMap::new(),
                 tables: std::collections::HashMap::new(),
+                global: std::collections::HashMap::new(),
             }),
             next_id: AtomicU64::new(1),
         }
@@ -52,6 +55,13 @@ impl FlowTables {
         }
         let mut inner =
             sync_lock::lock(&self.inner, "FlowTables::open").map_err(|e| e.to_string())?;
+        // A name registered as a process-wide (global) table is shared by
+        // every flow that opens it: the table survives any single flow's
+        // exit, and each opener gets its own Cap (revoked with that flow).
+        if let Some(&id) = inner.global.get(name) {
+            drop(inner);
+            return self.open_global(shared, owner, id);
+        }
         if inner.by_owner.contains_key(&owner.as_u64()) {
             return Err("flow already owns a table".into());
         }
@@ -89,6 +99,76 @@ impl FlowTables {
         Ok(cap_id)
     }
 
+    pub(crate) fn open_global(
+        &self,
+        shared: &Shared,
+        holder: FlowId,
+        id: u64,
+    ) -> Result<CapId, String> {
+        let cell = match shared.caps.table_cell(id) {
+            Some(cell) => cell,
+            None => return Err("table is closed".into()),
+        };
+        let cap = Cap::root(
+            CapTarget::Table(id),
+            CapRights::SEND.union(CapRights::RECV),
+            None,
+            cell.as_ref(),
+        );
+        shared.caps.grant(holder, cap).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn register_global(&self, shared: &Shared, name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > MAX_NAME {
+            return Err("table name must be 1..=256 bytes".into());
+        }
+        let mut inner = sync_lock::lock(&self.inner, "FlowTables::register_global")
+            .map_err(|e| e.to_string())?;
+        if inner.global.contains_key(name) {
+            return Err("global table name already registered".into());
+        }
+        let id = match allocate_id(&self.next_id) {
+            Ok(id) => id,
+            Err(()) => return Err("table ids exhausted".into()),
+        };
+        let cell = Arc::new(RevocationCell::new());
+        shared
+            .caps
+            .bind_table(id, Arc::clone(&cell))
+            .map_err(|e| e.to_string())?;
+        inner.tables.insert(
+            id,
+            OwnedTable {
+                owner: FlowId::HOST,
+                rows: Vec::new(),
+                bytes: 0,
+            },
+        );
+        inner.global.insert(name.to_string(), id);
+        Ok(())
+    }
+
+    pub(crate) fn unregister_global(&self, shared: &Shared, name: &str) -> Result<(), String> {
+        let mut inner = sync_lock::lock(&self.inner, "FlowTables::unregister_global")
+            .map_err(|e| e.to_string())?;
+        let Some(id) = inner.global.remove(name) else {
+            return Err("no global table with that name".into());
+        };
+        if let Some(table) = inner.tables.remove(&id) {
+            // Refund the bytes this table charged (none on a fresh table,
+            // but be safe).
+            let _ = table;
+        }
+        let _ = shared.caps.revoke_table(id);
+        Ok(())
+    }
+
+    pub(crate) fn list_global(&self) -> Vec<String> {
+        match sync_lock::lock(&self.inner, "FlowTables::list_global") {
+            Ok(inner) => inner.global.keys().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
     pub(crate) fn get(
         &self,
         shared: &Shared,

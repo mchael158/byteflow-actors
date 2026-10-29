@@ -55,9 +55,17 @@ impl FlowLimit {
             });
     }
 
+    pub fn reserved_live(&self) -> usize {
+        self.live.load(Ordering::Acquire)
+    }
+
+    pub fn max_flows(&self) -> u32 {
+        self.max as u32
+    }
+
     #[cfg(test)]
     pub fn live(&self) -> usize {
-        self.live.load(Ordering::Acquire)
+        self.reserved_live()
     }
 }
 

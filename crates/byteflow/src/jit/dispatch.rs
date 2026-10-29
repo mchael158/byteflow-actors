@@ -90,21 +90,21 @@ fn try_jit_step(vm: &mut Vm, ctx: &mut JitContext, budget: u32) -> JitProbe {
         entry_pc: pc as u32,
         floats,
     };
-    let Some((exit, spent)) = try_run_hot_tagged(
+    let Some((exit, spent, unwind)) = try_run_hot_tagged(
         ctx,
         vm.chunk_arc().as_ref(),
         key,
         &mut HotCall {
             slots: &mut slots,
             budget,
-            register_count,
+            register_count: register_count as u8,
             metrics: None,
             tags: EntryTags::from_vm(vm),
         },
     ) else {
         return JitProbe::Miss;
     };
-    finish_probe(vm, &slots, exit, spent)
+    finish_probe(vm, &slots, exit, spent, unwind)
 }
 
 fn try_jit_step_runtime(
@@ -142,21 +142,21 @@ fn try_jit_step_runtime(
         entry_pc: pc as u32,
         floats,
     };
-    let Some((exit, spent)) = try_run_hot_runtime_tagged(
+    let Some((exit, spent, unwind)) = try_run_hot_runtime_tagged(
         runtime,
         vm.chunk_arc().as_ref(),
         key,
         &mut HotCall {
             slots: &mut slots,
             budget,
-            register_count,
+            register_count: register_count as u8,
             metrics,
             tags: EntryTags::from_vm(vm),
         },
     ) else {
         return JitProbe::Miss;
     };
-    finish_probe(vm, &slots, exit, spent)
+    finish_probe(vm, &slots, exit, spent, unwind)
 }
 
 /// What one probe of the current `pc` did.
@@ -169,7 +169,38 @@ enum JitProbe {
     Hit { spent: u32, stop: Option<VmResult> },
 }
 
-fn finish_probe(vm: &mut Vm, slots: &[i64], exit: JitReturn, spent: u32) -> JitProbe {
+fn finish_probe(
+    vm: &mut Vm,
+    slots: &[i64],
+    exit: JitReturn,
+    spent: u32,
+    unwind: Option<JitUnwind>,
+) -> JitProbe {
+    if let Some(unwind) = unwind {
+        return match install_unwind(vm, slots, &exit, &unwind) {
+            Ok(()) => match exit.kind {
+                super::exit::JIT_TRAP => JitProbe::Hit {
+                    spent,
+                    stop: Some(VmResult::Trap(Fault::DivideByZero)),
+                },
+                JIT_BUDGET => JitProbe::Hit {
+                    spent,
+                    stop: Some(VmResult::Yield),
+                },
+                super::exit::JIT_RETURN => JitProbe::Hit {
+                    spent,
+                    stop: Some(VmResult::Trap(Fault::Invariant(
+                        "jit return left a call stack installed",
+                    ))),
+                },
+                _ => JitProbe::Hit { spent, stop: None },
+            },
+            Err(fault) => JitProbe::Hit {
+                spent,
+                stop: Some(VmResult::Trap(fault)),
+            },
+        };
+    }
     let kind = exit.kind;
     match apply_exit_tagged(vm, slots, exit) {
         Ok(Some(result)) => JitProbe::Hit {
@@ -266,9 +297,9 @@ fn slot_capacity(vm: &Vm) -> usize {
         .map(|f| f.num_registers as usize)
         .max();
     match (max_in_chunk, vm.current_num_registers()) {
-        (Some(max_regs), Some(current)) => max_regs.max(current as usize),
+        (Some(max_regs), Some(current)) => max_regs.max(current),
         (Some(max_regs), None) => max_regs,
-        (None, Some(current)) => current as usize,
+        (None, Some(current)) => current,
         (None, None) => 0,
     }
 }
@@ -305,7 +336,7 @@ fn run_compiled_trace_with_tags(
     function: u32,
     register_count: u32,
     tags: EntryTags,
-) -> (JitReturn, u32) {
+) -> (JitReturn, u32, Option<JitUnwind>) {
     let mut call_stack = [JitCallRecord {
         return_pc: 0,
         return_function: 0,
@@ -339,18 +370,201 @@ fn run_compiled_trace_with_tags(
     };
     unsafe { (entry)(&mut frame) };
     let spent = budget.saturating_sub(frame.budget);
-    (
-        JitReturn {
-            kind: frame.exit_kind,
-            pc: frame.pc,
-            return_reg: frame.return_reg,
-            written: frame.written,
-            as_bool: frame.as_bool,
-            as_unit: frame.as_unit,
-            as_float: frame.as_float,
-        },
-        spent,
-    )
+    let ret = JitReturn {
+        kind: frame.exit_kind,
+        pc: frame.pc,
+        return_reg: frame.return_reg,
+        written: frame.written,
+        as_bool: frame.as_bool,
+        as_unit: frame.as_unit,
+        as_float: frame.as_float,
+    };
+    let depth = frame.call_depth as usize;
+    let unwind = if depth == 0 || depth > call_stack.len() {
+        None
+    } else {
+        let stride = slots.len();
+        let spill_len = stride.saturating_mul(depth);
+        let spill_len = spill_len.min(spill.len());
+        Some(JitUnwind {
+            records: call_stack[..depth].to_vec(),
+            spill: spill[..spill_len].to_vec(),
+            stride,
+            function: frame.function,
+            register_count: frame.register_count,
+        })
+    };
+    (ret, spent, unwind)
+}
+
+/// Frames a trace left on its private call stack. Index 0 is the VM frame
+/// that entered the trace. The live slots are the frame after these records.
+struct JitUnwind {
+    records: Vec<JitCallRecord>,
+    spill: Vec<i64>,
+    stride: usize,
+    function: u32,
+    register_count: u32,
+}
+
+fn install_unwind(
+    vm: &mut Vm,
+    slots: &[i64],
+    ret: &JitReturn,
+    unwind: &JitUnwind,
+) -> Result<(), Fault> {
+    let Some(caller) = unwind.records.first() else {
+        return Err(Fault::Invariant("jit unwind without a caller"));
+    };
+    let mut frames = Vec::with_capacity(unwind.records.len());
+    for index in 1..unwind.records.len() {
+        let rec = &unwind.records[index];
+        let dest = dest_reg(unwind.records[index - 1].dest_reg)?;
+        frames.push(suspended(unwind, index, rec, dest)?);
+    }
+    let dest = dest_reg(
+        unwind
+            .records
+            .last()
+            .ok_or(Fault::Invariant("jit unwind without a caller"))?
+            .dest_reg,
+    )?;
+    frames.push(live_frame(slots, ret, unwind, dest)?);
+    let window = spill_window(unwind, 0)?;
+    let updates = written_updates(
+        window,
+        caller.caller_register_count as usize,
+        &caller.written,
+        &caller.as_bool,
+        &caller.as_unit,
+        &[0; 4],
+    );
+    vm.install_jit_frames(caller.return_pc as usize, &updates, frames)
+}
+
+fn suspended(
+    unwind: &JitUnwind,
+    index: usize,
+    rec: &JitCallRecord,
+    dest: u8,
+) -> Result<(u32, u8, usize, Vec<Value>), Fault> {
+    let count = register_len(rec.caller_register_count)?;
+    let window = spill_window(unwind, index)?;
+    let registers = frame_values(
+        window,
+        count,
+        &rec.written,
+        &rec.as_bool,
+        &rec.as_unit,
+        &[0; 4],
+    );
+    Ok((rec.return_function, dest, rec.return_pc as usize, registers))
+}
+
+fn live_frame(
+    slots: &[i64],
+    ret: &JitReturn,
+    unwind: &JitUnwind,
+    dest: u8,
+) -> Result<(u32, u8, usize, Vec<Value>), Fault> {
+    let count = register_len(unwind.register_count)?;
+    let registers = frame_values(
+        slots,
+        count,
+        &ret.written,
+        &ret.as_bool,
+        &ret.as_unit,
+        &ret.as_float,
+    );
+    Ok((unwind.function, dest, ret.pc as usize, registers))
+}
+
+fn spill_window(unwind: &JitUnwind, index: usize) -> Result<&[i64], Fault> {
+    let start = index
+        .checked_mul(unwind.stride)
+        .ok_or(Fault::Invariant("jit spill index overflow"))?;
+    let end = start
+        .checked_add(unwind.stride)
+        .ok_or(Fault::Invariant("jit spill index overflow"))?;
+    unwind
+        .spill
+        .get(start..end)
+        .ok_or(Fault::Invariant("jit spill is shorter than its call stack"))
+}
+
+fn dest_reg(raw: u32) -> Result<u8, Fault> {
+    u8::try_from(raw).map_err(|_| Fault::Invariant("jit dest register does not fit"))
+}
+
+fn register_len(raw: u32) -> Result<usize, Fault> {
+    let count = usize::try_from(raw).map_err(|_| Fault::Invariant("jit register count"))?;
+    if count > usize::from(u8::MAX) {
+        return Err(Fault::Invariant("jit frame is wider than a register file"));
+    }
+    Ok(count)
+}
+
+fn written_updates(
+    window: &[i64],
+    count: usize,
+    written: &[u64; 4],
+    as_bool: &[u64; 4],
+    as_unit: &[u64; 4],
+    as_float: &[u64; 4],
+) -> Vec<(u8, Value)> {
+    let mut out = Vec::new();
+    for index in 0..count.min(window.len()).min(256) {
+        if !tag_bit(written, index) {
+            continue;
+        }
+        let Some(reg) = u8::try_from(index).ok() else {
+            break;
+        };
+        let Some(bits) = window.get(index).copied() else {
+            break;
+        };
+        out.push((reg, tagged_value(bits, index, as_bool, as_unit, as_float)));
+    }
+    out
+}
+
+fn frame_values(
+    window: &[i64],
+    count: usize,
+    written: &[u64; 4],
+    as_bool: &[u64; 4],
+    as_unit: &[u64; 4],
+    as_float: &[u64; 4],
+) -> Vec<Value> {
+    let mut registers = vec![Value::Unit; count];
+    for (index, reg) in registers.iter_mut().enumerate() {
+        if !tag_bit(written, index) {
+            continue;
+        }
+        let Some(bits) = window.get(index).copied() else {
+            continue;
+        };
+        *reg = tagged_value(bits, index, as_bool, as_unit, as_float);
+    }
+    registers
+}
+
+fn tagged_value(
+    bits: i64,
+    index: usize,
+    as_bool: &[u64; 4],
+    as_unit: &[u64; 4],
+    as_float: &[u64; 4],
+) -> Value {
+    if tag_bit(as_unit, index) {
+        Value::Unit
+    } else if tag_bit(as_bool, index) {
+        Value::Bool(bits != 0)
+    } else if tag_bit(as_float, index) {
+        Value::Float(f64::from_bits(bits as u64))
+    } else {
+        Value::Int(bits)
+    }
 }
 
 /// Run a cached trace by reference.
@@ -396,7 +610,13 @@ pub fn try_run_hot(
             tags: EntryTags::INT,
         },
     )
-    .map(|(ret, _)| ret.into_reason())
+    .and_then(|(ret, _, unwind)| {
+        if unwind.is_some() {
+            None
+        } else {
+            Some(ret.into_reason())
+        }
+    })
 }
 
 fn try_run_hot_tagged(
@@ -404,8 +624,11 @@ fn try_run_hot_tagged(
     chunk: &Chunk,
     key: TraceKey,
     call: &mut HotCall<'_>,
-) -> Option<(JitReturn, u32)> {
+) -> Option<(JitReturn, u32, Option<JitUnwind>)> {
     if ctx.cache.get(&key).is_none() {
+        if ctx.cache.is_failed(&key) {
+            return None;
+        }
         if !ctx.hot.hit(key, ctx.hot_threshold) {
             if let Some(m) = call.metrics {
                 crate::scheduler::RuntimeMetrics::inc(&m.jit_misses);
@@ -421,6 +644,7 @@ fn try_run_hot_tagged(
                 }
             }
             Err(_) => {
+                ctx.cache.mark_failed(key);
                 if let Some(m) = call.metrics {
                     crate::scheduler::RuntimeMetrics::inc(&m.jit_compile_failures);
                 }
@@ -465,7 +689,13 @@ pub fn try_run_hot_runtime(
             tags: EntryTags::INT,
         },
     )
-    .map(|(ret, _)| ret.into_reason())
+    .and_then(|(ret, _, unwind)| {
+        if unwind.is_some() {
+            None
+        } else {
+            Some(ret.into_reason())
+        }
+    })
 }
 
 fn try_run_hot_runtime_tagged(
@@ -473,7 +703,11 @@ fn try_run_hot_runtime_tagged(
     chunk: &Chunk,
     key: TraceKey,
     call: &mut HotCall<'_>,
-) -> Option<(JitReturn, u32)> {
+) -> Option<(JitReturn, u32, Option<JitUnwind>)> {
+    if runtime.is_failed(&key) {
+        return None;
+    }
+
     if let Some(copy) = runtime.get_trace(&key) {
         if let Some(m) = call.metrics {
             crate::scheduler::RuntimeMetrics::inc(&m.jit_executions);
@@ -505,6 +739,7 @@ fn try_run_hot_runtime_tagged(
         match with_jit_module(|module| TraceCompiler::new(module).compile_trace(chunk, key)) {
             Ok(trace) => trace,
             Err(_) => {
+                runtime.mark_failed(key);
                 if let Some(m) = call.metrics {
                     crate::scheduler::RuntimeMetrics::inc(&m.jit_compile_failures);
                 }
@@ -570,7 +805,7 @@ fn apply_exit_tagged(
                 Some(v) => v.clone(),
                 None => {
                     let frame_size = match vm.current_num_registers() {
-                        Some(n) => n,
+                        Some(n) => n as u8,
                         None => 0,
                     };
                     return Err(Fault::RegisterOutOfRange {

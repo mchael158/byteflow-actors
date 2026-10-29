@@ -54,7 +54,7 @@ pub use crate::bytecode::RestartPolicy;
 pub use capability::{CapError, CapRights, Capability};
 pub use delegate::{exec_delegate, DelegateError};
 pub use distribution::{
-    decode_frame, encode_frame, DistributionBridge, OutboundHop, RemoteFrameError,
+    decode_frame, encode_frame, DistributionBridge, OutboundHop, RemoteFrameDedup, RemoteFrameError,
 };
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};
@@ -68,7 +68,7 @@ pub use mailbox::{
     Delivery, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
     MailboxFullReason, MailboxStats, OverflowPolicy, WaitEpoch,
 };
-pub use metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
+pub use metrics::{RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSnapshot};
 pub use monitor::{DownEvent, FlowExitReason, MonitorRef};
 pub use process::{next_flow_id, Flow, FlowId, FlowMetrics, FlowOutcome};
 pub use quota::{FlowQuota, QuotaConfig, QuotaError};

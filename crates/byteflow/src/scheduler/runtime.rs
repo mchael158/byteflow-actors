@@ -10,7 +10,7 @@ use super::error::SpawnError;
 use super::finalize::finalize_flow;
 use super::handle::FlowHandle;
 use super::mailbox::{Delivery, Mailbox, MailboxConfig, MailboxFullReason};
-use super::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
+use super::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSnapshot};
 use super::monitor::FlowExitReason;
 use super::process::{Flow, FlowId, FlowOutcome};
 use super::runqueue::{Injector, Stealer, Worker as LocalDeque};
@@ -74,6 +74,9 @@ pub struct RuntimeConfig {
     /// Host async bridge for [`crate::Opcode::HostAwait`]. `None` fails
     /// any `HostAwait` closed. Not a `CallNative` / std-native slot.
     pub host_await: Option<Arc<dyn super::host_await::HostAwaitBridge>>,
+    /// `0` = disabled. When set, [`Runtime::deliver_frame`] ignores duplicate
+    /// `(sender, request_id)` pairs within the window (at-least-once wire).
+    pub remote_dedup_window: u32,
     /// Host queue for [`crate::Opcode::SendRemote`]. `None` fails that opcode.
     /// Byteflow does not open sockets; the embedder drains the bridge.
     pub distribution: Option<Arc<super::distribution::DistributionBridge>>,
@@ -140,6 +143,7 @@ impl Default for RuntimeConfig {
             max_monitors: 0,
             max_registry_names: 0,
             host_await: None,
+            remote_dedup_window: 0,
             distribution: None,
             max_runtime_bytes: 256 * 1024 * 1024,
             trust: crate::bytecode::TrustLevel::Untrusted,
@@ -214,6 +218,8 @@ pub struct Shared {
     pub(crate) host_await_failures: super::host_await::HostAwaitFailures,
     /// `SendRemote` queue. `None` fails the opcode.
     pub(crate) distribution: Option<Arc<super::distribution::DistributionBridge>>,
+    /// Optional replay filter for inbound remote frames.
+    pub(crate) remote_dedup: Option<Arc<super::distribution::RemoteFrameDedup>>,
     /// Embedder copy of scheduler diagnostics. `None` leaves stderr gating
     /// in [`crate::log`] unchanged.
     pub(crate) log_sink: Option<Arc<dyn crate::log::LogSink>>,
@@ -366,6 +372,13 @@ impl Runtime {
             host_replay: Mutex::new(None),
             host_await_failures: super::host_await::HostAwaitFailures::new(),
             distribution: config.distribution.clone(),
+            remote_dedup: if config.remote_dedup_window == 0 {
+                None
+            } else {
+                Some(super::distribution::RemoteFrameDedup::new(
+                    config.remote_dedup_window as usize,
+                ))
+            },
             log_sink: config.log.clone(),
             tables: super::table::FlowTables::new(),
             flow_supervisors: Mutex::new(Vec::new()),
@@ -459,6 +472,23 @@ impl Runtime {
 
     pub fn metrics(&self) -> RuntimeMetricsSnapshot {
         self.shared.metrics.snapshot()
+    }
+
+    /// Point-in-time view for dashboards and debug tooling.
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            metrics: self.metrics(),
+            live_flows: self.live_flows(),
+            flow_limit_live: self.shared.flow_limit.reserved_live(),
+            max_flows: self.shared.flow_limit.max_flows(),
+            distribution_pending: self
+                .shared
+                .distribution
+                .as_ref()
+                .and_then(|b| b.outbound_pending().ok()),
+            memory: self.memory_snapshot(),
+            workers: self.worker_count(),
+        }
     }
 
     /// Approximate number of flows currently registered in the directory.
@@ -567,6 +597,16 @@ impl Runtime {
     /// already be registered on this node; the host still owns the socket.
     pub fn deliver_frame(&self, bytes: &[u8]) -> Result<(), super::distribution::RemoteFrameError> {
         let hop = super::distribution::decode_frame(bytes)?;
+        if hop.message.request_id != 0 {
+            if let Some(dedup) = self.shared.remote_dedup.as_ref() {
+                if dedup
+                    .is_duplicate(hop.sender.as_u64(), hop.message.request_id)
+                    .map_err(|_| super::distribution::RemoteFrameError::Unavailable)?
+                {
+                    return Ok(());
+                }
+            }
+        }
         let cap = match self.shared.registry.whereis(hop.name.as_ref()) {
             Ok(Some(cap)) => cap,
             Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
@@ -1005,6 +1045,33 @@ impl Runtime {
     /// [`Drop`] does the same work when it runs off a worker thread. On a
     /// worker thread it only signals: joining that thread from itself would
     /// deadlock the pool.
+    /// Register a process-wide (global) table under `name`.
+    ///
+    /// A flow that calls `TableOpen(name)` afterwards receives a Cap to this
+    /// table instead of opening its own per-flow table. The table survives
+    /// any single flow's exit; each opener's Cap is revoked when that flow
+    /// exits. Names must be 1..=256 bytes and unique.
+    pub fn register_table(&self, name: &str) -> Result<(), super::error::RuntimeError> {
+        self.shared
+            .tables
+            .register_global(&self.shared, name)
+            .map_err(super::error::RuntimeError::from)
+    }
+
+    /// Drop a previously registered global table and revoke every Cap that
+    /// still references it.
+    pub fn unregister_table(&self, name: &str) -> Result<(), super::error::RuntimeError> {
+        self.shared
+            .tables
+            .unregister_global(&self.shared, name)
+            .map_err(super::error::RuntimeError::from)
+    }
+
+    /// Names of the currently registered global tables.
+    pub fn global_tables(&self) -> Vec<String> {
+        self.shared.tables.list_global()
+    }
+
     pub fn shutdown(mut self) {
         self.finish();
     }

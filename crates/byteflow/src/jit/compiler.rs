@@ -897,7 +897,6 @@ fn emit_instruction(
                 pc_to_block,
                 call_depth_ptr,
                 call_stack_ptr,
-                trap_block,
                 pc,
                 instr,
             )?;

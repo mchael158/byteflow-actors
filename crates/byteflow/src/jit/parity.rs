@@ -323,6 +323,27 @@ fn map_and_record_reads_match_after_the_trace_stops() -> TestResult {
 }
 
 #[test]
+fn recursion_past_the_jit_call_stack_matches_the_interpreter() -> TestResult {
+    for n in [0, 4, 40] {
+        let (main, chunk) = countdown(n);
+        let chunk = Arc::new(chunk);
+        let mut plain = Vm::new(Arc::clone(&chunk), NativeTable::empty(), main, &[])?;
+        let left = plain.run(10_000);
+        let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+        ctx.hot_threshold = 1;
+        let mut vm = Vm::new(Arc::clone(&chunk), NativeTable::empty(), main, &[])?;
+        let right = run_vm_with_jit(&mut vm, 10_000, &mut ctx);
+        if !same_result(&left, &right) {
+            return Err(format!("n={n}: interpreter {left:?} jit {right:?}").into());
+        }
+        if !matches!(right, VmResult::Complete(Value::Int(got)) if got == i64::from(n)) {
+            return Err(format!("n={n}: {right:?}").into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn trap_and_halt_match_after_the_trace_stops() -> TestResult {
     deopts("trap", trap_after_load(7), Opcode::Trap)?;
     deopts("trap-neg", trap_after_load(-1), Opcode::Trap)?;
@@ -368,14 +389,14 @@ fn deopts(name: &str, chunk: crate::Chunk, op: Opcode) -> TestResult {
         floats: false,
     };
     let mut ctx = JitContext::new(Arc::clone(&chunk))?;
+    let Some(pc) = chunk.code.iter().position(|instr| instr.op == op) else {
+        return Err(format!("{name}: missing {op:?}").into());
+    };
     match force_compile(&mut ctx, &chunk, key) {
         Ok(()) => {}
         Err(CompileError::EmptyTrace { .. }) => return Ok(()),
         Err(err) => return Err(format!("{name}: {err}").into()),
     }
-    let Some(pc) = chunk.code.iter().position(|instr| instr.op == op) else {
-        return Err(format!("{name}: missing {op:?}").into());
-    };
     let inside = ctx
         .cache
         .get(&key)
@@ -648,6 +669,26 @@ fn branch() -> crate::Chunk {
     })
 }
 
+fn countdown(n: i32) -> (u32, crate::Chunk) {
+    let mut b = ChunkBuilder::new("countdown");
+    let rec = b.begin_function("rec", 1, 2);
+    let recurse = b.new_label();
+    b.emit_eq_imm(1, 0, 0);
+    b.emit_branch(1, recurse);
+    b.emit_load_imm(0, 0);
+    b.emit_return(0);
+    b.bind_label(recurse);
+    b.emit_sub_imm(0, 0, 1);
+    b.emit_call(0, rec, 1);
+    b.emit_add_imm(0, 0, 1);
+    b.emit_return(0);
+    let main = b.begin_function("main", 0, 1);
+    b.emit_load_imm(0, n);
+    b.emit_call(0, rec, 1);
+    b.emit_return(0);
+    (main, b.finish())
+}
+
 fn call() -> crate::Chunk {
     let mut b = ChunkBuilder::new("call");
     let child = b.begin_function("child", 0, 1);
@@ -898,7 +939,7 @@ fn len_of_int(op: Opcode) -> crate::Chunk {
             Opcode::ListLen => b.emit_list_len(1, 0),
             Opcode::MapLen => b.emit_map_len(1, 0),
             Opcode::RecordLen => b.emit_record_len(1, 0),
-            _ => b.emit_list_len(1, 0),
+            _ => return,
         }
         b.emit_return(1);
     })

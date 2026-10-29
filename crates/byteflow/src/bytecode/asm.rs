@@ -166,7 +166,7 @@ fn parse_quoted(text: &str, line: usize) -> Result<String, AssembleError> {
 /// Quoted string and the unparsed tail after the closing quote.
 ///
 /// Byte offsets follow the source, including multi-byte characters. Escape
-/// bodies are ASCII (`\\`, `\"`, `\n`).
+/// bodies are ASCII (`\\`, `\"`, `\n`, `\r`).
 fn take_quoted(text: &str, line: usize) -> Result<(String, &str), AssembleError> {
     let text = text.trim_start();
     if !text.starts_with('"') {
@@ -183,6 +183,7 @@ fn take_quoted(text: &str, line: usize) -> Result<(String, &str), AssembleError>
                     Some('\\') => out.push('\\'),
                     Some('"') => out.push('"'),
                     Some('n') => out.push('\n'),
+                    Some('r') => out.push('\r'),
                     _ => return Err(syn(line, "bad escape")),
                 }
                 consumed += 1;
@@ -350,6 +351,7 @@ fn push_quoted(out: &mut String, text: &str) {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             c => out.push(c),
         }
     }
@@ -421,6 +423,7 @@ fn take_value(text: &str, line: usize) -> Result<(Value, &str), AssembleError> {
                         Some('\\') => owned.push('\\'),
                         Some('"') => owned.push('"'),
                         Some('n') => owned.push('\n'),
+                        Some('r') => owned.push('\r'),
                         _ => return Err(syn(line, "bad escape")),
                     }
                     consumed += 1;
@@ -1404,6 +1407,24 @@ mod tests {
             return Err(AssembleError::Syntax {
                 line: 0,
                 message: "unquoted function name".into(),
+            });
+        }
+        round_trip(chunk)
+    }
+
+    #[test]
+    fn carriage_return_in_names_and_strings_round_trips() -> Result<(), AssembleError> {
+        let mut b = ChunkBuilder::new("chunk\rname");
+        b.const_(Value::Str("hi\rthere".into()));
+        b.begin_function("fn\rname", 0, 1);
+        b.emit_load_const(0, 0);
+        b.emit_return(0);
+        let chunk = b.finish();
+        let text = disassemble(&chunk);
+        if text.contains('\r') {
+            return Err(AssembleError::Syntax {
+                line: 0,
+                message: format!("raw carriage return split the listing:\n{text}"),
             });
         }
         round_trip(chunk)

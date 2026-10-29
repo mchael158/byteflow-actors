@@ -117,7 +117,7 @@ pub const MAX_RECORD_LEN: usize = 256;
 
 /// Key of a [`Value::Map`]. Floats are not keys: equality would not be
 /// a useful match, and a NaN key could never be read back.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MapKey {
     Int(i64),
     Str(Arc<str>),
@@ -211,11 +211,10 @@ pub enum Value {
 /// [`Value::try_map`] rejects both; the decoder reports the duplicate on its
 /// own so a hostile module is not described as too deep.
 pub(crate) fn map_has_duplicate_key(entries: &[(MapKey, Value)]) -> bool {
-    for index in 0..entries.len() {
-        for earlier in 0..index {
-            if entries[index].0 == entries[earlier].0 {
-                return true;
-            }
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if !seen.insert(&entry.0) {
+            return true;
         }
     }
     false

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -37,17 +37,27 @@ pub struct CompiledTrace {
 
 pub struct TraceCache {
     traces: HashMap<TraceKey, CompiledTrace>,
+    failed: HashSet<TraceKey>,
 }
 
 impl TraceCache {
     pub fn new() -> Self {
         Self {
             traces: HashMap::new(),
+            failed: HashSet::new(),
         }
     }
 
     pub fn get(&self, key: &TraceKey) -> Option<&CompiledTrace> {
         self.traces.get(key)
+    }
+
+    pub fn is_failed(&self, key: &TraceKey) -> bool {
+        self.failed.contains(key)
+    }
+
+    pub fn mark_failed(&mut self, key: TraceKey) {
+        self.failed.insert(key);
     }
 
     pub fn insert(&mut self, key: TraceKey, trace: CompiledTrace) {
@@ -56,6 +66,7 @@ impl TraceCache {
 
     pub fn clear(&mut self) {
         self.traces.clear();
+        self.failed.clear();
     }
 
     #[cfg(test)]
