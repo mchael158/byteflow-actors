@@ -35,6 +35,18 @@
 //! `trap_exit` / `SetTrapExit` and linked `TAG_SYS_EXIT` hops.
 //!
 //! Hop samples require [`crate::std_native_table`].
+//!
+//! ## Flow / “actor” patterns (all correct when used in the right role)
+//!
+//! | Role | Pattern | Examples |
+//! |------|---------|----------|
+//! | Long-lived service | [`Fn::actor_loop`](crate::Fn::actor_loop) + `send_reply` | [`server_loop`], [`named_service`], [`atomic_actors`] server, [`ask_reply`] |
+//! | One-shot worker | `receive_match_imm(tag)` → handle → `send_reply` → `exit` | [`ping_pong`] `pong`, [`atomic_request_reply`] server, [`cap_in_*`] |
+//! | RPC client | [`Fn::ask`] / `ask_timeout` + `hop_fresh` | [`atomic_actors`] client, [`ask_reply`] main |
+//! | Cast client | `send` / `cast` + `receive_match_corr_imm` or `receive_match_imm` | [`ping_pong`] main, [`selective_receive`] |
+//!
+//! Prefer shared tags in [`TAG_REQ`] / [`TAG_REP`] / …; mint ids with [`Fn::hop_fresh`]
+//! when correlating multiple in-flight hops on one flow.
 
 use crate::natives::std_native;
 use crate::{Chunk, Program};
@@ -73,7 +85,7 @@ pub fn add_forty_two() -> Chunk {
 pub fn ping_pong() -> Chunk {
     let mut p = Program::new("ping-pong");
     let pong = p.function("pong", 0, |f| {
-        let msg = f.receive();
+        let msg = f.receive_match_imm(TAG_PING as u16);
         let payload = f.hop_payload(msg);
         f.add_imm(payload, 1);
         f.send_reply(msg, TAG_PONG, payload);
@@ -96,7 +108,7 @@ pub fn ping_pong() -> Chunk {
 pub fn atomic_request_reply() -> Chunk {
     let mut p = Program::new("atomic-request-reply");
     let server = p.function("server", 0, |f| {
-        let msg = f.receive();
+        let msg = f.receive_match_imm(TAG_REQ as u16);
         f.native1_on(msg, N_PRINT);
         let payload = f.hop_payload(msg);
         f.add_imm(payload, 1);
@@ -127,7 +139,7 @@ pub fn selective_receive() -> Chunk {
         let payload = f.hop_payload(msg);
         f.add_imm(payload, 1);
         f.send_reply(msg, TAG_REP, payload);
-        let junk = f.receive();
+        let junk = f.receive_match_imm(TAG_JUNK as u16);
         let tag = f.hop_tag(junk);
         let is_junk = f.eq_imm(tag, TAG_JUNK);
         let trap_lbl = f.label();
@@ -172,7 +184,7 @@ pub fn selective_receive_after() -> Chunk {
         let payload = f.hop_payload(msg);
         f.add_imm(payload, 1);
         f.send_reply(msg, TAG_REP, payload);
-        let junk = f.receive();
+        let junk = f.receive_match_imm(TAG_JUNK as u16);
         let tag = f.hop_tag(junk);
         let is_junk = f.eq_imm(tag, TAG_JUNK);
         let trap_lbl = f.label();
@@ -201,7 +213,7 @@ pub fn selective_receive_after() -> Chunk {
 pub fn process_alive() -> Chunk {
     let mut p = Program::new("process-alive");
     let parked = p.function("parked", 0, |f| {
-        let _msg = f.receive();
+        let _msg = f.receive_match_imm(TAG_REQ as u16);
         let z = f.load_i32(0);
         f.return_(z);
     });
@@ -255,7 +267,7 @@ pub fn receive_match_eq() -> Chunk {
         let payload = f.hop_payload(msg);
         f.add_imm(payload, 1);
         f.send_reply(msg, TAG_REP, payload);
-        let junk = f.receive();
+        let junk = f.receive_match_imm(TAG_REQ as u16);
         let got = f.hop_payload(junk);
         let zero = f.eq_imm(got, 0);
         let trap_lbl = f.label();
@@ -284,7 +296,7 @@ pub fn receive_match_eq() -> Chunk {
 pub fn exit_signal() -> Chunk {
     let mut p = Program::new("exit-signal");
     let parked = p.function("parked", 0, |f| {
-        let _msg = f.receive();
+        let _msg = f.receive_match_imm(TAG_REQ as u16);
         let z = f.load_i32(0);
         f.return_(z);
     });
@@ -305,7 +317,7 @@ pub fn exit_signal() -> Chunk {
 pub fn supervised_tree() -> Chunk {
     let mut p = Program::new("supervised-tree");
     let worker = p.function("worker", 0, |f| {
-        let _msg = f.receive();
+        let _msg = f.receive_match_imm(TAG_REQ as u16);
         let z = f.load_i32(0);
         f.return_(z);
     });
@@ -341,7 +353,7 @@ pub fn receive_match_kind() -> Chunk {
         let msg = f.receive_match_kind(2);
         let payload = f.hop_payload(msg);
         f.send_reply(msg, TAG_REP, payload);
-        let _junk = f.receive();
+        let _junk = f.receive_match_imm(TAG_JUNK as u16);
         f.exit(payload);
     });
     p.function("main", 0, |f| {
@@ -360,15 +372,16 @@ pub fn receive_match_kind() -> Chunk {
     p.build()
 }
 
-/// Atomic request/reply via `Ask` (RPC hop).
+/// Atomic request/reply via `Ask` (RPC hop). Server uses [`Fn::actor_loop`]
+/// so repeated `Ask`s on the same Cap stay valid (CLI / long-lived service).
 pub fn ask_reply() -> Chunk {
     let mut p = Program::new("ask-reply");
     let server = p.function("server", 0, |f| {
-        let msg = f.receive_match_imm(TAG_REQ as u16);
-        let payload = f.hop_payload(msg);
-        f.add_imm(payload, 1);
-        f.send_reply(msg, TAG_REP, payload);
-        f.exit(payload);
+        f.actor_loop(TAG_REQ as u16, |f, msg| {
+            let payload = f.hop_payload(msg);
+            f.add_imm(payload, 1);
+            f.send_reply(msg, TAG_REP, payload);
+        });
     });
     p.function("main", 0, |f| {
         let server_cap = f.spawn(server, &[]);
@@ -385,7 +398,7 @@ pub fn ask_reply() -> Chunk {
 pub fn ask_timeout_expires() -> Chunk {
     let mut p = Program::new("ask-timeout");
     let server = p.function("server", 0, |f| {
-        let _msg = f.receive();
+        let _msg = f.receive_match_imm(TAG_REQ as u16);
         let ms = f.load_i32(10_000);
         f.sleep(ms);
         let zero = f.load_i32(0);
@@ -407,7 +420,7 @@ pub fn ask_timeout_expires() -> Chunk {
 pub fn ask_target_exits() -> Chunk {
     let mut p = Program::new("ask-target-exits");
     let server = p.function("server", 0, |f| {
-        let _msg = f.receive();
+        let _msg = f.receive_match_imm(TAG_REQ as u16);
         let z = f.load_i32(0);
         f.return_(z);
     });
@@ -551,7 +564,7 @@ pub fn atomic_actors() -> Chunk {
 pub fn cap_in_payload() -> Chunk {
     let mut p = Program::new("cap-in-payload");
     let server = p.function("server", 0, |f| {
-        let msg = f.receive();
+        let msg = f.receive_match_imm(TAG_REQ as u16);
         let dest = f.hop_payload(msg);
         let payload = f.load_i32(42);
         let reply = f.hop_fresh(TAG_REP, payload);
@@ -574,7 +587,7 @@ pub fn cap_in_payload() -> Chunk {
 pub fn cap_in_list() -> Chunk {
     let mut p = Program::new("cap-in-list");
     let server = p.function("server", 0, |f| {
-        let msg = f.receive();
+        let msg = f.receive_match_imm(TAG_REQ as u16);
         let list = f.hop_payload(msg);
         let dest = f.list_get(list, 0);
         let payload = f.load_i32(42);
@@ -599,7 +612,7 @@ pub fn cap_in_list() -> Chunk {
 pub fn forged_sender_send() -> Chunk {
     let mut p = Program::new("forged-sender-send");
     let server = p.function("server", 0, |f| {
-        let msg = f.receive();
+        let msg = f.receive_match_imm(TAG_REQ as u16);
         let sender = f.hop_sender(msg);
         f.send_reply(msg, TAG_REP, sender);
         f.exit(sender);
@@ -672,8 +685,8 @@ pub fn waiting_send() -> Chunk {
     p.function("server", 0, |f| {
         let ms = f.load_i32(50);
         f.sleep(ms);
-        let _first = f.receive();
-        let second = f.receive();
+        let _first = f.receive_match_imm(TAG_REQ as u16);
+        let second = f.receive_match_imm(TAG_REQ as u16);
         let out = f.hop_payload(second);
         f.return_(out);
     });
@@ -1325,7 +1338,7 @@ mod tests {
         });
         p.function("boom", 0, |f| {
             // Stay parked until the host wakes us *after* the link is installed.
-            let _wake = f.receive();
+            let _wake = f.receive_match_imm(TAG_READY as u16);
             f.trap(1);
         });
         let rt = tiny_natives(p.build())?;
@@ -1344,7 +1357,7 @@ mod tests {
         rt.link(trapper.id(), killer.id())?;
         rt.send(
             killer.id(),
-            Value::Message(Message::request(0, TAG_REQ as u16, 0)),
+            Value::Message(Message::request(0, TAG_READY as u16, 0)),
         )?;
         let boom_out = killer.join();
         let trap_out = trapper.join();
@@ -1570,7 +1583,7 @@ mod tests {
 
         let mut p = Program::new("send-charge");
         let child = p.function("child", 0, |f| {
-            let _msg = f.receive();
+            let _msg = f.receive_match_imm(1);
             let one = f.load_i32(1);
             f.return_(one);
         });
@@ -1655,7 +1668,7 @@ mod tests {
     {
         let mut p = Program::new("nested-stamp");
         let server = p.function("server", 0, |f| {
-            let msg = f.receive();
+            let msg = f.receive_match_imm(2);
             let inner = f.hop_payload(msg);
             let who = f.hop_sender(inner);
             f.send_reply(msg, 1, who);
@@ -1688,7 +1701,7 @@ mod tests {
     {
         let mut p = Program::new("nested-forward");
         let checker = p.function("checker", 0, |f| {
-            let msg = f.receive();
+            let msg = f.receive_match_imm(2);
             let inner = f.hop_payload(msg);
             let who = f.hop_sender(inner);
             f.send_reply(msg, 1, who);
@@ -1696,7 +1709,7 @@ mod tests {
         });
         let relay = p.function("relay", 1, |f| {
             let checker = f.reg(0);
-            let incoming = f.receive();
+            let incoming = f.receive_match_imm(1);
             let wrapped = f.hop_fresh(2, incoming);
             let reply = f.ask(checker, wrapped);
             let who = f.hop_payload(reply);
@@ -1859,11 +1872,11 @@ mod tests {
     fn ask_reply_preserves_request_id() -> Result<(), Box<dyn std::error::Error>> {
         let mut p = Program::new("ask-corr");
         let server = p.function("server", 0, |f| {
-            let msg = f.receive_match_imm(TAG_REQ as u16);
-            let payload = f.hop_payload(msg);
-            f.add_imm(payload, 1);
-            f.send_reply(msg, TAG_REP, payload);
-            f.exit(payload);
+            f.actor_loop(TAG_REQ as u16, |f, msg| {
+                let payload = f.hop_payload(msg);
+                f.add_imm(payload, 1);
+                f.send_reply(msg, TAG_REP, payload);
+            });
         });
         p.function("main", 0, |f| {
             let server_cap = f.spawn(server, &[]);
