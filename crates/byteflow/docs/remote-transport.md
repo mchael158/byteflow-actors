@@ -33,7 +33,7 @@ caps at 1024 pending hops; a slow peer eventually fails `SendRemote` on the orig
 instead of buffering without limit.
 
 Reconnect: on write failure the outbound writer drops the TCP session, reconnects, and
-**retries the same wire frame** before dequeuing the next one (reference behaviour;
+**retries the same wire frame** before dequeuing the next one (reference behavior;
 production code should add jitter, metrics, and circuit breaking).
 
 After the sender runtime finishes, call [`wait_bridge_drained`], then
@@ -44,6 +44,10 @@ Diagnostics (`encode_frame` failure stops the outbound pump, I/O, `deliver_frame
 failure, session limit) go to stderr when `BYTEFLOW_LOG=info` (same gate as the
 scheduler). Hops left on the bridge after a pump stop are not drained until the
 embedder stops the handle or fixes the encoder input.
+
+If `encode_frame` fails **after** the hop was already removed from the bridge, that
+hop is lost (the pump stops fail-closed; it does not skip and continue). Fix the
+hop or reject it before it reaches the bridge.
 
 ## UDP (datagram)
 
@@ -66,8 +70,11 @@ Same-process delivery without sockets: [`examples/remote_hop.rs`](../examples/re
 
 ## What you still own
 
-- Mapping [`OutboundHop::node`] to `SocketAddr` (or DNS)
+- Mapping [`OutboundHop::node`] to `SocketAddr` (or DNS) — [`NodeRouter`] /
+  [`StaticNodeRouter`], or your own table
 - TLS, authentication, rate limits
+- Optional idempotency: peer [`RuntimeConfig::remote_dedup_window`] (see
+  [`production-embedding.md`](production-embedding.md))
 - Multi-hop routing and persistence
 - Handling [`RemoteFrameError::Mailbox`] (peer inbox full)
 - Tuning [`TcpInboundConfig::max_sessions`] for your expected fan-in (default `64`)
@@ -79,3 +86,13 @@ Same-process delivery without sockets: [`examples/remote_hop.rs`](../examples/re
 [`send_wire_frame_udp`]: ../src/transport/mod.rs
 [`recv_wire_frame_udp`]: ../src/transport/mod.rs
 [`DEFAULT_MAX_WIRE_BYTES`]: ../src/transport/mod.rs
+[`TcpOutboundHandle::wait_wire_drained`]: ../src/transport/mod.rs
+[`TcpOutboundHandle::stop`]: ../src/transport/mod.rs
+[`TcpInboundConfig::max_sessions`]: ../src/transport/mod.rs
+[`OutboundHop::node`]: ../src/scheduler/distribution.rs
+[`RemoteFrameError::Mailbox`]: ../src/scheduler/distribution.rs
+[`NodeRouter`]: ../src/transport/router.rs
+[`StaticNodeRouter`]: ../src/transport/router.rs
+[`Runtime::deliver_frame`]: ../src/scheduler/runtime.rs
+[`DistributionBridge`]: ../src/scheduler/distribution.rs
+[`RuntimeConfig::remote_dedup_window`]: ../src/scheduler/runtime.rs

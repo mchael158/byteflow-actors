@@ -13,9 +13,12 @@ a deployment.
    start.
 2. Keep [`TrustLevel::Untrusted`] unless you control every constant in the chunk.
 3. Prefer [`QuotaConfig::sandbox`] and explicit [`RuntimeConfig::max_flows`],
-   [`max_ask_waits`], relation caps.
-4. Do **not** expose [`Runtime::send(FlowId, …)`] to untrusted plugins; use
-   Caps and confined spawns.
+   [`RuntimeConfig::max_ask_waits`], and relation caps (`max_links`, `max_monitors`,
+   `max_registry_names`).
+4. Do **not** expose [`Runtime::send`] to untrusted plugins; use Caps and confined spawns.
+5. For replayed remote frames, set [`RuntimeConfig::remote_dedup_window`] to a non-zero
+   window (for example `4096`). [`RemoteFrameDedup`] is wired automatically; duplicates
+   are acknowledged with `Ok(())` and are not delivered twice.
 
 ## Shutdown (liveness)
 
@@ -74,3 +77,11 @@ around the whole [`Runtime`]).
 [`Runtime::snapshot`]: ../src/scheduler/runtime.rs
 [`RuntimeConfig::log`]: ../src/scheduler/runtime.rs
 [`HostAwaitBridge`]: ../src/scheduler/host_await.rs
+[`TrustLevel::Untrusted`]: ../src/bytecode/mod.rs
+[`QuotaConfig::sandbox`]: ../src/scheduler/quota.rs
+[`RuntimeConfig::max_flows`]: ../src/scheduler/runtime.rs
+[`RuntimeConfig::max_ask_waits`]: ../src/scheduler/runtime.rs
+[`RuntimeConfig::remote_dedup_window`]: ../src/scheduler/runtime.rs
+[`Runtime::send`]: ../src/scheduler/runtime.rs
+[`Runtime`]: ../src/scheduler/runtime.rs
+[`remote-transport.md`]: remote-transport.md

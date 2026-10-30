@@ -33,7 +33,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.20"
+byteflow-actors = "0.9.21"
 ```
 
 ```rust
@@ -246,6 +246,7 @@ Design guides: [`docs/atomic-hop.md`](docs/atomic-hop.md) ·
 [`docs/mailbox.md`](docs/mailbox.md) ·
 [`docs/properties.md`](docs/properties.md) ·
 [`docs/host-await.md`](docs/host-await.md) ·
+[`docs/remote-transport.md`](docs/remote-transport.md) ·
 [`docs/vm-safety.md`](docs/vm-safety.md) ·
 [`docs/error-model.md`](docs/error-model.md) ·
 [`docs/untrusted.md`](docs/untrusted.md) ·

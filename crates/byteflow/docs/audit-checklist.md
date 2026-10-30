@@ -8,15 +8,15 @@ Track hardening work derived from the internal architecture audit. Status:
 | ID | Item | Status |
 |----|------|--------|
 | S-01 | Document that inbound TCP has no auth; require TLS/firewall in production | **done** — [`production-embedding.md`](production-embedding.md) |
-| S-01 | Example uses channel deliver (no `Mutex<Runtime>`) | **done** — `remote_hop_tcp.rs` |
+| S-02 | Example uses channel deliver (no `Mutex<Runtime>`) | **done** — `remote_hop_tcp.rs` |
 
 ## P1 — robustness
 
 | ID | Item | Status |
 |----|------|--------|
-| S-02 | Optional replay filter on `deliver_frame` | **done** — [`RemoteFrameDedup`] + `RuntimeConfig::remote_dedup_window` |
+| S-03 | Optional replay filter on `deliver_frame` | **done** — [`RemoteFrameDedup`] + `RuntimeConfig::remote_dedup_window` |
 | C-01 | Outbound pump stops on `encode_frame` failure (fail closed) | **done** |
-| C-01 | Document single-hop loss if encode fails after bridge dequeue | **partial** — [`remote-transport.md`](remote-transport.md) |
+| C-02 | Document single-hop loss if encode fails after bridge dequeue | **done** — [`remote-transport.md`](remote-transport.md) |
 | T-01 | Stress tests: random bytes → wire/frame decode never panic | **done** — `tests/wire_decode_stress.rs` |
 | — | [`NodeRouter`] for `node → SocketAddr` | **done** — [`transport/router.rs`](../src/transport/router.rs) |
 
