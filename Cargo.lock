@@ -85,6 +85,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteflow-io"
+version = "0.1.2"
+dependencies = [
+ "byteflow-actors",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

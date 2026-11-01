@@ -6,6 +6,8 @@
 
 Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, named discovery (`register_name` / `whereis`), and a supervisor — **one crate**.
 
+**Workspace:** `crates/byteflow` (package `byteflow-actors`) and `crates/byteflow-io` (host I/O integration). CI `cargo test --workspace` always builds `byteflow-io` against local core HEAD (`path = "../byteflow"`).
+
 ```toml
 [dependencies]
 byteflow-actors = "0.9.21"

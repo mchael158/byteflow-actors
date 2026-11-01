@@ -39,7 +39,9 @@ impl NodeRouter for StaticNodeRouter {
         self.peers
             .get(&node)
             .copied()
-            .ok_or_else(|| TransportError::InvalidConfig("node router: unknown node id"))
+            .ok_or(TransportError::InvalidConfig(
+                "node router: unknown node id",
+            ))
     }
 }
 

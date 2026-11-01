@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/byteflow"]
+members = ["crates/byteflow", "crates/byteflow-io"]
 
 [workspace.package]
 version = "0.9.21"
