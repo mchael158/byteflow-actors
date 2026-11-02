@@ -49,8 +49,8 @@ pub struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            by_name: HashMap::new(),
-            by_flow: HashMap::new(),
+            by_name: HashMap::with_capacity(64),
+            by_flow: HashMap::with_capacity(32),
         }
     }
 
