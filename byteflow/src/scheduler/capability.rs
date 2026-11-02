@@ -107,10 +107,10 @@ impl CapTable {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(CapTableInner {
-                entries: HashMap::new(),
-                flow_cells: HashMap::new(),
-                table_cells: HashMap::new(),
-                reply_index: HashMap::new(),
+                entries: HashMap::with_capacity(128),
+                flow_cells: HashMap::with_capacity(64),
+                table_cells: HashMap::with_capacity(16),
+                reply_index: HashMap::with_capacity(64),
             }),
             native_cell: Arc::new(RevocationCell::new()),
             scheduler_cell: Arc::new(RevocationCell::new()),
