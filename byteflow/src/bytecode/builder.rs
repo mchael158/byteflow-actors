@@ -30,13 +30,13 @@ impl ChunkBuilder {
     pub fn new(name: impl Into<String>) -> Self {
         ChunkBuilder {
             name: name.into(),
-            constants: Vec::new(),
-            code: Vec::new(),
-            functions: Vec::new(),
+            constants: Vec::with_capacity(32),
+            code: Vec::with_capacity(128),
+            functions: Vec::with_capacity(8),
             next_label: 0,
-            label_targets: HashMap::new(),
-            pending_jumps: Vec::new(),
-            fn_starts: HashMap::new(),
+            label_targets: HashMap::with_capacity(16),
+            pending_jumps: Vec::with_capacity(16),
+            fn_starts: HashMap::with_capacity(8),
         }
     }
 
