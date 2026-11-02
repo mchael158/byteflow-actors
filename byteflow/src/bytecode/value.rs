@@ -92,7 +92,7 @@ impl Message {
     }
 
     /// Stamp origin FlowId and attach a reply capability (scheduler only).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn authenticate(mut self, sender: u64, reply_cap: CapId) -> Self {
         self.sender = sender;
         self.reply_cap = reply_cap;
