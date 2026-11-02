@@ -44,7 +44,7 @@ impl Directory {
     pub fn new() -> Self {
         let mut shards = Vec::with_capacity(SHARDS);
         for _ in 0..SHARDS {
-            shards.push(Mutex::new(HashMap::new()));
+            shards.push(Mutex::new(HashMap::with_capacity(32)));
         }
         Directory { shards }
     }
