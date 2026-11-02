@@ -12,6 +12,7 @@ use crate::vm::frame::Frame;
 /// Bytes a dictionary slot owns. Scalars are free. `Str` / `Bytes` charge
 /// their length even when a register still holds the same `Arc`: the
 /// dictionary keeps the buffer after that register is overwritten.
+#[inline]
 pub(super) fn dict_owned_bytes(value: &Value) -> Result<usize, Fault> {
     match value {
         Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) => Ok(0),
