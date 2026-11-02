@@ -41,7 +41,7 @@ impl MailboxQueue {
         debug_assert!(limit >= 1);
         debug_assert!(byte_limit >= 1);
         Self {
-            buf: Vec::new(),
+            buf: Vec::with_capacity((limit / 2).min(256)),
             head: 0,
             len: 0,
             limit,
