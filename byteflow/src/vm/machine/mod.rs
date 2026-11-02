@@ -95,13 +95,17 @@ impl Vm {
             chunk,
             natives,
             native_gate,
-            frames: vec![frame],
+            frames: Vec::with_capacity(16),
             instructions_executed: 0,
             next_request_id: 1,
             quota: None,
             memory: None,
             dict: None,
             dict_bytes: 0,
+        })
+        .and_then(|mut vm| {
+            vm.frames.push(frame);
+            Ok(vm)
         })
     }
 
