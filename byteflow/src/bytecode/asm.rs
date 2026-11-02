@@ -100,6 +100,7 @@ pub fn assemble(text: &str) -> Result<Chunk, AssembleError> {
     Ok(chunk)
 }
 
+#[inline]
 fn syn(line: usize, message: impl Into<String>) -> AssembleError {
     AssembleError::Syntax {
         line,
@@ -135,6 +136,7 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+#[inline]
 fn split_index(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -151,6 +153,7 @@ fn split_index(line: &str) -> Option<(usize, &str)> {
     Some((index, line[i..].trim()))
 }
 
+#[inline]
 fn parse_u32(text: &str, line: usize, what: &str) -> Result<u32, AssembleError> {
     text.parse().map_err(|_| syn(line, format!("bad {what}")))
 }
