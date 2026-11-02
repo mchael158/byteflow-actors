@@ -46,6 +46,7 @@ impl fmt::Display for ConstantKind {
     }
 }
 
+#[inline]
 fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(), VerifyError> {
     if trust == TrustLevel::Trusted {
         return Ok(());
@@ -61,6 +62,7 @@ fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(
 
 /// `Cap`, `Pid`, and `Message` are rejected at every depth. A list is not
 /// authority by itself, but it must not smuggle those tags past the pool check.
+#[inline]
 fn reject_untrusted_constant(value: &Value, index: usize) -> Result<(), VerifyError> {
     match value {
         Value::Cap(_) => Err(VerifyError::ForbiddenConstant {
