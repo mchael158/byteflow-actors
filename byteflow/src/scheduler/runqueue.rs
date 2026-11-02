@@ -38,7 +38,7 @@ pub struct Injector<T> {
 impl<T> Injector<T> {
     pub fn new() -> Self {
         Injector {
-            inner: Mutex::new(VecDeque::new()),
+            inner: Mutex::new(VecDeque::with_capacity(INJECTOR_BATCH)),
         }
     }
 
