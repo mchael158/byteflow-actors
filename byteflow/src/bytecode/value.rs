@@ -470,6 +470,20 @@ impl Value {
         }
     }
 
+    /// Returns true if this value is a scalar (charges 0 heap bytes and has no nested allocations).
+    #[inline]
+    pub fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            Value::Unit
+                | Value::Bool(_)
+                | Value::Int(_)
+                | Value::Float(_)
+                | Value::Pid(_)
+                | Value::Cap(_)
+        )
+    }
+
     /// Truthiness used by `Opcode::Branch`: falsy are `Unit`, `Bool(false)`,
     /// `Int(0)`, empty [`Value::Str`], empty [`Value::Bytes`], empty
     /// [`Value::List`], empty [`Value::Map`], and empty [`Value::Record`].

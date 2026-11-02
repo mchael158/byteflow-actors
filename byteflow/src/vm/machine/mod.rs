@@ -317,7 +317,7 @@ impl Vm {
     }
 
     #[inline]
-    fn get_reg(&self, reg: u8) -> Result<Value, Fault> {
+    fn get_reg_ref(&self, reg: u8) -> Result<&Value, Fault> {
         let frame = self
             .frames
             .last()
@@ -325,11 +325,15 @@ impl Vm {
         frame
             .registers()
             .get(reg as usize)
-            .cloned()
             .ok_or(Fault::RegisterOutOfRange {
                 reg,
                 frame_size: frame.registers().len() as u8,
             })
+    }
+
+    #[inline]
+    fn get_reg(&self, reg: u8) -> Result<Value, Fault> {
+        self.get_reg_ref(reg).cloned()
     }
 
     /// Write a register. Bounds-check the slot **before** any heap charge so
@@ -345,6 +349,14 @@ impl Vm {
             .registers()
             .get(reg as usize)
             .ok_or(Fault::RegisterOutOfRange { reg, frame_size })?;
+
+        // Fast-path: both old and new are scalars (0 heap bytes).
+        // Bypasses recursive value inspection and quota bookkeeping.
+        if old.is_scalar() && value.is_scalar() {
+            let frame = self.current()?;
+            frame.registers_mut()[reg as usize] = value;
+            return Ok(());
+        }
 
         // `old` is `&Value`; keep both sides as references for the helper.
         let old_bytes = heap_charge_of(old)?;
@@ -409,12 +421,11 @@ impl Vm {
     }
 
     fn add_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
         let addend = i64::from(imm);
-        let result = match src_val {
+        let result = match *self.get_reg_ref(src)? {
             Value::Int(x) => Value::Int(x.wrapping_add(addend)),
             Value::Float(x) => Value::Float(x + (addend as f64)),
-            other => {
+            ref other => {
                 return Err(Fault::TypeMismatch {
                     expected: "int or float",
                     got: other.type_name(),
@@ -425,12 +436,11 @@ impl Vm {
     }
 
     fn sub_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
         let subtrahend = i64::from(imm);
-        let result = match src_val {
+        let result = match *self.get_reg_ref(src)? {
             Value::Int(x) => Value::Int(x.wrapping_sub(subtrahend)),
             Value::Float(x) => Value::Float(x - (subtrahend as f64)),
-            other => {
+            ref other => {
                 return Err(Fault::TypeMismatch {
                     expected: "int or float",
                     got: other.type_name(),
@@ -441,12 +451,11 @@ impl Vm {
     }
 
     fn lt_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
         let rhs = i64::from(imm);
-        let result = match src_val {
+        let result = match *self.get_reg_ref(src)? {
             Value::Int(x) => Value::Bool(x < rhs),
             Value::Float(x) => Value::Bool(x < (rhs as f64)),
-            other => {
+            ref other => {
                 return Err(Fault::TypeMismatch {
                     expected: "int or float",
                     got: other.type_name(),
@@ -457,12 +466,11 @@ impl Vm {
     }
 
     fn mul_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
         let factor = i64::from(imm);
-        let result = match src_val {
+        let result = match *self.get_reg_ref(src)? {
             Value::Int(x) => Value::Int(x.wrapping_mul(factor)),
             Value::Float(x) => Value::Float(x * (factor as f64)),
-            other => {
+            ref other => {
                 return Err(Fault::TypeMismatch {
                     expected: "int or float",
                     got: other.type_name(),
@@ -473,17 +481,57 @@ impl Vm {
     }
 
     fn eq_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
-        self.set_reg(dst, Value::Bool(src_val == Value::Int(i64::from(imm))))
+        let is_eq = match self.get_reg_ref(src)? {
+            Value::Int(x) => *x == i64::from(imm),
+            _ => false,
+        };
+        self.set_reg(dst, Value::Bool(is_eq))
+    }
+
+    fn ne_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let is_ne = match self.get_reg_ref(src)? {
+            Value::Int(x) => *x != i64::from(imm),
+            _ => true,
+        };
+        self.set_reg(dst, Value::Bool(is_ne))
     }
 
     fn le_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
-        let src_val = self.get_reg(src)?;
         let rhs = i64::from(imm);
-        let result = match src_val {
+        let result = match *self.get_reg_ref(src)? {
             Value::Int(x) => Value::Bool(x <= rhs),
             Value::Float(x) => Value::Bool(x <= (rhs as f64)),
-            other => {
+            ref other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn gt_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let rhs = i64::from(imm);
+        let result = match *self.get_reg_ref(src)? {
+            Value::Int(x) => Value::Bool(x > rhs),
+            Value::Float(x) => Value::Bool(x > (rhs as f64)),
+            ref other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "int or float",
+                    got: other.type_name(),
+                })
+            }
+        };
+        self.set_reg(dst, result)
+    }
+
+    fn ge_imm(&mut self, dst: u8, src: u8, imm: i32) -> Result<(), Fault> {
+        let rhs = i64::from(imm);
+        let result = match *self.get_reg_ref(src)? {
+            Value::Int(x) => Value::Bool(x >= rhs),
+            Value::Float(x) => Value::Bool(x >= (rhs as f64)),
+            ref other => {
                 return Err(Fault::TypeMismatch {
                     expected: "int or float",
                     got: other.type_name(),
@@ -503,6 +551,7 @@ impl Vm {
             Opcode::BitXor => x ^ y,
             Opcode::Shl => x.wrapping_shl(amount),
             Opcode::Shr => x >> amount,
+            Opcode::Ushr => ((x as u64) >> amount) as i64,
             _ => {
                 return Err(Fault::Invariant(
                     "bit_binop called with a non-bitwise opcode",
@@ -537,37 +586,38 @@ impl Vm {
     }
 
     fn list_get(&mut self, dst: u8, src: u8, index: i32) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::List(items) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "list",
-                got: value.type_name(),
-            });
-        };
         if index < 0 {
             return Err(Fault::TypeMismatch {
                 expected: "list index",
                 got: "negative-int",
             });
         }
-        match items.get(index as usize) {
-            Some(item) => self.set_reg(dst, item.clone()),
-            None => Err(Fault::TypeMismatch {
+        let item = match self.get_reg_ref(src)? {
+            Value::List(items) => items.get(index as usize).cloned().ok_or(Fault::TypeMismatch {
                 expected: "list index",
                 got: "out-of-range",
-            }),
-        }
+            })?,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "list",
+                    got: other.type_name(),
+                });
+            }
+        };
+        self.set_reg(dst, item)
     }
 
     fn list_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::List(items) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "list",
-                got: value.type_name(),
-            });
+        let len = match self.get_reg_ref(src)? {
+            Value::List(items) => items.len() as i64,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "list",
+                    got: other.type_name(),
+                });
+            }
         };
-        self.set_reg(dst, Value::Int(items.len() as i64))
+        self.set_reg(dst, Value::Int(len))
     }
 
     fn record_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
@@ -590,37 +640,38 @@ impl Vm {
     }
 
     fn record_get(&mut self, dst: u8, src: u8, index: i32) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::Record(fields) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "record",
-                got: value.type_name(),
-            });
-        };
         if index < 0 {
             return Err(Fault::TypeMismatch {
                 expected: "record index",
                 got: "negative-int",
             });
         }
-        match fields.get(index as usize) {
-            Some(field) => self.set_reg(dst, field.clone()),
-            None => Err(Fault::TypeMismatch {
+        let item = match self.get_reg_ref(src)? {
+            Value::Record(fields) => fields.get(index as usize).cloned().ok_or(Fault::TypeMismatch {
                 expected: "record index",
                 got: "out-of-range",
-            }),
-        }
+            })?,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "record",
+                    got: other.type_name(),
+                });
+            }
+        };
+        self.set_reg(dst, item)
     }
 
     fn record_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::Record(fields) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "record",
-                got: value.type_name(),
-            });
+        let len = match self.get_reg_ref(src)? {
+            Value::Record(fields) => fields.len() as i64,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "record",
+                    got: other.type_name(),
+                });
+            }
         };
-        self.set_reg(dst, Value::Int(fields.len() as i64))
+        self.set_reg(dst, Value::Int(len))
     }
 
     fn map_pack(&mut self, dst: u8, base: u8, count: i32) -> Result<(), Fault> {
@@ -659,88 +710,126 @@ impl Vm {
     }
 
     fn map_get(&mut self, dst: u8, src: u8, key: u8) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::Map(entries) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "map",
-                got: value.type_name(),
-            });
-        };
-        let key = match self.get_reg(key)? {
-            Value::Int(n) => crate::bytecode::MapKey::Int(n),
-            Value::Str(text) => crate::bytecode::MapKey::Str(text),
-            other => {
+        let found = {
+            let map_val = self.get_reg_ref(src)?;
+            let Value::Map(entries) = map_val else {
                 return Err(Fault::TypeMismatch {
-                    expected: "map key (int or str)",
-                    got: other.type_name(),
-                })
-            }
+                    expected: "map",
+                    got: map_val.type_name(),
+                });
+            };
+            let key_val = self.get_reg_ref(key)?;
+            let key_ref = match key_val {
+                Value::Int(n) => crate::bytecode::MapKey::Int(*n),
+                Value::Str(text) => crate::bytecode::MapKey::Str(Arc::clone(text)),
+                other => {
+                    return Err(Fault::TypeMismatch {
+                        expected: "map key (int or str)",
+                        got: other.type_name(),
+                    })
+                }
+            };
+            entries
+                .iter()
+                .find(|(existing, _)| existing == &key_ref)
+                .map(|(_, item)| item.clone())
+                .unwrap_or(Value::Unit)
         };
-        let found = entries
-            .iter()
-            .find(|(existing, _)| existing == &key)
-            .map(|(_, item)| item.clone())
-            .unwrap_or(Value::Unit);
         self.set_reg(dst, found)
     }
 
     fn map_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
-        let value = self.get_reg(src)?;
-        let Value::Map(entries) = value else {
-            return Err(Fault::TypeMismatch {
-                expected: "map",
-                got: value.type_name(),
-            });
+        let len = match self.get_reg_ref(src)? {
+            Value::Map(entries) => entries.len() as i64,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "map",
+                    got: other.type_name(),
+                });
+            }
         };
-        self.set_reg(dst, Value::Int(entries.len() as i64))
+        self.set_reg(dst, Value::Int(len))
+    }
+
+    fn str_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let len = match self.get_reg_ref(src)? {
+            Value::Str(s) => s.len() as i64,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "str",
+                    got: other.type_name(),
+                });
+            }
+        };
+        self.set_reg(dst, Value::Int(len))
+    }
+
+    fn bytes_len(&mut self, dst: u8, src: u8) -> Result<(), Fault> {
+        let len = match self.get_reg_ref(src)? {
+            Value::Bytes(b) => b.len() as i64,
+            other => {
+                return Err(Fault::TypeMismatch {
+                    expected: "bytes",
+                    got: other.type_name(),
+                });
+            }
+        };
+        self.set_reg(dst, Value::Int(len))
     }
 
     fn numeric_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) -> Result<(), Fault> {
-        let a = self.get_reg(lhs)?;
-        let b = self.get_reg(rhs)?;
-        let result = match (op, &a, &b) {
-            (Opcode::Add, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_add(*y)),
-            (Opcode::Add, _, _) => Value::Float(as_f64(&a)? + as_f64(&b)?),
-            (Opcode::Sub, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_sub(*y)),
-            (Opcode::Sub, _, _) => Value::Float(as_f64(&a)? - as_f64(&b)?),
-            (Opcode::Mul, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_mul(*y)),
-            (Opcode::Mul, _, _) => Value::Float(as_f64(&a)? * as_f64(&b)?),
-            (Opcode::Div, Value::Int(x), Value::Int(y)) => {
-                if *y == 0 {
-                    return Err(Fault::DivideByZero);
+        let result = {
+            let a = self.get_reg_ref(lhs)?;
+            let b = self.get_reg_ref(rhs)?;
+            match (op, a, b) {
+                (Opcode::Add, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_add(*y)),
+                (Opcode::Add, _, _) => Value::Float(as_f64(a)? + as_f64(b)?),
+                (Opcode::Sub, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_sub(*y)),
+                (Opcode::Sub, _, _) => Value::Float(as_f64(a)? - as_f64(b)?),
+                (Opcode::Mul, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_mul(*y)),
+                (Opcode::Mul, _, _) => Value::Float(as_f64(a)? * as_f64(b)?),
+                (Opcode::Div, Value::Int(x), Value::Int(y)) => {
+                    if *y == 0 {
+                        return Err(Fault::DivideByZero);
+                    }
+                    Value::Int(x.wrapping_div(*y))
                 }
-                Value::Int(x.wrapping_div(*y))
-            }
-            (Opcode::Div, _, _) => {
-                let denom = as_f64(&b)?;
-                Value::Float(as_f64(&a)? / denom)
-            }
-            (Opcode::Mod, Value::Int(x), Value::Int(y)) => {
-                if *y == 0 {
-                    return Err(Fault::DivideByZero);
+                (Opcode::Div, _, _) => {
+                    let denom = as_f64(b)?;
+                    Value::Float(as_f64(a)? / denom)
                 }
-                Value::Int(x.wrapping_rem(*y))
-            }
-            (Opcode::Mod, _, _) => {
-                let got = if !matches!(a, Value::Int(_)) {
-                    a.type_name()
-                } else {
-                    b.type_name()
-                };
-                return Err(Fault::TypeMismatch {
-                    expected: "int",
-                    got,
-                });
-            }
-            (Opcode::Eq, _, _) => Value::Bool(a == b),
-            (Opcode::Lt, Value::Int(x), Value::Int(y)) => Value::Bool(x < y),
-            (Opcode::Lt, _, _) => Value::Bool(as_f64(&a)? < as_f64(&b)?),
-            (Opcode::Le, Value::Int(x), Value::Int(y)) => Value::Bool(x <= y),
-            (Opcode::Le, _, _) => Value::Bool(as_f64(&a)? <= as_f64(&b)?),
-            _ => {
-                return Err(Fault::Invariant(
-                    "numeric_binop called with a non-arithmetic opcode",
-                ))
+                (Opcode::Mod, Value::Int(x), Value::Int(y)) => {
+                    if *y == 0 {
+                        return Err(Fault::DivideByZero);
+                    }
+                    Value::Int(x.wrapping_rem(*y))
+                }
+                (Opcode::Mod, _, _) => {
+                    let got = if !matches!(a, Value::Int(_)) {
+                        a.type_name()
+                    } else {
+                        b.type_name()
+                    };
+                    return Err(Fault::TypeMismatch {
+                        expected: "int",
+                        got,
+                    });
+                }
+                (Opcode::Eq, _, _) => Value::Bool(a == b),
+                (Opcode::Ne, _, _) => Value::Bool(a != b),
+                (Opcode::Lt, Value::Int(x), Value::Int(y)) => Value::Bool(x < y),
+                (Opcode::Lt, _, _) => Value::Bool(as_f64(a)? < as_f64(b)?),
+                (Opcode::Le, Value::Int(x), Value::Int(y)) => Value::Bool(x <= y),
+                (Opcode::Le, _, _) => Value::Bool(as_f64(a)? <= as_f64(b)?),
+                (Opcode::Gt, Value::Int(x), Value::Int(y)) => Value::Bool(x > y),
+                (Opcode::Gt, _, _) => Value::Bool(as_f64(a)? > as_f64(b)?),
+                (Opcode::Ge, Value::Int(x), Value::Int(y)) => Value::Bool(x >= y),
+                (Opcode::Ge, _, _) => Value::Bool(as_f64(a)? >= as_f64(b)?),
+                _ => {
+                    return Err(Fault::Invariant(
+                        "numeric_binop called with a non-arithmetic opcode",
+                    ))
+                }
             }
         };
         self.set_reg(dst, result)
@@ -748,7 +837,7 @@ impl Vm {
 
     #[inline]
     fn expect_cap_reg(&self, reg: u8) -> Result<CapId, Fault> {
-        let v = self.get_reg(reg)?;
+        let v = self.get_reg_ref(reg)?;
         v.as_cap().ok_or(Fault::TypeMismatch {
             expected: "cap",
             got: v.type_name(),
@@ -757,20 +846,20 @@ impl Vm {
 
     #[inline]
     fn expect_message_value(&self, reg: u8) -> Result<Value, Fault> {
-        let v = self.get_reg(reg)?;
+        let v = self.get_reg_ref(reg)?;
         if v.as_message().is_none() {
             return Err(Fault::TypeMismatch {
                 expected: "message",
                 got: v.type_name(),
             });
         }
-        Ok(v)
+        Ok(v.clone())
     }
 
     #[inline]
     fn expect_str_reg(&self, reg: u8) -> Result<Arc<str>, Fault> {
-        match self.get_reg(reg)? {
-            Value::Str(s) => Ok(s),
+        match self.get_reg_ref(reg)? {
+            Value::Str(s) => Ok(Arc::clone(s)),
             other => Err(Fault::TypeMismatch {
                 expected: "str",
                 got: other.type_name(),
@@ -780,8 +869,8 @@ impl Vm {
 
     #[inline]
     fn int_from_reg(&self, reg: u8) -> Result<i64, Fault> {
-        match self.get_reg(reg)? {
-            Value::Int(n) => Ok(n),
+        match self.get_reg_ref(reg)? {
+            Value::Int(n) => Ok(*n),
             other => Err(Fault::TypeMismatch {
                 expected: "int",
                 got: other.type_name(),
@@ -791,12 +880,12 @@ impl Vm {
 
     #[inline]
     fn tag_from_reg(&self, reg: u8) -> Result<u16, Fault> {
-        tag_from_value(&self.get_reg(reg)?)
+        tag_from_value(self.get_reg_ref(reg)?)
     }
 
     #[inline]
     fn request_id_from_reg(&self, reg: u8) -> Result<u64, Fault> {
-        request_id_from_value(&self.get_reg(reg)?)
+        request_id_from_value(self.get_reg_ref(reg)?)
     }
 
     fn gather_regs(&self, base: u8, argc: u8, first_offset: u16) -> Result<Vec<Value>, Fault> {
@@ -838,8 +927,8 @@ impl Vm {
 
     /// Non-negative `Int` only. `Bool` is not a duration.
     fn duration_millis_from_reg(&self, reg: u8) -> Result<Duration, Fault> {
-        let millis = self.get_reg(reg)?;
-        match require_int(&millis) {
+        let millis = self.get_reg_ref(reg)?;
+        match require_int(millis) {
             Ok(ms) if ms >= 0 => Ok(Duration::from_millis(ms as u64)),
             Ok(_) => Err(Fault::TypeMismatch {
                 expected: "non-negative int",
@@ -935,10 +1024,24 @@ impl Vm {
                 Opcode::EqImm => {
                     trap!(self.eq_imm(instr.a, instr.b, instr.imm));
                 }
+                Opcode::NeImm => {
+                    trap!(self.ne_imm(instr.a, instr.b, instr.imm));
+                }
                 Opcode::LeImm => {
                     trap!(self.le_imm(instr.a, instr.b, instr.imm));
                 }
-                Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr => {
+                Opcode::GtImm => {
+                    trap!(self.gt_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::GeImm => {
+                    trap!(self.ge_imm(instr.a, instr.b, instr.imm));
+                }
+                Opcode::BitAnd
+                | Opcode::BitOr
+                | Opcode::BitXor
+                | Opcode::Shl
+                | Opcode::Shr
+                | Opcode::Ushr => {
                     trap!(self.bit_binop(instr.op, instr.a, instr.b, instr.c));
                 }
                 Opcode::BitNot => {
@@ -961,6 +1064,12 @@ impl Vm {
                 }
                 Opcode::RecordLen => {
                     trap!(self.record_len(instr.a, instr.b));
+                }
+                Opcode::StrLen => {
+                    trap!(self.str_len(instr.a, instr.b));
+                }
+                Opcode::BytesLen => {
+                    trap!(self.bytes_len(instr.a, instr.b));
                 }
                 Opcode::MapPack => {
                     trap!(self.map_pack(instr.a, instr.b, instr.imm));
@@ -1012,8 +1121,10 @@ impl Vm {
                     };
                 }
                 Opcode::Move => {
-                    let v = trap!(self.get_reg(instr.b));
-                    trap!(self.set_reg(instr.a, v));
+                    if instr.a != instr.b {
+                        let v = trap!(self.get_reg(instr.b));
+                        trap!(self.set_reg(instr.a, v));
+                    }
                 }
                 Opcode::Add
                 | Opcode::Sub
@@ -1021,16 +1132,18 @@ impl Vm {
                 | Opcode::Div
                 | Opcode::Mod
                 | Opcode::Eq
+                | Opcode::Ne
                 | Opcode::Lt
-                | Opcode::Le => {
+                | Opcode::Le
+                | Opcode::Gt
+                | Opcode::Ge => {
                     trap!(self.numeric_binop(instr.op, instr.a, instr.b, instr.c));
                 }
                 Opcode::Neg => {
-                    let v = trap!(self.get_reg(instr.b));
-                    let negated = match v {
+                    let negated = match *trap!(self.get_reg_ref(instr.b)) {
                         Value::Int(x) => Value::Int(x.wrapping_neg()),
                         Value::Float(x) => Value::Float(-x),
-                        other => {
+                        ref other => {
                             return VmResult::Trap(Fault::TypeMismatch {
                                 expected: "int or float",
                                 got: other.type_name(),
@@ -1043,8 +1156,14 @@ impl Vm {
                     trap!(self.apply_relative_jump(instr.imm));
                 }
                 Opcode::Branch => {
-                    let cond = trap!(self.get_reg(instr.a));
-                    if !cond.is_truthy() {
+                    let is_truthy = trap!(self.get_reg_ref(instr.a)).is_truthy();
+                    if !is_truthy {
+                        trap!(self.apply_relative_jump(instr.imm));
+                    }
+                }
+                Opcode::BranchTrue => {
+                    let is_truthy = trap!(self.get_reg_ref(instr.a)).is_truthy();
+                    if is_truthy {
                         trap!(self.apply_relative_jump(instr.imm));
                     }
                 }
@@ -1077,6 +1196,37 @@ impl Vm {
                     }
                     let args = trap!(self.gather_regs(dst, argc, 0));
                     let mut new_frame = Frame::new(function, num_registers, Some(dst));
+                    new_frame.set_pc(entry);
+                    trap!(self.load_frame_args_charged(&mut new_frame, args, arity));
+                    self.frames.push(new_frame);
+                }
+                Opcode::TailCall => {
+                    let function = instr.imm as u32;
+                    let argc = instr.b;
+                    let dst = instr.a;
+                    let (num_registers, arity, entry) = match self.chunk.function(function) {
+                        Some(d) => (d.num_registers, d.arity, d.entry as usize),
+                        None => {
+                            return VmResult::Trap(Fault::BadFunction {
+                                index: function,
+                                table_size: self.chunk.functions.len() as u32,
+                            })
+                        }
+                    };
+                    if argc != arity {
+                        return VmResult::Trap(Fault::BadArity {
+                            passed: usize::from(argc),
+                            expected: arity,
+                        });
+                    }
+                    let args = trap!(self.gather_regs(dst, argc, 0));
+                    let dest_reg = trap!(self.current()).dest_reg();
+                    let finished = self.frames.pop().ok_or(Fault::Invariant("tailcall on empty stack"));
+                    let finished = trap!(finished);
+                    if let Some(quota) = self.quota.as_ref() {
+                        release_pair(quota, self.memory.as_deref(), finished.heap_charge());
+                    }
+                    let mut new_frame = Frame::new(function, num_registers, dest_reg);
                     new_frame.set_pc(entry);
                     trap!(self.load_frame_args_charged(&mut new_frame, args, arity));
                     self.frames.push(new_frame);
@@ -1529,7 +1679,7 @@ impl Vm {
                     return VmResult::Unlink { link_reg: instr.a };
                 }
                 Opcode::SetTrapExit => {
-                    let enabled = trap!(self.get_reg(instr.a)).is_truthy();
+                    let enabled = trap!(self.get_reg_ref(instr.a)).is_truthy();
                     return VmResult::SetTrapExit { enabled };
                 }
                 Opcode::SetRestartPolicy => {

@@ -52,21 +52,28 @@ impl fmt::Display for Instruction {
             | Opcode::Div
             | Opcode::Mod
             | Opcode::Eq
+            | Opcode::Ne
             | Opcode::Lt
             | Opcode::Le
+            | Opcode::Gt
+            | Opcode::Ge
             | Opcode::BitAnd
             | Opcode::BitOr
             | Opcode::BitXor
             | Opcode::Shl
-            | Opcode::Shr => {
+            | Opcode::Shr
+            | Opcode::Ushr => {
                 write!(f, "{} r{}, r{}, r{}", self.op, self.a, self.b, self.c)
             }
             Opcode::AddImm
             | Opcode::SubImm
             | Opcode::MulImm
             | Opcode::EqImm
+            | Opcode::NeImm
             | Opcode::LtImm
-            | Opcode::LeImm => {
+            | Opcode::LeImm
+            | Opcode::GtImm
+            | Opcode::GeImm => {
                 write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm)
             }
             Opcode::ListPack | Opcode::RecordPack => {
@@ -79,7 +86,11 @@ impl fmt::Display for Instruction {
             Opcode::ListGet | Opcode::RecordGet => {
                 write!(f, "{} r{}, r{}, {}", self.op, self.a, self.b, self.imm)
             }
-            Opcode::ListLen | Opcode::MapLen | Opcode::RecordLen => {
+            Opcode::ListLen
+            | Opcode::MapLen
+            | Opcode::RecordLen
+            | Opcode::StrLen
+            | Opcode::BytesLen => {
                 write!(f, "{} r{}, r{}", self.op, self.a, self.b)
             }
             Opcode::MapPack => write!(
@@ -99,8 +110,8 @@ impl fmt::Display for Instruction {
             ),
             Opcode::Neg | Opcode::BitNot => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
-            Opcode::Branch => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
-            Opcode::Call => {
+            Opcode::Branch | Opcode::BranchTrue => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
+            Opcode::Call | Opcode::TailCall => {
                 write!(
                     f,
                     "{} r{}, fn[{}], argc={}",

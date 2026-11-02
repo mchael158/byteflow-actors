@@ -740,13 +740,17 @@ fn parse_instruction(text: &str, line: usize) -> Result<Instruction, AssembleErr
         | Opcode::Div
         | Opcode::Mod
         | Opcode::Eq
+        | Opcode::Ne
         | Opcode::Lt
         | Opcode::Le
+        | Opcode::Gt
+        | Opcode::Ge
         | Opcode::BitAnd
         | Opcode::BitOr
         | Opcode::BitXor
         | Opcode::Shl
         | Opcode::Shr
+        | Opcode::Ushr
         | Opcode::MapGet
         | Opcode::TableGet
         | Opcode::TablePut
@@ -762,8 +766,11 @@ fn parse_instruction(text: &str, line: usize) -> Result<Instruction, AssembleErr
         | Opcode::SubImm
         | Opcode::MulImm
         | Opcode::EqImm
+        | Opcode::NeImm
         | Opcode::LtImm
         | Opcode::LeImm
+        | Opcode::GtImm
+        | Opcode::GeImm
         | Opcode::ListGet
         | Opcode::RecordGet => {
             let a = s.reg()?;
@@ -794,6 +801,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<Instruction, AssembleErr
         Opcode::ListLen
         | Opcode::MapLen
         | Opcode::RecordLen
+        | Opcode::StrLen
+        | Opcode::BytesLen
         | Opcode::DictGet
         | Opcode::DictErase => {
             if op == Opcode::DictGet || op == Opcode::DictErase {
@@ -810,8 +819,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<Instruction, AssembleErr
             }
         }
         Opcode::Jump => Instruction::only_imm(op, s.i32()?),
-        Opcode::Branch | Opcode::StartSupervisor => {
-            if op == Opcode::Branch {
+        Opcode::Branch | Opcode::BranchTrue | Opcode::StartSupervisor => {
+            if op == Opcode::Branch || op == Opcode::BranchTrue {
                 let a = s.reg()?;
                 s.comma()?;
                 Instruction::a_imm(op, a, s.i32()?)
@@ -820,7 +829,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<Instruction, AssembleErr
                 Instruction::only_imm(op, s.i32()?)
             }
         }
-        Opcode::Call => {
+        Opcode::Call | Opcode::TailCall => {
             let a = s.reg()?;
             s.comma()?;
             let imm = s.slot("fn")?;
@@ -1056,6 +1065,17 @@ fn opcode_from_name(name: &str) -> Option<Opcode> {
         "RecordPack" => Opcode::RecordPack,
         "RecordGet" => Opcode::RecordGet,
         "RecordLen" => Opcode::RecordLen,
+        "Ne" => Opcode::Ne,
+        "Gt" => Opcode::Gt,
+        "Ge" => Opcode::Ge,
+        "NeImm" => Opcode::NeImm,
+        "GtImm" => Opcode::GtImm,
+        "GeImm" => Opcode::GeImm,
+        "Ushr" => Opcode::Ushr,
+        "BranchTrue" => Opcode::BranchTrue,
+        "StrLen" => Opcode::StrLen,
+        "BytesLen" => Opcode::BytesLen,
+        "TailCall" => Opcode::TailCall,
         "AskTimeout" => Opcode::AskTimeout,
         "Delegate" => Opcode::Delegate,
         "FreshRequestId" => Opcode::FreshRequestId,
@@ -1315,6 +1335,17 @@ mod tests {
             Instruction::new(Opcode::RecordPack, 1, 2, 0, 3),
             Instruction::new(Opcode::RecordGet, 1, 2, 0, 3),
             Instruction::abc(Opcode::RecordLen, 1, 2, 0),
+            Instruction::abc(Opcode::Ne, 1, 2, 3),
+            Instruction::abc(Opcode::Gt, 1, 2, 3),
+            Instruction::abc(Opcode::Ge, 1, 2, 3),
+            Instruction::new(Opcode::NeImm, 1, 2, 0, 4),
+            Instruction::new(Opcode::GtImm, 1, 2, 0, 4),
+            Instruction::new(Opcode::GeImm, 1, 2, 0, 4),
+            Instruction::abc(Opcode::Ushr, 1, 2, 3),
+            Instruction::a_imm(Opcode::BranchTrue, 1, 4),
+            Instruction::abc(Opcode::StrLen, 1, 2, 0),
+            Instruction::abc(Opcode::BytesLen, 1, 2, 0),
+            Instruction::new(Opcode::TailCall, 1, 2, 0, 3),
             Instruction::new(Opcode::AskTimeout, 1, 2, 3, 4),
             Instruction::new(Opcode::Delegate, 1, 2, 255, 0),
             Instruction::new(Opcode::Delegate, 1, 2, 3, 1),

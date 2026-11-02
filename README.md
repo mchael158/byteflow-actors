@@ -6,8 +6,6 @@
 
 Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, named discovery (`register_name` / `whereis`), and a supervisor — **one crate**.
 
-**Workspace:** `crates/byteflow` (package `byteflow-actors`) and `crates/byteflow-io` (host I/O integration). CI `cargo test --workspace` always builds `byteflow-io` against local core HEAD (`path = "../byteflow"`).
-
 ```toml
 [dependencies]
 byteflow-actors = "0.9.21"
@@ -26,20 +24,20 @@ cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
-**Not** a Tokio replacement and **not** a cluster protocol. Host Rust owns I/O; Byteflow owns cheap flows. Local bytecode covers `exit/2`, the process dictionary, `after`, `is_alive`, `start_supervisor`, `start_child`, maps, an integer `receive` comparison, and one table per flow. A remote hop is a `.bf` frame the host writes on its own socket — see `crates/byteflow/docs/beam-mapping.md`.
+**Not** a Tokio replacement and **not** a cluster protocol. Host Rust owns I/O; Byteflow owns cheap flows. Local bytecode covers `exit/2`, the process dictionary, `after`, `is_alive`, `start_supervisor`, `start_child`, maps, an integer `receive` comparison, and one table per flow. A remote hop is a `.bf` frame the host writes on its own socket — see `byteflow/docs/beam-mapping.md`.
 
-Atomic Hop (`Value::Message`): see `crates/byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
+Atomic Hop (`Value::Message`): see `byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
 
 **Design guides** (every example is a doctest, so they cannot drift from the API):
-[atomic-hop](crates/byteflow/docs/atomic-hop.md) ·
-[beam-mapping](crates/byteflow/docs/beam-mapping.md) ·
-[lifecycle](crates/byteflow/docs/lifecycle.md) ·
-[mailbox](crates/byteflow/docs/mailbox.md) ·
-[vm-safety](crates/byteflow/docs/vm-safety.md) ·
-[error-model](crates/byteflow/docs/error-model.md) ·
-[properties](crates/byteflow/docs/properties.md) ·
-[host-await](crates/byteflow/docs/host-await.md) ·
-[untrusted](crates/byteflow/docs/untrusted.md) ·
-[security](crates/byteflow/docs/security.md)
+[atomic-hop](byteflow/docs/atomic-hop.md) ·
+[beam-mapping](byteflow/docs/beam-mapping.md) ·
+[lifecycle](byteflow/docs/lifecycle.md) ·
+[mailbox](byteflow/docs/mailbox.md) ·
+[vm-safety](byteflow/docs/vm-safety.md) ·
+[error-model](byteflow/docs/error-model.md) ·
+[properties](byteflow/docs/properties.md) ·
+[host-await](byteflow/docs/host-await.md) ·
+[untrusted](byteflow/docs/untrusted.md) ·
+[security](byteflow/docs/security.md)
 
 License: MIT OR Apache-2.0 · [github.com/mchael158/byteflow-actors](https://github.com/mchael158/byteflow-actors)

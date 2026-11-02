@@ -337,6 +337,28 @@ pub enum Opcode {
     RecordGet = 0x8B,
     /// `RecordLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x8C`).
     RecordLen = 0x8C,
+    /// `Ne ra, rb, rc` → `r[a] = Bool(r[b] != r[c])`. Append-only (`0x8D`).
+    Ne = 0x8D,
+    /// `Gt ra, rb, rc` → `r[a] = Bool(r[b] > r[c])`. Append-only (`0x8E`).
+    Gt = 0x8E,
+    /// `Ge ra, rb, rc` → `r[a] = Bool(r[b] >= r[c])`. Append-only (`0x8F`).
+    Ge = 0x8F,
+    /// `NeImm ra, rb, imm` → `r[a] = Bool(r[b] != Int(imm))`. Append-only (`0x90`).
+    NeImm = 0x90,
+    /// `GtImm ra, rb, imm` → `r[a] = Bool(r[b] > imm)`. Append-only (`0x91`).
+    GtImm = 0x91,
+    /// `GeImm ra, rb, imm` → `r[a] = Bool(r[b] >= imm)`. Append-only (`0x92`).
+    GeImm = 0x92,
+    /// `Ushr ra, rb, rc` → logical `r[a] = (r[b] as u64) >> (r[c] & 63)`. Both operands `Int`. Append-only (`0x93`).
+    Ushr = 0x93,
+    /// `BranchTrue ra, imm` → jump by `imm` iff `r[a]` is truthy. Append-only (`0x94`).
+    BranchTrue = 0x94,
+    /// `StrLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x95`).
+    StrLen = 0x95,
+    /// `BytesLen ra, rb` → `r[a] = len(r[b])` as `Int`. Append-only (`0x96`).
+    BytesLen = 0x96,
+    /// `TailCall ra, fb, nc` → tail-recursive call replacing current frame. Append-only (`0x97`).
+    TailCall = 0x97,
 
     // ---- diagnostics / safety ------------------------------------------
     /// `Trap imm` → deliberate fault (assertion failure, div-by-zero, bad
@@ -440,6 +462,17 @@ impl Opcode {
             0x8A => RecordPack,
             0x8B => RecordGet,
             0x8C => RecordLen,
+            0x8D => Ne,
+            0x8E => Gt,
+            0x8F => Ge,
+            0x90 => NeImm,
+            0x91 => GtImm,
+            0x92 => GeImm,
+            0x93 => Ushr,
+            0x94 => BranchTrue,
+            0x95 => StrLen,
+            0x96 => BytesLen,
+            0x97 => TailCall,
             _ => return None,
         })
     }
@@ -483,6 +516,17 @@ impl std::fmt::Display for Opcode {
             Opcode::RecordPack => "RecordPack",
             Opcode::RecordGet => "RecordGet",
             Opcode::RecordLen => "RecordLen",
+            Opcode::Ne => "Ne",
+            Opcode::Gt => "Gt",
+            Opcode::Ge => "Ge",
+            Opcode::NeImm => "NeImm",
+            Opcode::GtImm => "GtImm",
+            Opcode::GeImm => "GeImm",
+            Opcode::Ushr => "Ushr",
+            Opcode::BranchTrue => "BranchTrue",
+            Opcode::StrLen => "StrLen",
+            Opcode::BytesLen => "BytesLen",
+            Opcode::TailCall => "TailCall",
             Opcode::Sub => "Sub",
             Opcode::Mul => "Mul",
             Opcode::Div => "Div",

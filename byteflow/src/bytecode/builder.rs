@@ -108,15 +108,30 @@ impl ChunkBuilder {
         self.emit(Instruction::new(Opcode::EqImm, dst, src, 0, imm));
     }
 
+    /// `r[dst] = Bool(r[src] != Int(imm))`.
+    pub fn emit_ne_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::NeImm, dst, src, 0, imm));
+    }
+
     /// `r[dst] = Bool(r[src] <= imm)`.
     pub fn emit_le_imm(&mut self, dst: u8, src: u8, imm: i32) {
         self.emit(Instruction::new(Opcode::LeImm, dst, src, 0, imm));
     }
 
+    /// `r[dst] = Bool(r[src] > imm)`.
+    pub fn emit_gt_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::GtImm, dst, src, 0, imm));
+    }
+
+    /// `r[dst] = Bool(r[src] >= imm)`.
+    pub fn emit_ge_imm(&mut self, dst: u8, src: u8, imm: i32) {
+        self.emit(Instruction::new(Opcode::GeImm, dst, src, 0, imm));
+    }
+
     pub fn emit_bit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
         debug_assert!(matches!(
             op,
-            Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr
+            Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr | Opcode::Ushr
         ));
         self.emit(Instruction::abc(op, dst, lhs, rhs));
     }
@@ -135,6 +150,14 @@ impl ChunkBuilder {
 
     pub fn emit_list_len(&mut self, dst: u8, src: u8) {
         self.emit(Instruction::abc(Opcode::ListLen, dst, src, 0));
+    }
+
+    pub fn emit_str_len(&mut self, dst: u8, src: u8) {
+        self.emit(Instruction::abc(Opcode::StrLen, dst, src, 0));
+    }
+
+    pub fn emit_bytes_len(&mut self, dst: u8, src: u8) {
+        self.emit(Instruction::abc(Opcode::BytesLen, dst, src, 0));
     }
 
     pub fn emit_record_pack(&mut self, dst: u8, base: u8, count: i32) {

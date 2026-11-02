@@ -25,7 +25,7 @@ It is **not** a Tokio replacement, not a distributed cluster, and not a JVM.
 
 ## Module ABI
 
-`encode` writes the oldest header that can hold the constants. v5 has neither lists, maps, nor records. v6 adds lists (wire tag 9). v7 adds maps (wire tag 10). v8 adds positional records (wire tag 11, opcodes `RecordPack` `0x8A`, `RecordGet` `0x8B`, `RecordLen` `0x8C`). Decode accepts all four. A module without a record stays on v5, v6, or v7. Lists, maps, and records each hold at most 256 items. See `docs/beam-mapping.md`.
+`encode` writes the oldest header that can hold the constants. v5 has neither lists, maps, nor records. v6 adds lists (wire tag 9). v7 adds maps (wire tag 10). v8 adds positional records (wire tag 11, opcodes `RecordPack` `0x8A`, `RecordGet` `0x8B`, `RecordLen` `0x8C`). Decode accepts all four. A module without a record stays on v5, v6, or v7. Lists, maps, and records each hold at most 256 items. See `byteflow/docs/beam-mapping.md`.
 
 ---
 

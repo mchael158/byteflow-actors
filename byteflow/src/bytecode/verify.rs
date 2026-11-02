@@ -319,7 +319,7 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
                     });
                 }
             }
-            Opcode::Call | Opcode::Spawn => {
+            Opcode::Call | Opcode::TailCall | Opcode::Spawn => {
                 let idx = instr.imm as u32;
                 if idx as usize >= chunk.functions.len() {
                     return Err(VerifyError::FunctionOutOfRange {
@@ -462,7 +462,7 @@ pub fn verify_with(chunk: &Chunk, config: VerifyConfig) -> Result<(), VerifyErro
                     }
                 }
             }
-            Opcode::Jump | Opcode::Branch => {
+            Opcode::Jump | Opcode::Branch | Opcode::BranchTrue => {
                 let target = at as i64 + 1 + instr.imm as i64;
                 if target < 0 || target as usize > len {
                     // == len is allowed: jumping to "one past the end" is a
@@ -616,7 +616,7 @@ fn check_window(at: usize, base: u8, extra: u32, count: u32, limit: u8) -> Resul
 fn is_terminator(op: Opcode) -> bool {
     matches!(
         op,
-        Opcode::Jump | Opcode::Return | Opcode::Halt | Opcode::Exit | Opcode::Trap
+        Opcode::Jump | Opcode::Return | Opcode::Halt | Opcode::Exit | Opcode::Trap | Opcode::TailCall
     )
 }
 

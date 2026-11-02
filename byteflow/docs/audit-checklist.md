@@ -29,7 +29,6 @@ Track hardening work derived from the internal architecture audit. Status:
 | T-02 | Miri / loom in CI | **open** |
 | T-03 | Compile all examples in CI | **open** |
 | T-04 | Long soak test | **open** |
-| — | `byteflow-io` in workspace (path → local core) | **done** — `crates/byteflow-io`, `cargo test --workspace` |
 
 ## P3 — product gaps (documented)
 
