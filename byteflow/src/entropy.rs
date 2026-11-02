@@ -1,6 +1,6 @@
 //! OS CSPRNG bytes for [`crate::CapId`].
 //!
-//! [`getrandom::fill`] reads the platform generator (`ProcessPrng` on
+//! [`getrandom::getrandom`] reads the platform generator (`ProcessPrng` on
 //! Windows, `getrandom` / `/dev/urandom` on Linux). A failed read is
 //! [`EntropyError`] and keeps the OS error. This module does not substitute
 //! a hash.
@@ -33,7 +33,7 @@ impl std::error::Error for EntropyError {
 
 /// Fill `buf` with OS CSPRNG bytes. An empty buffer succeeds. Never panics.
 pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
-    match getrandom::getrandom(buf) {
+    match getrandom::fill(buf) {
         Ok(()) => Ok(()),
         Err(inner) => Err(EntropyError::new(inner)),
     }
