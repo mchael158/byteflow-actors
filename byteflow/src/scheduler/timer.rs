@@ -66,7 +66,7 @@ impl Wheel {
             let mut slots = Vec::with_capacity(SLOTS);
             for _ in 0..SLOTS {
                 slots.push(Slot {
-                    entries: Vec::new(),
+                    entries: Vec::with_capacity(4),
                     earliest: None,
                 });
             }
