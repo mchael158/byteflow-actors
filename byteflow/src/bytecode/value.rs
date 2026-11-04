@@ -56,16 +56,19 @@ impl Message {
     }
 
     /// Outgoing hop from host Rust (`sender` / `reply_cap` filled on delivery).
+    #[inline]
     pub fn request(request_id: u64, tag: u16, payload: impl Into<Value>) -> Self {
         Self::new(0, request_id, tag, payload)
     }
 
     /// Reply envelope echoing `request_id` from a received hop (host path).
+    #[inline]
     pub fn reply_to(req: &Self, tag: u16, payload: impl Into<Value>) -> Self {
         Self::new(0, req.request_id, tag, payload)
     }
 
     /// Runtime lifecycle hop: monitor `DOWN` (`tag == `[`TAG_SYS_DOWN`]).
+    #[inline]
     pub fn down(monitor: u64, target_flow: u64, reason: u64) -> Self {
         Self::new(
             target_flow,
@@ -77,6 +80,7 @@ impl Message {
 
     /// Runtime lifecycle hop: Ask target exited, or a linked peer exited
     /// while this flow has `trap_exit` enabled (`tag == `[`TAG_SYS_EXIT`]).
+    #[inline]
     pub fn linked_exit(target_flow: u64, reason: u64) -> Self {
         Self::new(target_flow, 0, TAG_SYS_EXIT, Value::Int(reason as i64))
     }
@@ -99,6 +103,7 @@ impl Message {
         self
     }
 
+    #[inline]
     pub(crate) fn with_payload(mut self, payload: Value) -> Self {
         self.payload = Arc::new(payload);
         self
@@ -124,16 +129,19 @@ pub enum MapKey {
 }
 
 impl MapKey {
+    #[inline]
     pub fn int(n: i64) -> Self {
         MapKey::Int(n)
     }
 
+    #[inline]
     pub fn str(text: impl AsRef<str>) -> Self {
         MapKey::Str(Arc::from(text.as_ref()))
     }
 }
 
 /// Shared stand-in so [`Drop`] can detach a payload without allocating.
+#[inline]
 fn discarded_payload() -> Arc<Value> {
     static EMPTY: std::sync::OnceLock<Arc<Value>> = std::sync::OnceLock::new();
     Arc::clone(EMPTY.get_or_init(|| Arc::new(Value::Unit)))
