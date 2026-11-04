@@ -110,7 +110,9 @@ impl fmt::Display for Instruction {
             ),
             Opcode::Neg | Opcode::BitNot => write!(f, "{} r{}, r{}", self.op, self.a, self.b),
             Opcode::Jump => write!(f, "{} {:+}", self.op, self.imm),
-            Opcode::Branch | Opcode::BranchTrue => write!(f, "{} r{}, {:+}", self.op, self.a, self.imm),
+            Opcode::Branch | Opcode::BranchTrue => {
+                write!(f, "{} r{}, {:+}", self.op, self.a, self.imm)
+            }
             Opcode::Call | Opcode::TailCall => {
                 write!(
                     f,

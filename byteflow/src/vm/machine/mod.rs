@@ -157,14 +157,18 @@ impl Vm {
     /// Stays in the `Value::Int` (`i64`) domain so
     /// `FreshRequestId` → `Int` → `request_id_from_value` never produces a
     /// negative id. Never returns `0` (`next_request_id` starts at 1).
-    /// Wraps on overflow to avoid trapping long-running flows.
+    /// Saturates at `i64::MAX` instead of wrapping.
     pub fn fresh_request_id(&mut self) -> u64 {
-        let id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        // Never return 0: if wrap-around produces 0, skip to 1
+        const MAX: u64 = i64::MAX as u64;
         if self.next_request_id == 0 {
             self.next_request_id = 1;
         }
+        let id = self.next_request_id;
+        if id >= MAX {
+            self.next_request_id = MAX;
+            return MAX;
+        }
+        self.next_request_id = id + 1;
         id
     }
 
@@ -600,10 +604,15 @@ impl Vm {
             });
         }
         let item = match self.get_reg_ref(src)? {
-            Value::List(items) => items.get(index as usize).cloned().ok_or(Fault::TypeMismatch {
-                expected: "list index",
-                got: "out-of-range",
-            })?,
+            Value::List(items) => {
+                items
+                    .get(index as usize)
+                    .cloned()
+                    .ok_or(Fault::TypeMismatch {
+                        expected: "list index",
+                        got: "out-of-range",
+                    })?
+            }
             other => {
                 return Err(Fault::TypeMismatch {
                     expected: "list",
@@ -654,10 +663,15 @@ impl Vm {
             });
         }
         let item = match self.get_reg_ref(src)? {
-            Value::Record(fields) => fields.get(index as usize).cloned().ok_or(Fault::TypeMismatch {
-                expected: "record index",
-                got: "out-of-range",
-            })?,
+            Value::Record(fields) => {
+                fields
+                    .get(index as usize)
+                    .cloned()
+                    .ok_or(Fault::TypeMismatch {
+                        expected: "record index",
+                        got: "out-of-range",
+                    })?
+            }
             other => {
                 return Err(Fault::TypeMismatch {
                     expected: "record",
@@ -1228,7 +1242,10 @@ impl Vm {
                     }
                     let args = trap!(self.gather_regs(dst, argc, 0));
                     let dest_reg = trap!(self.current()).dest_reg();
-                    let finished = self.frames.pop().ok_or(Fault::Invariant("tailcall on empty stack"));
+                    let finished = self
+                        .frames
+                        .pop()
+                        .ok_or(Fault::Invariant("tailcall on empty stack"));
                     let finished = trap!(finished);
                     if let Some(quota) = self.quota.as_ref() {
                         release_pair(quota, self.memory.as_deref(), finished.heap_charge());
@@ -1471,11 +1488,15 @@ impl Vm {
                     };
                     let old_bytes = trap!(dict_owned_bytes(&old));
                     if let Err(fault) = self.adjust_dict_quota(old_bytes, 0) {
-                        self.dict.get_or_insert_with(|| HashMap::with_capacity(8)).insert(key, old);
+                        self.dict
+                            .get_or_insert_with(|| HashMap::with_capacity(8))
+                            .insert(key, old);
                         return VmResult::Trap(fault);
                     }
                     if let Err(fault) = self.set_reg(instr.a, old.clone()) {
-                        self.dict.get_or_insert_with(|| HashMap::with_capacity(8)).insert(key, old);
+                        self.dict
+                            .get_or_insert_with(|| HashMap::with_capacity(8))
+                            .insert(key, old);
                         if let Err(rollback) = self.adjust_dict_quota(0, old_bytes) {
                             return VmResult::Trap(rollback);
                         }
@@ -1603,7 +1624,7 @@ impl Vm {
                 }
                 Opcode::FreshRequestId => {
                     let id = self.fresh_request_id();
-                    trap!(self.set_reg(instr.a, Value::Int(id as i64)));
+                    trap!(self.set_reg(instr.a, Value::from(id)));
                 }
                 Opcode::ReceiveMatchCorr => {
                     let tag = trap!(self.tag_from_reg(instr.b));

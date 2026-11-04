@@ -134,7 +134,12 @@ impl ChunkBuilder {
     pub fn emit_bit_binop(&mut self, op: Opcode, dst: u8, lhs: u8, rhs: u8) {
         debug_assert!(matches!(
             op,
-            Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr | Opcode::Ushr
+            Opcode::BitAnd
+                | Opcode::BitOr
+                | Opcode::BitXor
+                | Opcode::Shl
+                | Opcode::Shr
+                | Opcode::Ushr
         ));
         self.emit(Instruction::abc(op, dst, lhs, rhs));
     }

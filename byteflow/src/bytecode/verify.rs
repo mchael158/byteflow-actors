@@ -618,7 +618,12 @@ fn check_window(at: usize, base: u8, extra: u32, count: u32, limit: u8) -> Resul
 fn is_terminator(op: Opcode) -> bool {
     matches!(
         op,
-        Opcode::Jump | Opcode::Return | Opcode::Halt | Opcode::Exit | Opcode::Trap | Opcode::TailCall
+        Opcode::Jump
+            | Opcode::Return
+            | Opcode::Halt
+            | Opcode::Exit
+            | Opcode::Trap
+            | Opcode::TailCall
     )
 }
 
