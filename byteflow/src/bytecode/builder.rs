@@ -109,6 +109,7 @@ impl ChunkBuilder {
     }
 
     /// `r[dst] = Bool(r[src] != Int(imm))`.
+    #[allow(dead_code)]
     pub fn emit_ne_imm(&mut self, dst: u8, src: u8, imm: i32) {
         self.emit(Instruction::new(Opcode::NeImm, dst, src, 0, imm));
     }
@@ -119,11 +120,13 @@ impl ChunkBuilder {
     }
 
     /// `r[dst] = Bool(r[src] > imm)`.
+    #[allow(dead_code)]
     pub fn emit_gt_imm(&mut self, dst: u8, src: u8, imm: i32) {
         self.emit(Instruction::new(Opcode::GtImm, dst, src, 0, imm));
     }
 
     /// `r[dst] = Bool(r[src] >= imm)`.
+    #[allow(dead_code)]
     pub fn emit_ge_imm(&mut self, dst: u8, src: u8, imm: i32) {
         self.emit(Instruction::new(Opcode::GeImm, dst, src, 0, imm));
     }
@@ -152,10 +155,12 @@ impl ChunkBuilder {
         self.emit(Instruction::abc(Opcode::ListLen, dst, src, 0));
     }
 
+    #[allow(dead_code)]
     pub fn emit_str_len(&mut self, dst: u8, src: u8) {
         self.emit(Instruction::abc(Opcode::StrLen, dst, src, 0));
     }
 
+    #[allow(dead_code)]
     pub fn emit_bytes_len(&mut self, dst: u8, src: u8) {
         self.emit(Instruction::abc(Opcode::BytesLen, dst, src, 0));
     }
