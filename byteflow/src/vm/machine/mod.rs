@@ -157,10 +157,13 @@ impl Vm {
     /// Stays in the `Value::Int` (`i64`) domain so
     /// `FreshRequestId` → `Int` → `request_id_from_value` never produces a
     /// negative id. Never returns `0` (`next_request_id` starts at 1).
+    /// Wraps on overflow to avoid trapping long-running flows.
     pub fn fresh_request_id(&mut self) -> u64 {
         let id = self.next_request_id;
-        if self.next_request_id < i64::MAX as u64 {
-            self.next_request_id += 1;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        // Never return 0: if wrap-around produces 0, skip to 1
+        if self.next_request_id == 0 {
+            self.next_request_id = 1;
         }
         id
     }
@@ -1447,7 +1450,7 @@ impl Vm {
                         return VmResult::Trap(fault);
                     }
                     self.dict
-                        .get_or_insert_with(HashMap::new)
+                        .get_or_insert_with(|| HashMap::with_capacity(8))
                         .insert(key, value);
                 }
                 Opcode::DictGet => {
@@ -1468,11 +1471,11 @@ impl Vm {
                     };
                     let old_bytes = trap!(dict_owned_bytes(&old));
                     if let Err(fault) = self.adjust_dict_quota(old_bytes, 0) {
-                        self.dict.get_or_insert_with(HashMap::new).insert(key, old);
+                        self.dict.get_or_insert_with(|| HashMap::with_capacity(8)).insert(key, old);
                         return VmResult::Trap(fault);
                     }
                     if let Err(fault) = self.set_reg(instr.a, old.clone()) {
-                        self.dict.get_or_insert_with(HashMap::new).insert(key, old);
+                        self.dict.get_or_insert_with(|| HashMap::with_capacity(8)).insert(key, old);
                         if let Err(rollback) = self.adjust_dict_quota(0, old_bytes) {
                             return VmResult::Trap(rollback);
                         }

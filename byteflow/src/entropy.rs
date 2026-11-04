@@ -33,7 +33,7 @@ impl std::error::Error for EntropyError {
 
 /// Fill `buf` with OS CSPRNG bytes. An empty buffer succeeds. Never panics.
 pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
-    match getrandom::fill(buf) {
+    match getrandom::getrandom(buf) {
         Ok(()) => Ok(()),
         Err(inner) => Err(EntropyError::new(inner)),
     }
