@@ -345,6 +345,7 @@ fn run_compiled_trace_with_tags(
         written: [0; 4],
         as_bool: [0; 4],
         as_unit: [0; 4],
+        as_float: [0; 4],
     }; MAX_JIT_CALL_DEPTH];
     let stride = slots.len();
     let mut spill = vec![0i64; stride.saturating_mul(MAX_JIT_CALL_DEPTH)];
@@ -437,7 +438,7 @@ fn install_unwind(
         &caller.written,
         &caller.as_bool,
         &caller.as_unit,
-        &[0; 4],
+        &caller.as_float,
     );
     vm.install_jit_frames(caller.return_pc as usize, &updates, frames)
 }
@@ -456,7 +457,7 @@ fn suspended(
         &rec.written,
         &rec.as_bool,
         &rec.as_unit,
-        &[0; 4],
+        &rec.as_float,
     );
     Ok((rec.return_function, dest, rec.return_pc as usize, registers))
 }
@@ -1055,7 +1056,12 @@ mod tests {
             VmResult::Complete(Value::Bool(true))
         ));
         let mut ctx = JitContext::new(chunk.clone())?;
-        force_compile(&mut ctx, &chunk, key)?;
+        let eq_key = TraceKey {
+            function: 0,
+            entry_pc: 0,
+            floats: false,
+        };
+        force_compile(&mut ctx, &chunk, eq_key)?;
         let mut vm = Vm::new(chunk, NativeTable::empty(), 0, &[])?;
         let result = run_vm_with_jit(&mut vm, 20, &mut ctx);
         assert!(matches!(result, VmResult::Complete(Value::Bool(true))));

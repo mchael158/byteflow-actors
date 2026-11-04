@@ -86,7 +86,7 @@ impl JitReturn {
             JIT_CONTINUE => ExitReason::Continue { pc: self.pc },
             JIT_EFFECT => ExitReason::Effect { pc: self.pc },
             JIT_RETURN => ExitReason::Return {
-                return_reg: self.return_reg as u8,
+                return_reg: u8::try_from(self.return_reg).unwrap_or(u8::MAX),
             },
             JIT_BUDGET => ExitReason::Budget { pc: self.pc },
             JIT_TRAP => ExitReason::Trap { pc: self.pc },

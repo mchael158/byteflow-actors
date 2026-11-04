@@ -42,9 +42,16 @@ pub enum TransportError {
     Truncated,
     BadMagic,
     BadVersion,
-    FrameTooLarge { len: u32, max: u32 },
+    FrameTooLarge {
+        len: u32,
+        max: u32,
+    },
     TrailingData,
     InvalidConfig(&'static str),
+    /// [`NodeRouter::resolve`] has no peer for this host-defined node id.
+    UnknownNode {
+        node: u64,
+    },
     Deliver(RemoteFrameError),
     ThreadJoin,
 }
@@ -61,6 +68,7 @@ impl std::fmt::Display for TransportError {
             }
             Self::TrailingData => f.write_str("transport frame trailing data"),
             Self::InvalidConfig(msg) => write!(f, "transport config: {msg}"),
+            Self::UnknownNode { node } => write!(f, "transport unknown node id {node}"),
             Self::Deliver(e) => write!(f, "deliver_frame: {e}"),
             Self::ThreadJoin => f.write_str("transport thread panicked"),
         }
@@ -153,9 +161,25 @@ const SESSION_DRAIN: Duration = Duration::from_secs(5);
 /// Drains `bridge`, encodes each [`crate::OutboundHop`], and writes length-prefixed
 /// frames to `peer`. When the outbound queue is full, the pump **blocks**, so
 /// [`DistributionBridge`] fills and bytecode `SendRemote` eventually fails closed.
+///
+/// Same as [`spawn_tcp_outbound_routed`] with [`FixedPeerRouter`] (ignores hop node id).
 pub fn spawn_tcp_outbound(
     bridge: Arc<DistributionBridge>,
     peer: SocketAddr,
+    config: TcpOutboundConfig,
+) -> Result<TcpOutboundHandle, TransportError> {
+    spawn_tcp_outbound_routed(bridge, Arc::new(router::FixedPeerRouter(peer)), config)
+}
+
+/// Drains `bridge`, resolves each hop's [`OutboundHop::node`] through `router`, and
+/// writes length-prefixed frames to the matching TCP peer.
+///
+/// When routing or `encode_frame` fails, the pump stops fail-closed (same as the
+/// single-peer outbound). Unknown node ids surface as [`TransportError::UnknownNode`]
+/// on the pump thread via logs; the hop is not retried automatically.
+pub fn spawn_tcp_outbound_routed(
+    bridge: Arc<DistributionBridge>,
+    router: Arc<dyn router::NodeRouter>,
     config: TcpOutboundConfig,
 ) -> Result<TcpOutboundHandle, TransportError> {
     check_max_wire(config.max_wire_bytes)?;
@@ -177,8 +201,7 @@ pub fn spawn_tcp_outbound(
     let writer = thread::Builder::new()
         .name("byteflow-tcp-out".into())
         .spawn(move || {
-            let _ = run_tcp_writer(
-                peer,
+            let _ = run_tcp_routed_writer(
                 connect_timeout,
                 max_wire,
                 wire_rx,
@@ -192,7 +215,14 @@ pub fn spawn_tcp_outbound(
     let pump = thread::Builder::new()
         .name("byteflow-bridge-pump".into())
         .spawn(move || {
-            pump_bridge_to_channel(&bridge, wire_tx, bridge_poll, stop_pump, pending_pump);
+            pump_bridge_to_routed_channel(
+                &bridge,
+                router,
+                wire_tx,
+                bridge_poll,
+                stop_pump,
+                pending_pump,
+            );
         })
         .map_err(TransportError::Io)?;
 
@@ -203,27 +233,37 @@ pub fn spawn_tcp_outbound(
     })
 }
 
-fn pump_bridge_to_channel(
+fn pump_bridge_to_routed_channel(
     bridge: &DistributionBridge,
-    wire_tx: SyncSender<Vec<u8>>,
+    router: Arc<dyn router::NodeRouter>,
+    wire_tx: SyncSender<(SocketAddr, Vec<u8>)>,
     poll: Duration,
     stop: Arc<AtomicBool>,
     wire_pending: Arc<AtomicUsize>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         match bridge.recv_timeout(poll) {
-            Ok(Some(hop)) => match encode_frame(&hop) {
-                Ok(bytes) => match wire_tx.send(bytes) {
-                    Ok(()) => {
-                        wire_pending.fetch_add(1, Ordering::Release);
+            Ok(Some(hop)) => {
+                let peer = match router::resolve_hop_peer(&hop, router.as_ref()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        transport_info(format!("node resolve failed; stopping outbound pump: {e}"));
+                        break;
                     }
-                    Err(_) => break,
-                },
-                Err(e) => {
-                    transport_info(format!("encode_frame failed; stopping outbound pump: {e}"));
-                    break;
+                };
+                match encode_frame(&hop) {
+                    Ok(bytes) => match wire_tx.send((peer, bytes)) {
+                        Ok(()) => {
+                            wire_pending.fetch_add(1, Ordering::Release);
+                        }
+                        Err(_) => break,
+                    },
+                    Err(e) => {
+                        transport_info(format!("encode_frame failed; stopping outbound pump: {e}"));
+                        break;
+                    }
                 }
-            },
+            }
             Ok(None) => {}
             Err(e) => {
                 transport_info(format!("bridge recv failed: {e}"));
@@ -233,44 +273,64 @@ fn pump_bridge_to_channel(
     }
 }
 
-fn run_tcp_writer(
-    peer: SocketAddr,
+fn run_tcp_routed_writer(
     connect_timeout: Duration,
     max_wire: u32,
-    wire_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    wire_rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     stop: Arc<AtomicBool>,
     wire_pending: Arc<AtomicUsize>,
 ) -> Result<(), TransportError> {
-    let mut retry_frame: Option<Vec<u8>> = None;
+    let mut retry_frame: Option<(SocketAddr, Vec<u8>)> = None;
+    let mut stream: Option<TcpStream> = None;
+    let mut connected_peer: Option<SocketAddr> = None;
+
     while !stop.load(Ordering::Relaxed) {
-        let mut stream = match TcpStream::connect_timeout(&peer, connect_timeout) {
-            Ok(s) => s,
-            Err(e) => {
-                transport_debug(format!("connect {peer} failed: {e}"));
-                thread::sleep(Duration::from_millis(100));
-                continue;
+        let (peer, bytes) = if let Some(frame) = retry_frame.take() {
+            frame
+        } else {
+            match wire_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(item) => item,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             }
         };
-        if stream.set_nodelay(true).is_err() {
+
+        if connected_peer != Some(peer) || stream.is_none() {
+            stream = None;
+            connected_peer = None;
+            match TcpStream::connect_timeout(&peer, connect_timeout) {
+                Ok(s) => {
+                    if s.set_nodelay(true).is_ok() {
+                        connected_peer = Some(peer);
+                        stream = Some(s);
+                    } else {
+                        retry_frame = Some((peer, bytes));
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    transport_debug(format!("connect {peer} failed: {e}"));
+                    retry_frame = Some((peer, bytes));
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            }
+        }
+
+        let Some(active) = stream.as_mut() else {
+            retry_frame = Some((peer, bytes));
+            continue;
+        };
+
+        if let Err(e) = write_wire_frame(active, &bytes, max_wire) {
+            transport_info(format!("write to {peer} failed: {e}"));
+            retry_frame = Some((peer, bytes));
+            stream = None;
+            connected_peer = None;
             continue;
         }
-        while !stop.load(Ordering::Relaxed) {
-            let bytes = if let Some(frame) = retry_frame.take() {
-                frame
-            } else {
-                match wire_rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(b) => b,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                }
-            };
-            if let Err(e) = write_wire_frame(&mut stream, &bytes, max_wire) {
-                transport_info(format!("write to {peer} failed: {e}"));
-                retry_frame = Some(bytes);
-                break;
-            }
-            wire_pending.fetch_sub(1, Ordering::Release);
-        }
+        wire_pending.fetch_sub(1, Ordering::Release);
     }
     Ok(())
 }
@@ -528,7 +588,7 @@ pub fn read_wire_frame(
     Ok(body)
 }
 
-pub use router::{resolve_hop_peer, NodeRouter, StaticNodeRouter};
+pub use router::{resolve_hop_peer, FixedPeerRouter, NodeRouter, StaticNodeRouter};
 
 fn encode_wire_bytes(bfh1_payload: &[u8], max_wire_bytes: u32) -> Result<Vec<u8>, TransportError> {
     let len = u32::try_from(bfh1_payload.len()).map_err(|_| TransportError::FrameTooLarge {

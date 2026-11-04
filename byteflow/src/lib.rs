@@ -312,10 +312,10 @@ pub use scheduler::{
     WaitEpoch, DEFAULT_QUANTUM,
 };
 pub use transport::{
-    read_wire_frame, recv_wire_frame_udp, send_wire_frame_udp, spawn_tcp_inbound,
-    spawn_tcp_outbound, wait_bridge_drained, write_wire_frame, NodeRouter, StaticNodeRouter,
-    TcpInboundConfig, TcpInboundHandle, TcpOutboundConfig, TcpOutboundHandle, TransportError,
-    DEFAULT_MAX_WIRE_BYTES,
+    read_wire_frame, recv_wire_frame_udp, resolve_hop_peer, send_wire_frame_udp, spawn_tcp_inbound,
+    spawn_tcp_outbound, spawn_tcp_outbound_routed, wait_bridge_drained, write_wire_frame,
+    FixedPeerRouter, NodeRouter, StaticNodeRouter, TcpInboundConfig, TcpInboundHandle,
+    TcpOutboundConfig, TcpOutboundHandle, TransportError, DEFAULT_MAX_WIRE_BYTES,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

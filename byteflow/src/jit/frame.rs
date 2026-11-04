@@ -41,6 +41,7 @@ pub const REC_CALLER_REGS: i32 = 12;
 pub const REC_WRITTEN: i32 = 16;
 pub const REC_AS_BOOL: i32 = 48;
 pub const REC_AS_UNIT: i32 = 80;
+pub const REC_AS_FLOAT: i32 = 112;
 
 /// Maximum nested intra-chunk calls handled inside one compiled trace.
 pub const MAX_JIT_CALL_DEPTH: usize = 32;
@@ -57,6 +58,7 @@ pub struct JitCallRecord {
     pub written: [u64; 4],
     pub as_bool: [u64; 4],
     pub as_unit: [u64; 4],
+    pub as_float: [u64; 4],
 }
 
 /// Mutable state for one JIT invocation on the current bytecode frame.
@@ -150,6 +152,10 @@ mod tests {
         assert_eq!(
             std::mem::offset_of!(JitCallRecord, as_unit),
             REC_AS_UNIT as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitCallRecord, as_float),
+            REC_AS_FLOAT as usize
         );
     }
 }

@@ -25,7 +25,8 @@ Default maximum `payload_len`: 4 MiB ([`DEFAULT_MAX_WIRE_BYTES`]).
 
 | API | Role |
 |-----|------|
-| [`spawn_tcp_outbound`] | Pump `DistributionBridge` → bounded channel → `TcpStream` |
+| [`spawn_tcp_outbound`] | Pump `DistributionBridge` → bounded channel → one fixed `TcpStream` peer |
+| [`spawn_tcp_outbound_routed`] | Same pump, but resolves each hop's node via [`NodeRouter`] (multi-peer) |
 | [`spawn_tcp_inbound`] | Accept connections → `read_wire_frame` → your `deliver` closure (typically [`Runtime::deliver_frame`]). [`TcpInboundConfig::max_sessions`] caps concurrent session threads (`0` = unlimited). |
 
 When the outbound queue is full, the bridge pump **blocks** on `send`. The bridge itself
@@ -71,7 +72,8 @@ Same-process delivery without sockets: [`examples/remote_hop.rs`](../examples/re
 ## What you still own
 
 - Mapping [`OutboundHop::node`] to `SocketAddr` (or DNS) — [`NodeRouter`] /
-  [`StaticNodeRouter`], or your own table
+  [`StaticNodeRouter`], [`FixedPeerRouter`] for a single peer, [`resolve_hop_peer`]
+  when draining manually, or your own table
 - TLS, authentication, rate limits
 - Optional idempotency: peer [`RuntimeConfig::remote_dedup_window`] (see
   [`production-embedding.md`](production-embedding.md))
@@ -82,6 +84,7 @@ Same-process delivery without sockets: [`examples/remote_hop.rs`](../examples/re
 [`wait_bridge_drained`]: ../src/transport/mod.rs
 [`encode_frame`]: ../src/scheduler/distribution.rs
 [`spawn_tcp_outbound`]: ../src/transport/mod.rs
+[`spawn_tcp_outbound_routed`]: ../src/transport/mod.rs
 [`spawn_tcp_inbound`]: ../src/transport/mod.rs
 [`send_wire_frame_udp`]: ../src/transport/mod.rs
 [`recv_wire_frame_udp`]: ../src/transport/mod.rs
@@ -93,6 +96,8 @@ Same-process delivery without sockets: [`examples/remote_hop.rs`](../examples/re
 [`RemoteFrameError::Mailbox`]: ../src/scheduler/distribution.rs
 [`NodeRouter`]: ../src/transport/router.rs
 [`StaticNodeRouter`]: ../src/transport/router.rs
+[`FixedPeerRouter`]: ../src/transport/router.rs
+[`resolve_hop_peer`]: ../src/transport/router.rs
 [`Runtime::deliver_frame`]: ../src/scheduler/runtime.rs
 [`DistributionBridge`]: ../src/scheduler/distribution.rs
 [`RuntimeConfig::remote_dedup_window`]: ../src/scheduler/runtime.rs

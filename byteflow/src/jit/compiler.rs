@@ -211,7 +211,6 @@ impl<'a> TraceCompiler<'a> {
             }
         }
 
-        let trap_block = builder.create_block();
         let return_block = builder.create_block();
 
         let mut pc_to_block = HashMap::new();
@@ -264,7 +263,6 @@ impl<'a> TraceCompiler<'a> {
                     slots_ptr,
                     frame_ptr,
                     pointer_type,
-                    trap_block,
                     return_block,
                     pc_to_block: &pc_to_block,
                     call_depth_ptr,
@@ -289,11 +287,6 @@ impl<'a> TraceCompiler<'a> {
                 }
             }
         }
-
-        builder.switch_to_block(trap_block);
-        builder.seal_block(trap_block);
-        let trap_pc = region_max_pc(&region, key)?;
-        write_exit(&mut builder, frame_ptr, pointer_type, JIT_TRAP, trap_pc, 0);
 
         builder.switch_to_block(return_block);
         builder.seal_block(return_block);
@@ -376,7 +369,6 @@ struct EmitContext<'a, 'b> {
     slots_ptr: ClifValue,
     frame_ptr: ClifValue,
     pointer_type: types::Type,
-    trap_block: Block,
     return_block: Block,
     pc_to_block: &'a HashMap<u32, Block>,
     call_depth_ptr: ClifValue,
@@ -505,7 +497,6 @@ fn emit_instruction(
     let slots_ptr = ctx.slots_ptr;
     let frame_ptr = ctx.frame_ptr;
     let pointer_type = ctx.pointer_type;
-    let trap_block = ctx.trap_block;
     let return_block = ctx.return_block;
     let supports_calls = ctx.supports_calls;
     let pc_to_block = ctx.pc_to_block;
@@ -739,8 +730,12 @@ fn emit_instruction(
                 builder
                     .ins()
                     .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rhs, zero);
+            let div_trap = builder.create_block();
             let nonzero = builder.create_block();
-            builder.ins().brif(is_zero, trap_block, &[], nonzero, &[]);
+            builder.ins().brif(is_zero, div_trap, &[], nonzero, &[]);
+            builder.switch_to_block(div_trap);
+            builder.seal_block(div_trap);
+            write_exit(builder, frame_ptr, pointer_type, JIT_TRAP, pc, 0);
             builder.switch_to_block(nonzero);
             builder.seal_block(nonzero);
 

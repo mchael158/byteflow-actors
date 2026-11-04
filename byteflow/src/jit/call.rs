@@ -29,9 +29,10 @@ use super::compiler::{
 };
 use super::exit::{JIT_CONTINUE, JIT_RETURN};
 use super::frame::{
-    JitCallRecord, MAX_JIT_CALL_DEPTH, OFF_AS_BOOL, OFF_AS_UNIT, OFF_BUDGET, OFF_ENTRY_BOOL,
-    OFF_ENTRY_UNIT, OFF_FUNCTION, OFF_REGISTER_COUNT, OFF_SPILL, OFF_SPILL_STRIDE, OFF_WRITTEN,
-    REC_AS_BOOL, REC_AS_UNIT, REC_CALLER_REGS, REC_DEST, REC_RETURN_FN, REC_RETURN_PC, REC_WRITTEN,
+    JitCallRecord, MAX_JIT_CALL_DEPTH, OFF_AS_BOOL, OFF_AS_FLOAT, OFF_AS_UNIT, OFF_BUDGET,
+    OFF_ENTRY_BOOL, OFF_ENTRY_FLOAT, OFF_ENTRY_UNIT, OFF_FUNCTION, OFF_REGISTER_COUNT, OFF_SPILL,
+    OFF_SPILL_STRIDE, OFF_WRITTEN, REC_AS_BOOL, REC_AS_FLOAT, REC_AS_UNIT, REC_CALLER_REGS,
+    REC_DEST, REC_RETURN_FN, REC_RETURN_PC, REC_WRITTEN,
 };
 
 const MAX_LEAF_INSNS: usize = 32;
@@ -236,6 +237,14 @@ pub(super) fn emit_call(
         record,
         REC_AS_UNIT,
     );
+    copy_tag_words(
+        builder,
+        pointer_type,
+        frame_ptr,
+        OFF_AS_FLOAT,
+        record,
+        REC_AS_FLOAT,
+    );
 
     let mut arg_tags = Vec::with_capacity(usize::from(instr.b));
     for i in 0..instr.b {
@@ -259,6 +268,14 @@ pub(super) fn emit_call(
                 OFF_AS_UNIT,
                 OFF_ENTRY_UNIT,
             ),
+            inherited_bit(
+                builder,
+                frame_ptr,
+                pointer_type,
+                src,
+                OFF_AS_FLOAT,
+                OFF_ENTRY_FLOAT,
+            ),
         ));
     }
 
@@ -271,8 +288,9 @@ pub(super) fn emit_call(
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, reg, true);
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, false);
         set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, true);
+        set_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_FLOAT, reg, false);
     }
-    for (reg, (as_bool, as_unit)) in arg_tags.into_iter().enumerate() {
+    for (reg, (as_bool, as_unit, as_float)) in arg_tags.into_iter().enumerate() {
         let Ok(reg) = u8::try_from(reg) else {
             break;
         };
@@ -281,6 +299,14 @@ pub(super) fn emit_call(
         }
         set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_BOOL, reg, as_bool);
         set_reg_bit_value(builder, frame_ptr, pointer_type, OFF_AS_UNIT, reg, as_unit);
+        set_reg_bit_value(
+            builder,
+            frame_ptr,
+            pointer_type,
+            OFF_AS_FLOAT,
+            reg,
+            as_float,
+        );
     }
 
     write_u32_field(
@@ -346,6 +372,7 @@ pub(super) fn emit_return(
     let ret_val = builder.ins().load(I64, MachMemFlags::new(), ret_addr, 0);
     let is_bool = read_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_BOOL, return_reg);
     let is_unit = read_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_UNIT, return_reg);
+    let is_float = read_reg_bit(builder, frame_ptr, pointer_type, OFF_AS_FLOAT, return_reg);
 
     let one = builder.ins().iconst(I32, 1);
     let new_depth = builder.ins().isub(depth, one);
@@ -413,10 +440,26 @@ pub(super) fn emit_return(
         frame_ptr,
         OFF_AS_UNIT,
     );
+    copy_tag_words_from(
+        builder,
+        pointer_type,
+        record,
+        REC_AS_FLOAT,
+        frame_ptr,
+        OFF_AS_FLOAT,
+    );
 
     // `dest_reg` is the register stored at the call site (`instr.a`), which
     // may be any of r0..=r255. Update that bit after the caller tags return.
-    mark_known_dests(builder, frame_ptr, pointer_type, dest_reg, is_bool, is_unit);
+    mark_known_dests(
+        builder,
+        frame_ptr,
+        pointer_type,
+        dest_reg,
+        is_bool,
+        is_unit,
+        is_float,
+    );
 
     registers.clear();
     let mut open = builder.create_block();
@@ -443,6 +486,7 @@ fn mark_known_dests(
     dest_reg: ClifValue,
     is_bool: ClifValue,
     is_unit: ClifValue,
+    is_float: ClifValue,
 ) {
     let one = builder.ins().iconst(I64, 1);
     set_dynamic_reg_bit(builder, frame_ptr, pointer_type, OFF_WRITTEN, dest_reg, one);
@@ -461,6 +505,14 @@ fn mark_known_dests(
         OFF_AS_UNIT,
         dest_reg,
         is_unit,
+    );
+    set_dynamic_reg_bit(
+        builder,
+        frame_ptr,
+        pointer_type,
+        OFF_AS_FLOAT,
+        dest_reg,
+        is_float,
     );
 }
 
@@ -564,7 +616,7 @@ fn clear_tag_words(
     pointer_type: types::Type,
 ) {
     let zero = builder.ins().iconst(I64, 0);
-    for base in [OFF_WRITTEN, OFF_AS_BOOL, OFF_AS_UNIT] {
+    for base in [OFF_WRITTEN, OFF_AS_BOOL, OFF_AS_UNIT, OFF_AS_FLOAT] {
         for word in 0..4 {
             let addr = field_ptr(builder, frame_ptr, pointer_type, base + word * 8);
             builder.ins().store(MachMemFlags::new(), zero, addr, 0);
