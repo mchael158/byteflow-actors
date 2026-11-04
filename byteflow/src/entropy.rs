@@ -13,8 +13,8 @@ pub struct EntropyError {
     inner: getrandom::Error,
 }
 
-impl EntropyError {
-    fn new(inner: getrandom::Error) -> Self {
+impl From<getrandom::Error> for EntropyError {
+    fn from(inner: getrandom::Error) -> Self {
         Self { inner }
     }
 }
@@ -32,11 +32,9 @@ impl std::error::Error for EntropyError {
 }
 
 /// Fill `buf` with OS CSPRNG bytes. An empty buffer succeeds. Never panics.
+#[inline]
 pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
-    match getrandom::getrandom(buf) {
-        Ok(()) => Ok(()),
-        Err(inner) => Err(EntropyError::new(inner)),
-    }
+    getrandom::getrandom(buf).map_err(EntropyError::from)
 }
 
 #[cfg(test)]
