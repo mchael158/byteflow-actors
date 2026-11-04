@@ -91,22 +91,26 @@ impl MemoryBudget {
         }
     }
 
+    #[inline]
     pub fn limit(&self) -> usize {
         self.limit
     }
 
+    #[inline]
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }
 
+    #[inline]
     pub fn snapshot(&self) -> MemorySnapshot {
         MemorySnapshot {
-            used: self.used(),
-            limit: self.limit(),
+            used: self.used.load(Ordering::Acquire),
+            limit: self.limit,
         }
     }
 
     /// Reserve `bytes` against the ceiling. Does not modify state on failure.
+    #[inline]
     pub fn try_charge(&self, bytes: usize) -> Result<(), MemoryError> {
         if bytes == 0 {
             return Ok(());
@@ -144,6 +148,7 @@ impl MemoryBudget {
     /// Underflow is a programming bug. Uses CAS so a violated invariant never
     /// wraps `used` to a huge value in release builds (unlike bare
     /// `fetch_sub`).
+    #[inline]
     pub fn release(&self, bytes: usize) {
         if bytes == 0 {
             return;
@@ -197,20 +202,24 @@ impl HeapStr {
         })
     }
 
+    #[inline]
     pub fn as_str(&self) -> &str {
         &self.value
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.value.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.value.is_empty()
     }
 
     /// Bytes the `String` allocator reserved. The budget charges [`Self::len`],
     /// not this spare room.
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.value.capacity()
     }
@@ -268,20 +277,24 @@ impl HeapBytes {
         })
     }
 
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
     /// Bytes the `Vec` allocator reserved. The budget charges [`Self::len`],
     /// not this spare room.
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.bytes.capacity()
     }
@@ -323,10 +336,7 @@ mod tests {
         let budget = Arc::new(MemoryBudget::new(1024));
 
         {
-            let value = match HeapStr::new(Arc::clone(&budget), "hello") {
-                Ok(v) => v,
-                Err(e) => panic!("unexpected: {e}"),
-            };
+            let value = HeapStr::new(Arc::clone(&budget), "hello").unwrap();
             assert_eq!(budget.used(), value.len());
         }
 
@@ -338,10 +348,7 @@ mod tests {
         let budget = Arc::new(MemoryBudget::new(1024));
 
         {
-            let value = match HeapBytes::new(Arc::clone(&budget), vec![1; 128]) {
-                Ok(v) => v,
-                Err(e) => panic!("unexpected: {e}"),
-            };
+            let value = HeapBytes::new(Arc::clone(&budget), vec![1; 128]).unwrap();
             assert_eq!(budget.used(), value.len());
         }
 
@@ -352,16 +359,11 @@ mod tests {
     fn replacement_does_not_leak() {
         let budget = Arc::new(MemoryBudget::new(4096));
 
-        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0; 64]) {
-            Ok(v) => v,
-            Err(e) => panic!("unexpected: {e}"),
-        };
+        let mut value = HeapBytes::new(Arc::clone(&budget), vec![0; 64]).unwrap();
 
         let first = budget.used();
 
-        if let Err(e) = value.replace(vec![0; 512]) {
-            panic!("unexpected: {e}");
-        }
+        value.replace(vec![0; 512]).unwrap();
 
         assert_eq!(budget.used(), value.len());
         assert_ne!(first, budget.used());
@@ -375,10 +377,7 @@ mod tests {
     fn failed_replacement_keeps_old_value() {
         let budget = Arc::new(MemoryBudget::new(128));
 
-        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0; 64]) {
-            Ok(v) => v,
-            Err(e) => panic!("unexpected: {e}"),
-        };
+        let mut value = HeapBytes::new(Arc::clone(&budget), vec![0; 64]).unwrap();
 
         let old = value.as_slice().to_vec();
         let old_used = budget.used();
@@ -432,10 +431,7 @@ mod tests {
         // to the live length, a same-size replace must fail even though the
         // steady-state footprint would fit.
         let budget = Arc::new(MemoryBudget::new(600));
-        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0u8; 600]) {
-            Ok(v) => v,
-            Err(e) => panic!("unexpected: {e}"),
-        };
+        let mut value = HeapBytes::new(Arc::clone(&budget), vec![0u8; 600]).unwrap();
         assert_eq!(budget.used(), 600);
 
         let err = value.replace(vec![0u8; 600]);
@@ -450,13 +446,8 @@ mod tests {
     #[test]
     fn same_len_replace_succeeds_with_peak_room() {
         let budget = Arc::new(MemoryBudget::new(2048));
-        let mut value = match HeapBytes::new(Arc::clone(&budget), vec![0u8; 64]) {
-            Ok(v) => v,
-            Err(e) => panic!("unexpected: {e}"),
-        };
-        if let Err(e) = value.replace(vec![1u8; 64]) {
-            panic!("unexpected: {e}");
-        }
+        let mut value = HeapBytes::new(Arc::clone(&budget), vec![0u8; 64]).unwrap();
+        value.replace(vec![1u8; 64]).unwrap();
         assert_eq!(budget.used(), 64);
         assert_eq!(value.as_slice(), &[1u8; 64]);
     }
@@ -466,10 +457,7 @@ mod tests {
         let budget = Arc::new(MemoryBudget::new(64));
         let mut buf = Vec::with_capacity(10_000);
         buf.extend_from_slice(&[1, 2, 3, 4]);
-        let value = match HeapBytes::new(Arc::clone(&budget), buf) {
-            Ok(v) => v,
-            Err(e) => panic!("unexpected: {e}"),
-        };
+        let value = HeapBytes::new(Arc::clone(&budget), buf).unwrap();
         assert!(value.capacity() > value.len());
         assert_eq!(budget.used(), 4);
     }
@@ -477,7 +465,7 @@ mod tests {
     #[test]
     fn release_zero_is_noop() {
         let budget = MemoryBudget::new(100);
-        assert!(budget.try_charge(40).is_ok());
+        budget.try_charge(40).unwrap();
         budget.release(0);
         assert_eq!(budget.used(), 40);
         budget.release(40);
