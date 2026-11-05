@@ -1,7 +1,7 @@
 //! Delegation, attenuation, and revocation — fail-closed at the Cap layer.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use byteflow::{Cap, CapRights, CapTarget, NativeMask, RevocationCell};
