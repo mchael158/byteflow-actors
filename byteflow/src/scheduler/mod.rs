@@ -55,7 +55,9 @@ pub use crate::bytecode::RestartPolicy;
 pub use capability::{CapError, CapRights, Capability};
 pub use delegate::{exec_delegate, DelegateError};
 pub use distribution::{
-    decode_frame, encode_frame, DistributionBridge, OutboundHop, RemoteFrameDedup, RemoteFrameError,
+    decode_frame, encode_frame, DedupState, DedupTicket, DistributionBridge, DistributionConfig,
+    OutboundHop, RemoteFrameDedup, RemoteFrameError, DEFAULT_MAX_PENDING_BYTES,
+    DEFAULT_MAX_PENDING_HOPS,
 };
 pub use error::{fault_count, report_fault, LifecycleError, RuntimeError, SpawnError};
 pub use handle::{FlowHandle, JoinError};

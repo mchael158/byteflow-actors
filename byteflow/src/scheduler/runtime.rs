@@ -684,43 +684,102 @@ impl Runtime {
     /// The frame's sender is kept. This path does not restamp it as the local
     /// host (`0`). A `Cap` or `Pid` in the frame is refused. The name must
     /// already be registered on this node; the host still owns the socket.
+    ///
+    /// When [`RuntimeConfig::remote_dedup_window`] is set, acceptance is
+    /// transactional: a failed delivery (unknown name, full mailbox) rolls
+    /// back the reservation so the host may retransmit the same
+    /// `(sender, request_id)`.
     pub fn deliver_frame(&self, bytes: &[u8]) -> Result<(), super::distribution::RemoteFrameError> {
         let hop = super::distribution::decode_frame(bytes)?;
-        if hop.message.request_id != 0 {
+        let reservation = if hop.message.request_id != 0 {
             if let Some(dedup) = self.shared.remote_dedup.as_ref() {
-                if dedup
-                    .is_duplicate(hop.sender.as_u64(), hop.message.request_id)
+                match dedup
+                    .reserve(hop.sender.as_u64(), hop.message.request_id)
                     .map_err(|_| super::distribution::RemoteFrameError::Unavailable)?
                 {
-                    return Ok(());
+                    super::distribution::DedupTicket::Duplicate => return Ok(()),
+                    super::distribution::DedupTicket::Fresh { sender, request_id } => {
+                        Some((sender, request_id))
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let outcome = self.deliver_frame_after_dedup(hop);
+        if let Some((sender, request_id)) = reservation {
+            if let Some(dedup) = self.shared.remote_dedup.as_ref() {
+                match &outcome {
+                    // Mailbox accepted the hop (queued or handoff taken).
+                    Ok(()) | Err(DeliverAcceptError::AfterAccept(_)) => {
+                        let _ = dedup.commit(sender, request_id);
+                    }
+                    Err(DeliverAcceptError::BeforeAccept(_)) => {
+                        let _ = dedup.rollback(sender, request_id);
+                    }
                 }
             }
         }
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(DeliverAcceptError::BeforeAccept(e) | DeliverAcceptError::AfterAccept(e)) => Err(e),
+        }
+    }
+
+    fn deliver_frame_after_dedup(
+        &self,
+        hop: super::distribution::OutboundHop,
+    ) -> Result<(), DeliverAcceptError> {
         let cap = match self.shared.registry.whereis(hop.name.as_ref()) {
             Ok(Some(cap)) => cap,
-            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Ok(None) => {
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::NoSuchName,
+                ))
+            }
             Err(err) => {
                 super::error::report_fault(err);
-                return Err(super::distribution::RemoteFrameError::Unavailable);
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::Unavailable,
+                ));
             }
         };
         let target = match self.shared.caps.lookup(cap) {
             Ok(Some(entry)) => match entry.target() {
                 Some(id) => id,
-                None => return Err(super::distribution::RemoteFrameError::NoSuchName),
+                None => {
+                    return Err(DeliverAcceptError::BeforeAccept(
+                        super::distribution::RemoteFrameError::NoSuchName,
+                    ))
+                }
             },
-            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Ok(None) => {
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::NoSuchName,
+                ))
+            }
             Err(err) => {
                 super::error::report_fault(err);
-                return Err(super::distribution::RemoteFrameError::Unavailable);
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::Unavailable,
+                ));
             }
         };
         let mailbox = match self.shared.directory.lookup(target) {
             Ok(Some(mailbox)) => mailbox,
-            Ok(None) => return Err(super::distribution::RemoteFrameError::NoSuchName),
+            Ok(None) => {
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::NoSuchName,
+                ))
+            }
             Err(err) => {
                 super::error::report_fault(err);
-                return Err(super::distribution::RemoteFrameError::Unavailable);
+                return Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::Unavailable,
+                ));
             }
         };
         let stamped = Value::Message(hop.message);
@@ -735,7 +794,9 @@ impl Runtime {
                         let Some(flow) =
                             super::finalize::resume_or_fail(&self.shared, flow, dest, stamped)
                         else {
-                            return Err(super::distribution::RemoteFrameError::Unavailable);
+                            return Err(DeliverAcceptError::AfterAccept(
+                                super::distribution::RemoteFrameError::Unavailable,
+                            ));
                         };
                         enqueue_flow(&self.shared, flow);
                         wake_workers(&self.shared);
@@ -748,20 +809,33 @@ impl Runtime {
                             FlowOutcome::Failed("handoff missing dest register".into()),
                             FlowExitReason::Fault,
                         );
-                        Err(super::distribution::RemoteFrameError::Unavailable)
+                        Err(DeliverAcceptError::AfterAccept(
+                            super::distribution::RemoteFrameError::Unavailable,
+                        ))
                     }
                 }
             }
-            Ok(Err(full)) => Err(super::distribution::RemoteFrameError::Mailbox(
-                full.reason(),
+            Ok(Err(full)) => Err(DeliverAcceptError::BeforeAccept(
+                super::distribution::RemoteFrameError::Mailbox(full.reason()),
             )),
             Err(err) => {
                 super::error::report_fault(err);
-                Err(super::distribution::RemoteFrameError::Unavailable)
+                Err(DeliverAcceptError::BeforeAccept(
+                    super::distribution::RemoteFrameError::Unavailable,
+                ))
             }
         }
     }
+}
 
+/// Internal split for remote dedup: rollback only when the mailbox never
+/// accepted the hop.
+enum DeliverAcceptError {
+    BeforeAccept(super::distribution::RemoteFrameError),
+    AfterAccept(super::distribution::RemoteFrameError),
+}
+
+impl Runtime {
     fn require_live(&self, id: FlowId) -> Result<(), super::error::LifecycleError> {
         match self.shared.directory.lookup(id) {
             Ok(Some(_)) => Ok(()),
