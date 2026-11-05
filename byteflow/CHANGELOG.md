@@ -4,8 +4,16 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-11-05
+
 ### Added
 
+- **Sandbox:** [`RootAuthorityPolicy`] and [`Runtime::spawn_untrusted`] so host
+  admission can be TrustedHost / Restricted / Untrusted without changing the
+  default [`Runtime::spawn`] ROOT semantics. `RuntimeConfig::sandbox()` still
+  does not imply minimum host authority.
+- **Distribution:** [`DistributionConfig`] with hop + byte budgets;
+  [`OutboundHop`] holds an RAII bridge charge until dropped by the host.
 - **Transport:** reference TCP/UDP wire helpers (`BFT1` envelope, bounded outbound
   queue, inbound session cap, `NodeRouter`, `wait_bridge_drained` /
   `wait_wire_drained`). Documented in [`docs/remote-transport.md`](docs/remote-transport.md);
@@ -19,6 +27,11 @@ All notable changes to **byteflow-actors** are documented here.
 
 ### Fixed
 
+- **Remote:** [`RemoteFrameDedup`] is transactional (`reserve` / `commit` /
+  `rollback`). Failed `deliver_frame` (unknown name, full mailbox) no longer
+  permanently drops retransmits; concurrent same-key deliveries serialize.
+- **Distribution:** bridge memory is bounded by accounted bytes as well as hop
+  count; charges survive `try_recv` until the host drops the hop.
 - **Transport:** TCP writer retries the same frame after a write failure; inbound
   refuses excess sessions with an explicit `shutdown`; outbound pump stops (fail
   closed) when `encode_frame` fails instead of dropping hops silently.
