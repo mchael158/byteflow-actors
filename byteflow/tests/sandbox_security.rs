@@ -482,6 +482,64 @@ fn sandbox_restricted_profile_sets_trust() {
     let c = RuntimeConfig::sandbox_restricted();
     assert_eq!(c.trust, TrustLevel::Restricted);
     assert_eq!(c.max_flows, 128);
+    assert!(c.applies_sandbox_caps());
+    assert!(!RuntimeConfig::default().applies_sandbox_caps());
+}
+
+#[derive(Debug, Default)]
+struct AuditCapture(std::sync::Mutex<Vec<String>>);
+
+impl byteflow::SecurityAuditSink for AuditCapture {
+    fn record(&self, event: &byteflow::SecurityEvent) {
+        if let Ok(mut g) = self.0.lock() {
+            g.push(event.to_string());
+        }
+    }
+}
+
+#[test]
+fn sandbox_verify_failure_notifies_audit_sink() -> Result<(), Box<dyn std::error::Error>> {
+    let audit = Arc::new(AuditCapture::default());
+    let mut chunk = tiny_main();
+    chunk.constants.push(Value::Pid(99));
+    let config = RuntimeConfig {
+        trust: TrustLevel::Untrusted,
+        security_audit: Some(audit.clone() as Arc<dyn byteflow::SecurityAuditSink>),
+        ..tiny_config(1)
+    };
+    let err = Runtime::with_config(chunk, config);
+    assert!(err.is_err(), "untrusted Cap/Pid pool must fail verify");
+    let lines = audit.0.lock().map_err(|_| "poisoned")?;
+    assert!(
+        lines.iter().any(|l| l.contains("module_rejected")),
+        "audit missing reject: {lines:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_counters_track_spawn_and_finalize() -> Result<(), Box<dyn std::error::Error>> {
+    let config = RuntimeConfig::sandbox();
+    let rt = Runtime::with_config(tiny_main(), config)?;
+    let before = rt.security_counters();
+    let h = rt.spawn(0, &[])?;
+    let mid = rt.security_counters();
+    assert!(mid.capabilities_created > before.capabilities_created);
+    assert!(mid.active_untrusted_flows >= 1);
+    let _ = h.join();
+    let after = rt.security_counters();
+    assert!(after.capabilities_revoked >= before.capabilities_revoked);
+    assert_eq!(after.active_untrusted_flows, 0);
+    rt.shutdown();
+    Ok(())
+}
+
+#[test]
+fn sandbox_profile_fingerprint_is_stable_across_clones() {
+    let a = RuntimeConfig::sandbox();
+    let b = a.clone();
+    assert_eq!(a.policy_fingerprint(), b.policy_fingerprint());
+    assert!(a.applies_sandbox_caps());
 }
 
 #[test]
