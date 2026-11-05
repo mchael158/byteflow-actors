@@ -468,6 +468,25 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                 return;
             }
             VmResult::Trap(fault) => {
+                if let crate::Fault::NativeDenied(ref err) = fault {
+                    let index = match err {
+                        crate::NativeCallError::IndexNotAllowlisted(i)
+                        | crate::NativeCallError::IndexOutOfRange(i) => *i,
+                        crate::NativeCallError::NoNativeRight | crate::NativeCallError::Revoked => {
+                            0
+                        }
+                    };
+                    crate::scheduler::runtime::record_security_event(
+                        shared,
+                        &crate::scheduler::sandbox::SecurityEvent::NativeDenied { index },
+                    );
+                    crate::scheduler::runtime::record_security_event(
+                        shared,
+                        &crate::scheduler::sandbox::SecurityEvent::AccessDenied {
+                            reason: "native_denied",
+                        },
+                    );
+                }
                 finish_failed(shared, *flow, fault.to_string());
                 return;
             }

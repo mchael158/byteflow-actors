@@ -12,8 +12,10 @@ questions. Passing one of them does not make a module safe.
 | Native table / `NativeMask` | Which host functions `CallNative` may reach | Scheduler effects such as `Spawn`, `Send`, and `Jump` |
 
 `Runtime::new` stays permissive (`QuotaConfig::permissive`, no process-wide
-caps). A sandbox is opt-in via `RuntimeConfig::sandbox` and
-`QuotaConfig::sandbox`. The embedder still owns sockets, files, and Tokio.
+caps). A sandbox is opt-in via `RuntimeConfig::sandbox` /
+`sandbox_restricted` and `QuotaConfig::sandbox`. Use
+`applies_sandbox_caps()` to detect armed process ceilings. The embedder
+still owns sockets, files, and Tokio.
 
 `examples/untrusted.rs` loads a `.bf` produced by `assemble`, rejects a bad
 listing and a bad byte buffer, checks the digest, spawns the guest with an

@@ -36,7 +36,11 @@ RuntimeConfig / TrustLevel / policy_fingerprint
 
 - Default `RuntimeConfig` stays **permissive** (`max_* = 0` unlimited).
 - `RuntimeConfig::sandbox()` / `sandbox_restricted()` enable fail-closed caps.
+- `RuntimeConfig::applies_sandbox_caps()` reports whether process-wide ceilings
+  are armed (independent of `TrustLevel`).
 - `RuntimeConfig::policy_fingerprint()` identifies the active policy.
+- Optional `security_audit` sink receives module rejects, Cap revoke, and
+  native denials without full CapId tokens.
 
 See also `trust-model.md`, `capabilities.md`, `quotas.md`, `threat-model.md`,
 `limitations.md`.
