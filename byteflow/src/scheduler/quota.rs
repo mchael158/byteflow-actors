@@ -89,9 +89,17 @@ impl TokenBucket {
         if elapsed >= Duration::from_millis(50) {
             let add = tokens_for_elapsed(elapsed, self.refill_per_sec);
             if add > 0 {
-                let cur = self.tokens.load(Ordering::Relaxed);
-                let new = cur.saturating_add(add).min(self.capacity);
-                self.tokens.store(new, Ordering::Relaxed);
+                loop {
+                    let cur = self.tokens.load(Ordering::Acquire);
+                    let new = cur.saturating_add(add).min(self.capacity);
+                    if self
+                        .tokens
+                        .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
                 *last = Instant::now();
             }
         }
@@ -104,13 +112,13 @@ impl TokenBucket {
             return false;
         }
         loop {
-            let cur = self.tokens.load(Ordering::Relaxed);
+            let cur = self.tokens.load(Ordering::Acquire);
             if cur <= 0 {
                 return false;
             }
             if self
                 .tokens
-                .compare_exchange_weak(cur, cur - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 return true;
@@ -127,11 +135,11 @@ impl TokenBucket {
             return;
         }
         loop {
-            let cur = self.tokens.load(Ordering::Relaxed);
+            let cur = self.tokens.load(Ordering::Acquire);
             let new = cur.saturating_add(extra);
             if self
                 .tokens
-                .compare_exchange_weak(cur, new, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 return;
@@ -225,12 +233,20 @@ impl FlowQuota {
     /// Call once per executed instruction (or every N, in a batch — the
     /// batch only thickens trap latency, it does not change the limit).
     pub fn charge_cpu(&self, cost: i64) -> Result<(), QuotaError> {
-        let remaining = self.cpu_budget.fetch_sub(cost, Ordering::Relaxed) - cost;
-        if remaining < 0 {
-            self.cpu_budget.fetch_add(cost, Ordering::Relaxed);
-            return Err(QuotaError::CpuExhausted);
+        loop {
+            let cur = self.cpu_budget.load(Ordering::Acquire);
+            if cur < cost {
+                return Err(QuotaError::CpuExhausted);
+            }
+            let new = cur - cost;
+            if self
+                .cpu_budget
+                .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     pub fn alloc(&self, bytes: usize) -> Result<(), QuotaError> {
@@ -463,5 +479,117 @@ mod tests {
         assert!(q.check_spawn().is_ok());
         assert!(q.check_spawn().is_ok());
         assert!(q.check_spawn().is_err());
+    }
+
+    #[test]
+    fn concurrent_try_consume_never_over_issues() -> Result<(), String> {
+        use std::sync::Arc;
+        use std::thread;
+
+        const CAP: i64 = 128;
+        const WORKERS: usize = 16;
+        const ROUNDS: usize = 512;
+        let bucket = Arc::new(TokenBucket::new(CAP, 0));
+        let successes = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let bucket = Arc::clone(&bucket);
+                let successes = Arc::clone(&successes);
+                thread::spawn(move || {
+                    for _ in 0..ROUNDS {
+                        if bucket.try_consume() {
+                            successes.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().map_err(|_| "worker panicked".to_string())?;
+        }
+        if successes.load(Ordering::Relaxed) != CAP as usize {
+            return Err(format!(
+                "issued {} tokens, capacity {CAP}",
+                successes.load(Ordering::Relaxed)
+            ));
+        }
+        if bucket.try_consume() {
+            return Err("bucket should be empty".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_credit_accumulates_without_loss() -> Result<(), String> {
+        use std::sync::Arc;
+        use std::thread;
+
+        const WORKERS: usize = 12;
+        const PER_WORKER: i64 = 25;
+        let bucket = Arc::new(TokenBucket::new(0, 0));
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let bucket = Arc::clone(&bucket);
+                thread::spawn(move || {
+                    for _ in 0..PER_WORKER {
+                        bucket.credit(1);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().map_err(|_| "worker panicked".to_string())?;
+        }
+        let expected = (WORKERS as i64) * PER_WORKER;
+        let mut consumed = 0i64;
+        while bucket.try_consume() {
+            consumed += 1;
+        }
+        if consumed != expected {
+            return Err(format!("consumed {consumed}, expected {expected}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_charge_cpu_respects_budget() -> Result<(), String> {
+        use std::sync::Arc;
+        use std::thread;
+
+        const BUDGET: i64 = 200;
+        const WORKERS: usize = 8;
+        const CHARGE: i64 = 1;
+        const ROUNDS: usize = 100;
+        let quota = Arc::new(FlowQuota::new(BUDGET, 1024, 1, 1, 1, 1));
+        let ok = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let quota = Arc::clone(&quota);
+                let ok = Arc::clone(&ok);
+                thread::spawn(move || {
+                    for _ in 0..ROUNDS {
+                        if quota.charge_cpu(CHARGE).is_ok() {
+                            ok.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().map_err(|_| "worker panicked".to_string())?;
+        }
+        if ok.load(Ordering::Relaxed) != BUDGET as usize {
+            return Err(format!(
+                "charged {} times, budget {BUDGET}",
+                ok.load(Ordering::Relaxed)
+            ));
+        }
+        if quota.charge_cpu(1).is_ok() {
+            return Err("budget should be exhausted".into());
+        }
+        if quota.remaining_cpu() != 0 {
+            return Err(format!("remaining {}", quota.remaining_cpu()));
+        }
+        Ok(())
     }
 }

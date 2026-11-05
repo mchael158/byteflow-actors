@@ -71,6 +71,11 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "runtime"
 harness = false
 
+[[test]]
+name = "jit_differential"
+path = "tests/jit_differential.rs"
+required-features = ["jit"]
+
 [lints.rust]
 unsafe_code = "deny"
 

@@ -769,4 +769,98 @@ mod properties {
         }
         Ok(())
     }
+
+    #[test]
+    fn table_attenuate_never_escalates_rights() -> Result<(), String> {
+        let table = CapTable::new();
+        let holder = next_flow_id();
+        let peer = next_flow_id();
+        let target = next_flow_id();
+        let id = table
+            .mint(holder, target, CapRights::SEND)
+            .map_err(|e| e.to_string())?;
+        let child = table
+            .attenuate(
+                id,
+                holder,
+                peer,
+                CapRights::ADMIN.union(CapRights::SEND),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        let entry = table
+            .resolve(child, peer, CapRights::SEND)
+            .map_err(|e| e.to_string())?;
+        if entry.cap.rights().contains(CapRights::ADMIN) {
+            return Err("attenuate must not grant ADMIN".into());
+        }
+        match table.resolve(child, peer, CapRights::ADMIN) {
+            Err(CapError::InsufficientRights) => {}
+            Ok(_) => return Err("child must not satisfy ADMIN".into()),
+            Err(e) => return Err(format!("expected InsufficientRights, got {e}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn delegated_cap_is_usable_until_target_revoked() -> Result<(), String> {
+        let table = CapTable::new();
+        let holder = next_flow_id();
+        let delegatee = next_flow_id();
+        let target = next_flow_id();
+        let root = table
+            .mint(holder, target, CapRights::SEND.union(CapRights::FLOW))
+            .map_err(|e| e.to_string())?;
+        let derived = table
+            .delegate(root, holder, delegatee)
+            .map_err(|e| e.to_string())?;
+        table
+            .resolve(derived, delegatee, CapRights::SEND)
+            .map_err(|e| e.to_string())?;
+        table.revoke_flow(target).map_err(|e| e.to_string())?;
+        match table.resolve(derived, delegatee, CapRights::SEND) {
+            Err(CapError::Unknown) => {}
+            Ok(_) => return Err("revoked derived cap must not resolve".into()),
+            Err(e) => return Err(format!("expected Unknown, got {e}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_revoke_and_resolve_fail_closed() -> Result<(), String> {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use std::thread;
+
+        for _ in 0..48 {
+            let table = Arc::new(CapTable::new());
+            let holder = next_flow_id();
+            let target = next_flow_id();
+            let id = table
+                .mint(holder, target, CapRights::SEND)
+                .map_err(|e| e.to_string())?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let table = Arc::clone(&table);
+                let stop = Arc::clone(&stop);
+                handles.push(thread::spawn(move || {
+                    while !stop.load(AtomicOrdering::Acquire) {
+                        let _ = table.resolve(id, holder, CapRights::SEND);
+                    }
+                }));
+            }
+            table.revoke_flow(target).map_err(|e| e.to_string())?;
+            stop.store(true, AtomicOrdering::Release);
+            for handle in handles {
+                handle.join().map_err(|_| "worker panicked".to_string())?;
+            }
+            match table.resolve(id, holder, CapRights::SEND) {
+                Err(CapError::Unknown) => {}
+                Ok(_) => return Err("post-revoke resolve must fail closed".into()),
+                Err(e) => return Err(format!("expected Unknown, got {e}")),
+            }
+        }
+        Ok(())
+    }
 }
