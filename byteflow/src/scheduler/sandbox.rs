@@ -118,6 +118,22 @@ impl SecurityCounters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Saturating decrement for [`Self::active_untrusted_flows`].
+    pub fn dec_active_untrusted(&self) {
+        let mut cur = self.active_untrusted_flows.load(Ordering::Relaxed);
+        while cur > 0 {
+            match self.active_untrusted_flows.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> SecurityCountersSnapshot {
         SecurityCountersSnapshot {
             denied_operations: self.denied_operations.load(Ordering::Relaxed),

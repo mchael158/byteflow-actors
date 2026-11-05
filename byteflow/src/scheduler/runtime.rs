@@ -205,6 +205,21 @@ impl RuntimeConfig {
     pub fn policy_fingerprint(&self) -> super::sandbox::PolicyFingerprint {
         super::sandbox::policy_fingerprint(self)
     }
+
+    /// True when at least one process-wide sandbox ceiling is armed
+    /// (`max_flows` / ask / host-await / runtime bytes tighter than the
+    /// permissive defaults). Does not imply the chunk was verified as
+    /// Untrusted — check [`Self::trust`] separately.
+    pub fn applies_sandbox_caps(&self) -> bool {
+        self.max_flows != 0
+            || self.max_ask_waits != 0
+            || self.max_host_awaits != 0
+            || self.max_links != 0
+            || self.max_monitors != 0
+            || self.max_registry_names != 0
+            || self.max_runtime_bytes < 256 * 1024 * 1024
+            || self.quota.cpu_budget < super::quota::QuotaConfig::permissive().cpu_budget
+    }
 }
 
 /// State shared by every worker thread and the timer thread. Everything in
@@ -356,13 +371,19 @@ impl Runtime {
         natives: Arc<NativeTable>,
         config: RuntimeConfig,
     ) -> Result<Self, SpawnError> {
-        crate::bytecode::verify_with(
+        if let Err(err) = crate::bytecode::verify_with(
             &chunk,
             crate::bytecode::VerifyConfig {
                 trust: config.trust,
             },
-        )
-        .map_err(SpawnError::VerifyFailed)?;
+        ) {
+            if let Some(sink) = config.security_audit.as_ref() {
+                sink.record(&super::sandbox::SecurityEvent::ModuleRejected {
+                    reason: "verify_failed",
+                });
+            }
+            return Err(SpawnError::VerifyFailed(err));
+        }
         let chunk = Arc::new(chunk);
         let workers_n = config.workers.max(1);
         let quantum = config.quantum.max(1);

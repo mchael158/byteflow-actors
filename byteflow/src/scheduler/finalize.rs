@@ -442,19 +442,7 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
                 shared.trust,
                 crate::bytecode::TrustLevel::Untrusted | crate::bytecode::TrustLevel::Restricted
             ) {
-                let counter = &shared.security.active_untrusted_flows;
-                let mut cur = counter.load(std::sync::atomic::Ordering::Relaxed);
-                while cur > 0 {
-                    match counter.compare_exchange_weak(
-                        cur,
-                        cur - 1,
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(actual) => cur = actual,
-                    }
-                }
+                shared.security.dec_active_untrusted();
             }
         }
         Err(e) => report_fault(e),
