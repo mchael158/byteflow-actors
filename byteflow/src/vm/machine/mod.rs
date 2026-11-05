@@ -91,7 +91,7 @@ impl Vm {
         let mut frame = Frame::new(function, def.num_registers, None);
         frame.set_pc(def.entry as usize);
         load_frame_args(&mut frame, args.iter().cloned(), def.arity)?;
-        Ok(Vm {
+        let mut vm = Vm {
             chunk,
             natives,
             native_gate,
@@ -102,11 +102,9 @@ impl Vm {
             memory: None,
             dict: None,
             dict_bytes: 0,
-        })
-        .and_then(|mut vm| {
-            vm.frames.push(frame);
-            Ok(vm)
-        })
+        };
+        vm.frames.push(frame);
+        Ok(vm)
     }
 
     /// Attach the flow's quota so register stores of `Str`/`Bytes` charge heap.

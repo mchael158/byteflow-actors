@@ -425,8 +425,39 @@ fn finalize_one(shared: &Shared, mut pending: PendingExit, work: &mut Vec<Pendin
 
     wake_orphaned_asks(shared, id, reason);
 
-    if let Err(e) = shared.caps.revoke_flow(id) {
-        report_fault(e);
+    match shared.caps.revoke_flow(id) {
+        Ok(removed) => {
+            crate::scheduler::runtime::record_security_event(
+                shared,
+                &crate::scheduler::sandbox::SecurityEvent::CapabilityRevoked {
+                    flow: id.as_u64(),
+                    removed,
+                },
+            );
+            crate::scheduler::runtime::record_security_event(
+                shared,
+                &crate::scheduler::sandbox::SecurityEvent::FlowFinalized { flow: id.as_u64() },
+            );
+            if matches!(
+                shared.trust,
+                crate::bytecode::TrustLevel::Untrusted | crate::bytecode::TrustLevel::Restricted
+            ) {
+                let counter = &shared.security.active_untrusted_flows;
+                let mut cur = counter.load(std::sync::atomic::Ordering::Relaxed);
+                while cur > 0 {
+                    match counter.compare_exchange_weak(
+                        cur,
+                        cur - 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => cur = actual,
+                    }
+                }
+            }
+        }
+        Err(e) => report_fault(e),
     }
     match shared.quotas.remove(id) {
         Ok(Some(q)) => {
