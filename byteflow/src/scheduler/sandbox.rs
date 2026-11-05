@@ -58,6 +58,7 @@ pub fn policy_fingerprint(config: &RuntimeConfig) -> PolicyFingerprint {
     let mut hasher = DefaultHasher::new();
     POLICY_DOMAIN.hash(&mut hasher);
     trust_tag(config.trust).hash(&mut hasher);
+    root_authority_tag(config.root_authority).hash(&mut hasher);
     config.max_flows.hash(&mut hasher);
     config.max_ask_waits.hash(&mut hasher);
     config.max_host_awaits.hash(&mut hasher);
@@ -88,6 +89,14 @@ fn trust_tag(trust: TrustLevel) -> u8 {
         TrustLevel::Trusted => 0,
         TrustLevel::Restricted => 1,
         TrustLevel::Untrusted => 2,
+    }
+}
+
+fn root_authority_tag(policy: crate::scheduler::RootAuthorityPolicy) -> u8 {
+    match policy {
+        crate::scheduler::RootAuthorityPolicy::TrustedHost => 0,
+        crate::scheduler::RootAuthorityPolicy::Restricted => 1,
+        crate::scheduler::RootAuthorityPolicy::Untrusted => 2,
     }
 }
 

@@ -59,8 +59,10 @@
 //!
 //! Caps resolve only for the **holder** with sufficient rights. Derive a
 //! weaker grant with [`Fn::delegate`] / [`Cap::attenuate`] — never by
-//! copying a `CapId`. Host spawn is `ROOT`; bytecode [`Fn::spawn_confined`]
-//! starts at `NONE`.
+//! copying a `CapId`. Host [`Runtime::spawn`] follows
+//! [`RootAuthorityPolicy`] (default trusted `ROOT`); use
+//! [`Runtime::spawn_untrusted`] for minimum authority. Bytecode
+//! [`Fn::spawn_confined`] starts at `NONE`.
 //!
 //! # Values
 //!
@@ -326,16 +328,16 @@ pub use scheduler::{
     check_admin, check_link, check_monitor, decode_frame, encode_frame, exec_delegate, fault_count,
     finish_host_await, flow_id_from_u64, next_flow_id, policy_fingerprint, report_fault,
     AdminError, CapError, Capability, CapabilityAttestation, CapabilityGrantView, ChildSpec,
-    DedupState, DedupTicket, DEFAULT_MAX_PENDING_BYTES, DEFAULT_MAX_PENDING_HOPS, DelegateError,
-    Delivery, DistributionBridge, DistributionConfig, DownEvent, Flow, FlowExitReason, FlowHandle,
-    FlowId, FlowMetrics, FlowOutcome, FlowQuota, HostAwaitBridge, HostAwaitCompleter,
-    HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError, LinkError, LinkId,
-    Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason,
-    MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, PolicyFingerprint, QuotaConfig,
-    QuotaError, RegistryName, RemoteFrameDedup, RemoteFrameError, RestartStrategy, Runtime,
-    RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSnapshot,
-    RuntimeSpawner, SecurityAuditSink, SecurityCounters, SecurityCountersSnapshot, SecurityEvent,
-    SendError, SpawnError, Supervisor, SupervisorConfig, ThreadedHostAwait, WaitEpoch,
+    DedupState, DedupTicket, DelegateError, Delivery, DistributionBridge, DistributionConfig,
+    DownEvent, Flow, FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome, FlowQuota,
+    HostAwaitBridge, HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError,
+    LifecycleError, LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig,
+    MailboxFull, MailboxFullReason, MailboxStats, MonitorRef, OutboundHop, OverflowPolicy,
+    PolicyFingerprint, QuotaConfig, QuotaError, RegistryName, RemoteFrameDedup, RemoteFrameError,
+    RestartStrategy, RootAuthorityPolicy, Runtime, RuntimeConfig, RuntimeError, RuntimeMetrics,
+    RuntimeMetricsSnapshot, RuntimeSnapshot, RuntimeSpawner, SecurityAuditSink, SecurityCounters,
+    SecurityCountersSnapshot, SecurityEvent, SendError, SpawnError, Supervisor, SupervisorConfig,
+    ThreadedHostAwait, WaitEpoch, DEFAULT_MAX_PENDING_BYTES, DEFAULT_MAX_PENDING_HOPS,
     DEFAULT_QUANTUM,
 };
 pub use transport::{

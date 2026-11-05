@@ -7,8 +7,8 @@ use std::thread;
 use byteflow::{
     decode, decode_with, encode, verify, verify_with, Cap, CapId, CapRights, CapTarget, Chunk,
     Fault, FunctionDef, Instruction, MemoryBudget, NativeTable, Opcode, Program, QuotaConfig,
-    Runtime, RuntimeConfig, TrustLevel, Value, VerifyConfig, VerifyError, Vm, VmResult,
-    MAX_LIST_LEN,
+    RootAuthorityPolicy, Runtime, RuntimeConfig, TrustLevel, Value, VerifyConfig, VerifyError, Vm,
+    VmResult, MAX_LIST_LEN,
 };
 
 fn tiny_main() -> Chunk {
@@ -421,8 +421,8 @@ fn sandbox_rejects_privilege_escalation() {
 
 #[test]
 fn sandbox_denies_ungranted_native() -> Result<(), Box<dyn std::error::Error>> {
-    // Host-spawned roots get FLOW (incl. NATIVE). Confined children do not —
-    // that is the sandbox deny path for natives.
+    // Host `spawn` defaults to TrustedHost (FLOW incl. NATIVE). Confined
+    // children do not — that is the sandbox deny path for natives.
     let mut p = Program::new("native-deny");
     let child = p.function("child", 0, |f| {
         let n = f.load_i32(1);
@@ -441,6 +441,62 @@ fn sandbox_denies_ungranted_native() -> Result<(), Box<dyn std::error::Error>> {
     match outcome {
         byteflow::FlowOutcome::Completed(Value::Int(0)) => Ok(()),
         other => Err(format!("parent should complete; confined native denied: {other:?}").into()),
+    }
+}
+
+#[test]
+fn spawn_keeps_trusted_root_under_sandbox_config() -> Result<(), Box<dyn std::error::Error>> {
+    // RuntimeConfig::sandbox() must not silently strip host ROOT authority.
+    let mut p = Program::new("trusted-host");
+    p.function("main", 0, |f| {
+        let n = f.load_i32(1);
+        f.native1_on(n, 0); // print — requires NATIVE
+        f.return_(n);
+    });
+    let rt = Runtime::with_std_natives_and_config(p.build(), RuntimeConfig::sandbox())?;
+    let outcome = rt.spawn(0, &[])?.join();
+    rt.shutdown();
+    match outcome {
+        byteflow::FlowOutcome::Completed(Value::Int(1)) => Ok(()),
+        other => Err(format!("sandbox() spawn should keep NATIVE: {other:?}").into()),
+    }
+}
+
+#[test]
+fn spawn_untrusted_denies_native() -> Result<(), Box<dyn std::error::Error>> {
+    let mut p = Program::new("untrusted-host");
+    p.function("main", 0, |f| {
+        let n = f.load_i32(1);
+        f.native1_on(n, 0);
+        f.return_(n);
+    });
+    let rt = Runtime::with_std_natives_and_config(p.build(), tiny_config(1))?;
+    let outcome = rt.spawn_untrusted(0, &[])?.join();
+    rt.shutdown();
+    match outcome {
+        byteflow::FlowOutcome::Failed(msg) if msg.to_lowercase().contains("native") => Ok(()),
+        other => Err(format!("spawn_untrusted should deny native: {other:?}").into()),
+    }
+}
+
+#[test]
+fn root_authority_untrusted_confines_spawn() -> Result<(), Box<dyn std::error::Error>> {
+    let mut p = Program::new("policy-untrusted");
+    p.function("main", 0, |f| {
+        let n = f.load_i32(1);
+        f.native1_on(n, 0);
+        f.return_(n);
+    });
+    let config = RuntimeConfig {
+        root_authority: RootAuthorityPolicy::Untrusted,
+        ..tiny_config(1)
+    };
+    let rt = Runtime::with_std_natives_and_config(p.build(), config)?;
+    let outcome = rt.spawn(0, &[])?.join();
+    rt.shutdown();
+    match outcome {
+        byteflow::FlowOutcome::Failed(msg) if msg.to_lowercase().contains("native") => Ok(()),
+        other => Err(format!("Untrusted policy spawn should deny native: {other:?}").into()),
     }
 }
 
@@ -519,13 +575,25 @@ fn sandbox_verify_failure_notifies_audit_sink() -> Result<(), Box<dyn std::error
 
 #[test]
 fn sandbox_counters_track_spawn_and_finalize() -> Result<(), Box<dyn std::error::Error>> {
+    // Park on receive so finalize cannot race the mid-flight snapshot.
+    let mut p = Program::new("counters");
+    p.function("main", 0, |f| {
+        let msg = f.receive();
+        let n = f.hop_payload(msg);
+        f.return_(n);
+    });
     let config = RuntimeConfig::sandbox();
-    let rt = Runtime::with_config(tiny_main(), config)?;
+    let rt = Runtime::with_config(p.build(), config)?;
     let before = rt.security_counters();
     let h = rt.spawn(0, &[])?;
+    std::thread::sleep(std::time::Duration::from_millis(30));
     let mid = rt.security_counters();
     assert!(mid.capabilities_created > before.capabilities_created);
     assert!(mid.active_untrusted_flows >= 1);
+    rt.send(
+        h.id(),
+        Value::Message(byteflow::Message::request(1, 1, Value::Int(1))),
+    )?;
     let _ = h.join();
     let after = rt.security_counters();
     assert!(after.capabilities_revoked >= before.capabilities_revoked);

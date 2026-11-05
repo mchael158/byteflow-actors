@@ -548,6 +548,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     None,
                     Some(flow.id),
                     Some(ctx),
+                    None,
                 ) {
                     Ok(child) => {
                         let child_id = child.id();

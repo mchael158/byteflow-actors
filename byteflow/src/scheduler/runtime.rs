@@ -100,9 +100,52 @@ pub struct RuntimeConfig {
     /// Optional security audit sink (capability / quota / module denials).
     /// Independent of [`Self::log`]; never receives full CapId tokens.
     pub security_audit: Option<Arc<dyn super::sandbox::SecurityAuditSink>>,
+    /// Authority minted for host [`Runtime::spawn`] (not bytecode `Spawn`).
+    ///
+    /// Default [`RootAuthorityPolicy::TrustedHost`] preserves historical
+    /// ROOT + full native mask. [`Self::sandbox`] does **not** change this —
+    /// use [`Runtime::spawn_untrusted`] or set this field explicitly.
+    pub root_authority: RootAuthorityPolicy,
     /// Trace JIT settings (`feature = "jit"`). Ignored when the feature is off.
     #[cfg(feature = "jit")]
     pub jit: JitConfig,
+}
+
+/// Initial Cap rights for host-spawned root flows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RootAuthorityPolicy {
+    /// [`CapRights::ROOT`] + full native mask (historical host spawn).
+    #[default]
+    TrustedHost,
+    /// Flow rights without [`CapRights::NATIVE`]; empty native mask.
+    Restricted,
+    /// [`CapRights::NONE`] + empty native mask (minimum authority).
+    Untrusted,
+}
+
+impl RootAuthorityPolicy {
+    fn mint(self, flow: u64, natives_len: usize, cell: &crate::bytecode::RevocationCell) -> Cap {
+        match self {
+            Self::TrustedHost => Cap::root(
+                CapTarget::Flow(flow),
+                CapRights::ROOT,
+                Some(NativeMask::full(natives_len)),
+                cell,
+            ),
+            Self::Restricted => Cap::root(
+                CapTarget::Flow(flow),
+                CapRights::from_bits(CapRights::FLOW.bits() & !CapRights::NATIVE.bits()),
+                Some(NativeMask::empty(natives_len)),
+                cell,
+            ),
+            Self::Untrusted => Cap::root(
+                CapTarget::Flow(flow),
+                CapRights::NONE,
+                Some(NativeMask::empty(natives_len)),
+                cell,
+            ),
+        }
+    }
 }
 
 /// Trace JIT toggles for [`RuntimeConfig`] (`feature = "jit"`).
@@ -154,6 +197,7 @@ impl Default for RuntimeConfig {
             log: None,
             quota: super::quota::QuotaConfig::default(),
             security_audit: None,
+            root_authority: RootAuthorityPolicy::TrustedHost,
             #[cfg(feature = "jit")]
             jit: JitConfig::default(),
         }
@@ -169,6 +213,10 @@ impl RuntimeConfig {
     /// per-flow budgets. Trust defaults to [`TrustLevel::Untrusted`]
     /// (inherited from [`Default`]) so Cap/Pid/Message constants are
     /// rejected at verify time.
+    ///
+    /// Does **not** change [`Self::root_authority`]: host [`Runtime::spawn`]
+    /// still mints trusted ROOT unless you set the policy or call
+    /// [`Runtime::spawn_untrusted`].
     ///
     /// Limits (starting point — tune under load):
     /// - `max_flows = 128` live flows
@@ -285,6 +333,7 @@ pub struct Shared {
     pub(crate) security_audit: Option<Arc<dyn super::sandbox::SecurityAuditSink>>,
     pub(crate) policy: super::sandbox::PolicyFingerprint,
     pub(crate) trust: crate::bytecode::TrustLevel,
+    pub(crate) root_authority: RootAuthorityPolicy,
 }
 
 /// A running Byteflow runtime: worker pool + timer thread over one shared
@@ -446,6 +495,7 @@ impl Runtime {
             security_audit: config.security_audit.clone(),
             policy: config.policy_fingerprint(),
             trust: config.trust,
+            root_authority: config.root_authority,
         });
 
         let mut workers = Vec::with_capacity(workers_n);
@@ -488,6 +538,9 @@ impl Runtime {
     /// Spawn a top-level flow starting at `function` in this runtime's
     /// chunk, returning a [`FlowHandle`] the caller can `.join()`.
     ///
+    /// Host authority follows [`RuntimeConfig::root_authority`] (default
+    /// trusted ROOT). For untrusted admission see [`Self::spawn_untrusted`].
+    ///
     /// Returns [`SpawnError::BadFunction`] if `function` is out of range.
     pub fn spawn(&self, function: u32, args: &[Value]) -> Result<FlowHandle, SpawnError> {
         spawn_on(
@@ -500,6 +553,24 @@ impl Runtime {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Like [`Self::spawn`], but forces [`RootAuthorityPolicy::Untrusted`]
+    /// (no Cap rights, empty native mask) regardless of config.
+    pub fn spawn_untrusted(&self, function: u32, args: &[Value]) -> Result<FlowHandle, SpawnError> {
+        spawn_on(
+            &self.shared,
+            &self.chunk,
+            &self.natives,
+            function,
+            args,
+            RestartPolicy::Never,
+            None,
+            None,
+            None,
+            Some(RootAuthorityPolicy::Untrusted),
         )
     }
 
@@ -1425,6 +1496,8 @@ pub(crate) fn spawn_on(
     supervisor: Option<SupervisorLink>,
     parent: Option<FlowId>,
     bytecode: Option<BytecodeSpawn<'_>>,
+    // When `bytecode` is `None`, overrides `Shared::root_authority`.
+    host_authority: Option<RootAuthorityPolicy>,
 ) -> Result<FlowHandle, SpawnError> {
     // Bytecode `Spawn` encodes argc. Host `Runtime::spawn` does not: a short
     // host argument list still fills the rest with `Unit`. Only the bytecode
@@ -1464,12 +1537,10 @@ pub(crate) fn spawn_on(
         }
     };
     let authority = match bytecode {
-        None => Cap::root(
-            CapTarget::Flow(id.as_u64()),
-            CapRights::ROOT,
-            Some(NativeMask::full(natives.len())),
-            cell.as_ref(),
-        ),
+        None => {
+            let policy = host_authority.unwrap_or(shared.root_authority);
+            policy.mint(id.as_u64(), natives.len(), cell.as_ref())
+        }
         Some(ctx) => match super::spawn::exec_spawn_authority(
             ctx.authority,
             ctx.cell,
@@ -1703,6 +1774,28 @@ impl RuntimeSpawner {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Host spawn with [`RootAuthorityPolicy::Untrusted`].
+    pub fn spawn_untrusted(
+        &self,
+        function: u32,
+        args: &[Value],
+        restart_policy: RestartPolicy,
+    ) -> Result<FlowHandle, SpawnError> {
+        spawn_on(
+            &self.shared,
+            &self.chunk,
+            &self.natives,
+            function,
+            args,
+            restart_policy,
+            None,
+            None,
+            None,
+            Some(RootAuthorityPolicy::Untrusted),
         )
     }
 
@@ -1721,6 +1814,7 @@ impl RuntimeSpawner {
             args,
             restart_policy,
             Some(supervisor),
+            None,
             None,
             None,
         )

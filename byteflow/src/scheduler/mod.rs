@@ -79,7 +79,8 @@ pub use registry::RegistryName;
 #[cfg(feature = "jit")]
 pub use runtime::JitConfig;
 pub use runtime::{
-    flow_id_from_u64, Runtime, RuntimeConfig, RuntimeSpawner, SendError, DEFAULT_QUANTUM,
+    flow_id_from_u64, RootAuthorityPolicy, Runtime, RuntimeConfig, RuntimeSpawner, SendError,
+    DEFAULT_QUANTUM,
 };
 pub use sandbox::{
     policy_fingerprint, CapabilityAttestation, CapabilityGrantView, PolicyFingerprint,
