@@ -10,12 +10,12 @@ use byteflow::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sender_zero = OutboundHop {
-        sender: FlowId::HOST,
-        node: 1,
-        name: std::sync::Arc::from("inbox"),
-        message: Message::new(0, 1, 7, Value::Int(8)),
-    };
+    let sender_zero = OutboundHop::new(
+        FlowId::HOST,
+        1,
+        std::sync::Arc::from("inbox"),
+        Message::new(0, 1, 7, Value::Int(8)),
+    );
     match encode_named(&sender_zero) {
         Err(RemoteFrameError::SenderZero) => {
             println!("sender 0 rejected");
@@ -24,12 +24,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cap = CapId::random()?;
-    let with_cap = OutboundHop {
-        sender: flow_id_from_u64(44),
-        node: 1,
-        name: std::sync::Arc::from("inbox"),
-        message: Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Cap(cap)),
-    };
+    let with_cap = OutboundHop::new(
+        flow_id_from_u64(44),
+        1,
+        std::sync::Arc::from("inbox"),
+        Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Cap(cap)),
+    );
     match encode_named(&with_cap) {
         Err(RemoteFrameError::LiveCapability) => {
             println!("capability rejected");
@@ -37,12 +37,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("capability should be rejected, got {other:?}").into()),
     }
 
-    let with_pid = OutboundHop {
-        sender: flow_id_from_u64(44),
-        node: 1,
-        name: std::sync::Arc::from("inbox"),
-        message: Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Pid(44)),
-    };
+    let with_pid = OutboundHop::new(
+        flow_id_from_u64(44),
+        1,
+        std::sync::Arc::from("inbox"),
+        Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Pid(44)),
+    );
     match encode_named(&with_pid) {
         Err(RemoteFrameError::LiveCapability) => {
             println!("pid rejected");
@@ -80,12 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cap = destination.mint_cap(handle.id())?;
     destination.register_name("inbox", cap)?;
 
-    let frame = encode_named(&OutboundHop {
-        sender: flow_id_from_u64(44),
-        node: 2,
-        name: std::sync::Arc::from("inbox"),
-        message: Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Int(8)),
-    })?;
+    let frame = encode_named(&OutboundHop::new(
+        flow_id_from_u64(44),
+        2,
+        std::sync::Arc::from("inbox"),
+        Message::new(flow_id_from_u64(44).as_u64(), 1, 7, Value::Int(8)),
+    ))?;
     destination.deliver_frame(&frame)?;
     let outcome = handle
         .join_timeout(std::time::Duration::from_secs(2))

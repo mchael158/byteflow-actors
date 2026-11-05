@@ -30,8 +30,10 @@ Default maximum `payload_len`: 4 MiB ([`DEFAULT_MAX_WIRE_BYTES`]).
 | [`spawn_tcp_inbound`] | Accept connections → `read_wire_frame` → your `deliver` closure (typically [`Runtime::deliver_frame`]). [`TcpInboundConfig::max_sessions`] caps concurrent session threads (`0` = unlimited). |
 
 When the outbound queue is full, the bridge pump **blocks** on `send`. The bridge itself
-caps at 1024 pending hops; a slow peer eventually fails `SendRemote` on the origin flow
-instead of buffering without limit.
+caps pending work by **hop count and accounted bytes** ([`DistributionConfig`], defaults
+1024 hops / 64 MiB). A reservation stays attached to each [`OutboundHop`] until the host
+drops it (after encode/send), so memory held off the queue still counts. A slow peer
+eventually fails `SendRemote` on the origin flow instead of buffering without limit.
 
 Reconnect: on write failure the outbound writer drops the TCP session, reconnects, and
 **retries the same wire frame** before dequeuing the next one (reference behavior;
