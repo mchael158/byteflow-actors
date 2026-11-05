@@ -2,22 +2,21 @@
 
 ## In scope
 
-- Hostile `.bf` modules (malformed wire, forged Cap/Pid/Message constants).
-- Resource exhaustion via spawn/send/ask/host-await/heap growth.
-- Capability confusion (wrong holder, revoked token, rights escalation).
-- Native calls without NATIVE right / allowlist mask.
+- Hostile `.bf` (malformed wire, Cap/Pid/Message constants)
+- Exhaustion via spawn / send / ask / host-await / heap
+- Cap confusion (wrong holder, revoked token, rights escalation)
+- `CallNative` without `NATIVE` / mask
 
 ## Out of scope
 
-- Kernel / process isolation (containers, seccomp, separate address spaces).
-- Hostile **host** Rust (natives, bridges, embedder bugs).
-- Cryptographic module attestation (use host signing on top of
-  `fingerprint_bf`).
-- Network peers; transport is host-owned.
+- Kernel isolation (containers, seccomp, separate AS)
+- Hostile host Rust (natives, bridges, embedder bugs)
+- Crypto module attestation (host signing on `fingerprint_bf`)
+- Network peers (transport is host-owned)
 
-## Fail-closed defaults
+## Fail-closed
 
-- Verify/decode trust = Untrusted.
-- Missing HostAwait bridge → opcode fails.
-- Quota / flow limit exhaustion → error, not silent unlimited.
-- Revoked Cap → resolve fails; natives see `NativeCallError::Revoked`.
+- Default trust = Untrusted
+- No HostAwait bridge → opcode fails
+- Quota / flow limit hit → error
+- Revoked Cap → resolve fails; natives → `NativeCallError::Revoked`

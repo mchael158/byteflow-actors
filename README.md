@@ -4,18 +4,21 @@
 [![docs.rs](https://docs.rs/byteflow-actors/badge.svg)](https://docs.rs/byteflow-actors)
 [![license](https://img.shields.io/crates/l/byteflow-actors.svg)](LICENSE)
 
-Embeddable concurrency for Rust: register bytecode via **`Program`** / **`Fn`**, **flows**, mailboxes, **Atomic Hop** (`Value::Message` only on `Send`), FlowCap (ABI v5) with attenuation and per-flow quotas, named discovery (`register_name` / `whereis`), and a supervisor — **one crate**.
+In-process flow runtime for Rust: `Program` / `Fn` bytecode, M:N flows, Atomic
+Hop (`Value::Message` on `Send`), FlowCap, quotas, named discovery, supervisor.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.22"
+byteflow-actors = "0.9.23"
 ```
 
 ```rust
 use byteflow::{Program, Runtime, Value};
 ```
 
-Full documentation and examples: the crate README on [crates.io/crates/byteflow-actors](https://crates.io/crates/byteflow-actors) and [docs.rs](https://docs.rs/byteflow-actors).
+Docs and examples: [crates.io/crates/byteflow-actors](https://crates.io/crates/byteflow-actors) ·
+[docs.rs/byteflow-actors](https://docs.rs/byteflow-actors) · crate README in
+[`byteflow/README.md`](byteflow/README.md).
 
 ```text
 cargo run -p byteflow-actors --example ping_pong
@@ -24,11 +27,15 @@ cargo run -p byteflow-actors --bin byteflow -- demo ping-pong
 cargo install byteflow-actors
 ```
 
-**Not** a Tokio replacement and **not** a cluster protocol. Host Rust owns I/O; Byteflow owns cheap flows. Local bytecode covers `exit/2`, the process dictionary, `after`, `is_alive`, `start_supervisor`, `start_child`, maps, an integer `receive` comparison, and one table per flow. A remote hop is a `.bf` frame the host writes on its own socket — see `byteflow/docs/beam-mapping.md`.
+Not Tokio. Not a cluster. Host owns I/O; Byteflow owns flows. Remote hops are
+`.bf` frames the host writes on its own socket —
+[`byteflow/docs/beam-mapping.md`](byteflow/docs/beam-mapping.md),
+[`byteflow/docs/remote-transport.md`](byteflow/docs/remote-transport.md).
 
-Atomic Hop (`Value::Message`): see `byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_LOG=info` for scheduler stderr logs.
+Atomic Hop: [`byteflow/docs/atomic-hop.md`](byteflow/docs/atomic-hop.md).  
+Scheduler logs: `BYTEFLOW_LOG=info`.
 
-**Design guides** (every example is a doctest, so they cannot drift from the API):
+**Guides** (doctested where applicable):
 [atomic-hop](byteflow/docs/atomic-hop.md) ·
 [beam-mapping](byteflow/docs/beam-mapping.md) ·
 [lifecycle](byteflow/docs/lifecycle.md) ·
@@ -38,6 +45,9 @@ Atomic Hop (`Value::Message`): see `byteflow/docs/atomic-hop.md`. Set `BYTEFLOW_
 [properties](byteflow/docs/properties.md) ·
 [host-await](byteflow/docs/host-await.md) ·
 [untrusted](byteflow/docs/untrusted.md) ·
-[security](byteflow/docs/security.md)
+[security](byteflow/docs/security.md) ·
+[remote-transport](byteflow/docs/remote-transport.md) ·
+[production-embedding](byteflow/docs/production-embedding.md) ·
+[sandbox](byteflow/docs/sandbox/)
 
 License: MIT OR Apache-2.0 · [github.com/mchael158/byteflow-actors](https://github.com/mchael158/byteflow-actors)

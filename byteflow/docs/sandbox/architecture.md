@@ -1,46 +1,35 @@
 # Sandbox architecture
 
-Byteflow’s sandbox is a **host-opt-in** policy layer over the existing runtime
-boundary. It does not move CapTable, mailboxes, or I/O into the VM.
+Host-opt-in policy over the existing runtime. CapTable, mailboxes, and I/O stay
+outside the VM.
 
 ```text
-HOST APPLICATION
-       |
-       v
-RuntimeConfig / TrustLevel / policy_fingerprint
-       |
-       v
-  Runtime (scheduler M:N)
-       |
-  +----+----+----+
-  |    |    |    |
- Caps Quotas MemoryBudget  verify(trust)
-  |    |    |    |
-  +----+----+----+
-       |
-     Flow → single Vm → VmResult / Fault
+HOST
+  → RuntimeConfig / TrustLevel / root_authority / policy_fingerprint
+  → Runtime (M:N)
+       Caps · Quotas · MemoryBudget · verify(trust)
+  → Flow → Vm → VmResult / Fault
 ```
 
 ## Layers
 
-1. **Trust policy** — `TrustLevel::{Trusted, Restricted, Untrusted}` controls
-   constant-pool authority tags at decode/verify. Bytecode cannot raise trust.
-2. **Capabilities** — `CapId` (128-bit CSPRNG), `CapTable`, attenuation-only
-   delegation, epoch revocation.
-3. **Resource quotas** — per-flow `FlowQuota` + process-wide `max_flows`,
-   `max_ask_waits`, `max_host_awaits`, `MemoryBudget`.
-4. **Bytecode validation** — `verify` / `decode_with` before admission.
-5. **Runtime enforcement** — NativeGate, hop auth, finalize cleanup.
+1. **TrustLevel** — constant-pool Cap/Pid/Message at decode/verify (bytecode cannot raise).
+2. **Capabilities** — 128-bit `CapId`, CapTable, attenuate-only, epoch revoke.
+3. **Quotas** — per-flow `FlowQuota` + `max_flows` / `max_ask_waits` / `max_host_awaits` / `MemoryBudget`.
+4. **verify / decode_with** — before admission.
+5. **Enforcement** — NativeGate, hop auth, finalize cleanup.
+6. **RootAuthorityPolicy** — Cap minted for host `spawn` (independent of TrustLevel).
 
-## Opt-in
+## Config
 
-- Default `RuntimeConfig` stays **permissive** (`max_* = 0` unlimited).
-- `RuntimeConfig::sandbox()` / `sandbox_restricted()` enable fail-closed caps.
-- `RuntimeConfig::applies_sandbox_caps()` reports whether process-wide ceilings
-  are armed (independent of `TrustLevel`).
-- `RuntimeConfig::policy_fingerprint()` identifies the active policy.
-- Optional `security_audit` sink receives module rejects, Cap revoke, and
-  native denials without full CapId tokens.
+| Knob | Effect |
+|------|--------|
+| Default `RuntimeConfig` | Permissive (`max_* = 0`) |
+| `sandbox()` / `sandbox_restricted()` | Fail-closed quotas + relation caps + untrusted pool; **does not** change `root_authority` |
+| `root_authority` | `TrustedHost` \| `Restricted` \| `Untrusted` for host `spawn` |
+| `spawn_untrusted` | Forces Untrusted root Cap for that spawn |
+| `applies_sandbox_caps()` | Whether process ceilings are armed |
+| `policy_fingerprint()` | Digest of security knobs (includes `root_authority`) |
+| `security_audit` | Module reject / Cap revoke / native deny (no full CapId) |
 
-See also `trust-model.md`, `capabilities.md`, `quotas.md`, `threat-model.md`,
-`limitations.md`.
+`trust-model.md` · `capabilities.md` · `quotas.md` · `threat-model.md` · `limitations.md`

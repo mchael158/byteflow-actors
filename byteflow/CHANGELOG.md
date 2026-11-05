@@ -4,6 +4,14 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-11-05
+
+### Docs
+
+- Rewrote READMEs and sandbox / embedding / remote / security guides: drop
+  generic marketing copy; document transactional `RemoteFrameDedup`,
+  `DistributionConfig`, and `RootAuthorityPolicy` / `spawn_untrusted`.
+
 ## [0.9.22] — 2026-11-05
 
 ### Added

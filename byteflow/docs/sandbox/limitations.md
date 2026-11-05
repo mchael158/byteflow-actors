@@ -1,19 +1,14 @@
 # Limitations
 
-**The Byteflow sandbox is not equivalent to a separate OS process or
-container.** All Flows, VMs, natives, and host bridges share one address
-space and one Rust process.
+Sandbox ≠ separate OS process. All flows, VMs, natives, and host bridges share
+one address space.
 
-Implications:
+- Compromised native / host `unsafe` bypasses Caps and quotas.
+- `MemoryBudget` counts runtime heap charges (`Str`/`Bytes`/shared heaps), not
+  every host allocation before hand-off.
+- `policy_fingerprint` / `attest_capabilities` are audit aids, not hardware RoT.
+- Sockets, files, Tokio stay host-owned; sandbox bounds scheduler-visible resources only.
 
-- A compromised native or `unsafe` in host code bypasses Caps and quotas.
-- Memory accounting covers runtime-managed heap charges, not every Rust
-  allocation the host performs before handing buffers over.
-- Policy fingerprints and capability attestations are audit aids, not
-  hardware roots of trust.
-- Tokio / sockets / files remain host responsibilities; the sandbox only
-  bounds scheduler-visible resources.
-
-Deployment recommendation: pair `RuntimeConfig::sandbox()` with process
-isolation when the guest must be treated as fully adversarial at the OS
-boundary.
+For OS-level isolation of adversarial guests, run the host process under an
+external sandbox (container / seccomp / separate process) **in addition to**
+`RuntimeConfig::sandbox()`.

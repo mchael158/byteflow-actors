@@ -1,12 +1,8 @@
 # Capabilities
 
-- `CapId` is a 128-bit OS CSPRNG token (`CapId::random`). Possession of the
-  bits alone is not authorization.
-- Authorization requires CapTable lookup + holder + target + rights + live
-  revocation epoch.
-- Delegation always intersects rights (`Cap::attenuate` /
-  `CapTable::attenuate`). Escalation is impossible by construction.
-- `revoke_flow` bumps the flow epoch and drops held/targeted entries so
-  derived Caps fail closed under concurrent resolve.
-- Host attestation: `Runtime::attest_capabilities(flow)` returns a snapshot
-  of grants (not a cryptographic proof of process integrity).
+- `CapId::random` — 128-bit OS CSPRNG. Bits alone are not authorization.
+- Resolve needs CapTable + holder + target + rights + live revocation epoch.
+- Grants only shrink: `Cap::attenuate` / `CapTable::attenuate`.
+- `revoke_flow` bumps epoch and drops held/targeted entries (fail-closed under concurrent resolve).
+- `Runtime::attest_capabilities(flow)` — grant snapshot for audit, not a crypto proof.
+- Host root Cap: `RootAuthorityPolicy` / `Runtime::spawn_untrusted` (see `architecture.md`).

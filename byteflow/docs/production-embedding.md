@@ -1,63 +1,61 @@
-# Production embedding checklist
+# Production embedding
 
-Byteflow is an **in-process** flow runtime. Production means the **host**
-owns I/O, policy, and shutdown — not a separate cluster daemon.
+In-process runtime: the host owns I/O, policy, and shutdown.
 
-Use this page with [`audit-checklist.md`](audit-checklist.md) when hardening
-a deployment.
+Pair with [`audit-checklist.md`](audit-checklist.md).
 
 ## Untrusted bytecode
 
-1. Always construct the runtime through [`Runtime::with_natives_and_config`]
-   (or [`Runtime::with_attested`]) so [`verify_with`] runs **before** workers
-   start.
-2. Keep [`TrustLevel::Untrusted`] unless you control every constant in the chunk.
-3. Prefer [`QuotaConfig::sandbox`] and explicit [`RuntimeConfig::max_flows`],
-   [`RuntimeConfig::max_ask_waits`], and relation caps (`max_links`, `max_monitors`,
-   `max_registry_names`).
-4. Do **not** expose [`Runtime::send`] to untrusted plugins; use Caps and confined spawns.
-5. For replayed remote frames, set [`RuntimeConfig::remote_dedup_window`] to a non-zero
-   window (for example `4096`). [`RemoteFrameDedup`] is wired automatically; duplicates
-   are acknowledged with `Ok(())` and are not delivered twice.
+1. Build with [`Runtime::with_natives_and_config`] or [`Runtime::with_attested`]
+   so [`verify_with`] runs before workers start.
+2. Keep [`TrustLevel::Untrusted`] unless every constant is host-controlled.
+3. Use [`RuntimeConfig::sandbox`] (or explicit `max_flows` / `max_ask_waits` /
+   relation caps + [`QuotaConfig::sandbox`]).
+   `sandbox()` does **not** change host [`Runtime::spawn`] authority (still
+   TrustedHost `ROOT` + full natives). Guest entry: [`Runtime::spawn_untrusted`]
+   or `root_authority = Untrusted`.
+4. Do not expose [`Runtime::send`] to plugins; use Caps / `spawn_confined`.
+5. At-least-once wire: set `remote_dedup_window` (e.g. `4096`).
+   [`RemoteFrameDedup`] reserves on accept path, commits after mailbox accept,
+   rolls back on `NoSuchName` / mailbox full (retransmit allowed). After commit,
+   duplicates return `Ok(())`.
 
-## Shutdown (liveness)
+## Shutdown
 
-Order for a clean exit:
+1. Stop accepting host work.
+2. [`Runtime::shutdown`] — parked receives fail with `"runtime shutdown"`;
+   [`FlowHandle::join`] does not hang.
+3. With a bridge: [`wait_bridge_drained`] → `wait_wire_drained` →
+   [`TcpOutboundHandle::stop`].
+4. Drop [`TcpInboundHandle`] (`stop` waits ≤ 5s for sessions).
 
-1. Stop accepting new host work (HTTP, sockets, etc.).
-2. Let flows finish or call [`Runtime::shutdown`] — parked receives wake with
-   `FlowOutcome::Failed("runtime shutdown")`, not a hung [`FlowHandle::join`].
-3. If using [`DistributionBridge`]: [`wait_bridge_drained`], then
-   [`TcpOutboundHandle::wait_wire_drained`], then [`TcpOutboundHandle::stop`].
-4. Drop inbound [`TcpInboundHandle`] after sessions finish (`stop` waits up to 5s).
+## Remote hops
 
-## Remote hops (host-owned socket)
+No peer auth inside Byteflow.
 
-Byteflow does **not** authenticate TCP peers.
-
-| Responsibility | Owner |
-|----------------|--------|
-| TLS, mTLS, firewall | Host |
-| Map `OutboundHop::node` → socket | [`NodeRouter`] / your code |
-| Drain bridge → wire | [`spawn_tcp_outbound`] or custom pump |
+| Responsibility | API |
+|----------------|-----|
+| TLS / firewall | Host |
+| `OutboundHop::node` → socket | [`NodeRouter`] |
+| Bridge → wire | [`spawn_tcp_outbound`] |
 | Wire → inbox | [`spawn_tcp_inbound`] → [`Runtime::deliver_frame`] |
-| Replay / at-least-once | Host ([`RemoteFrameDedup`] optional) |
+| Bridge budget | [`DistributionBridge::with_config`] ([`DistributionConfig`]) |
+| Replay filter | [`RemoteFrameDedup`] via `remote_dedup_window` |
 
-Minimum viable remote path: see [`remote-transport.md`](remote-transport.md) and
-`examples/remote_hop_tcp.rs` (channel deliver on the runtime thread — no mutex
-around the whole [`Runtime`]).
+See [`remote-transport.md`](remote-transport.md) and `examples/remote_hop_tcp.rs`
+(channel deliver on the runtime thread — no `Mutex<Runtime>`).
 
 ## Observability
 
-- Counters: [`Runtime::metrics`].
-- Point-in-time: [`Runtime::snapshot`] (flows, bridge depth, memory ceiling).
-- Diagnostics: `BYTEFLOW_LOG=info` or [`RuntimeConfig::log`].
+- [`Runtime::metrics`]
+- [`Runtime::snapshot`] (flows, bridge depth, memory)
+- `BYTEFLOW_LOG=info` or [`RuntimeConfig::log`]
 
-## What this runtime is not
+## Boundaries
 
-- Not Tokio — use [`HostAwaitBridge`] for async host I/O.
-- Not BEAM distribution — no transparent `Cap` or `Pid` across nodes.
-- Not a global ETS — tables are per owning flow unless you build a registry service.
+- Async host I/O: [`HostAwaitBridge`], not Tokio inside the core.
+- No transparent Cap/Pid across nodes.
+- Tables are per owning flow (not global ETS).
 
 [`Runtime::with_natives_and_config`]: ../src/scheduler/runtime.rs
 [`Runtime::with_attested`]: ../src/scheduler/runtime.rs
@@ -82,6 +80,11 @@ around the whole [`Runtime`]).
 [`RuntimeConfig::max_flows`]: ../src/scheduler/runtime.rs
 [`RuntimeConfig::max_ask_waits`]: ../src/scheduler/runtime.rs
 [`RuntimeConfig::remote_dedup_window`]: ../src/scheduler/runtime.rs
+[`RuntimeConfig::sandbox`]: ../src/scheduler/runtime.rs
+[`RuntimeConfig::root_authority`]: ../src/scheduler/runtime.rs
+[`RootAuthorityPolicy::Untrusted`]: ../src/scheduler/runtime.rs
+[`Runtime::spawn`]: ../src/scheduler/runtime.rs
+[`Runtime::spawn_untrusted`]: ../src/scheduler/runtime.rs
+[`DistributionBridge::with_config`]: ../src/scheduler/distribution.rs
+[`DistributionConfig`]: ../src/scheduler/distribution.rs
 [`Runtime::send`]: ../src/scheduler/runtime.rs
-[`Runtime`]: ../src/scheduler/runtime.rs
-[`remote-transport.md`]: remote-transport.md
