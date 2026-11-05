@@ -458,7 +458,7 @@ impl<'a> Reader<'a> {
             2 => Ok(Value::Int(self.read_i64()?)),
             3 => Ok(Value::Float(self.read_f64()?)),
             4 => {
-                if trust == TrustLevel::Untrusted {
+                if trust.forbids_authority_constants() {
                     return Err(FormatError::ForbiddenConstant(
                         super::verify::ConstantKind::ProcessId,
                     ));
@@ -466,7 +466,7 @@ impl<'a> Reader<'a> {
                 Ok(Value::Pid(self.read_u64()?))
             }
             5 => {
-                if trust == TrustLevel::Untrusted {
+                if trust.forbids_authority_constants() {
                     return Err(FormatError::ForbiddenConstant(
                         super::verify::ConstantKind::Message,
                     ));
@@ -482,7 +482,7 @@ impl<'a> Reader<'a> {
                 ))
             }
             6 => {
-                if trust == TrustLevel::Untrusted {
+                if trust.forbids_authority_constants() {
                     return Err(FormatError::ForbiddenConstant(
                         super::verify::ConstantKind::Capability,
                     ));

@@ -43,6 +43,7 @@ mod quota;
 mod registry;
 mod runqueue;
 mod runtime;
+mod sandbox;
 mod spawn;
 mod supervisor;
 mod sync_lock;
@@ -77,5 +78,9 @@ pub use registry::RegistryName;
 pub use runtime::JitConfig;
 pub use runtime::{
     flow_id_from_u64, Runtime, RuntimeConfig, RuntimeSpawner, SendError, DEFAULT_QUANTUM,
+};
+pub use sandbox::{
+    policy_fingerprint, CapabilityAttestation, CapabilityGrantView, PolicyFingerprint,
+    SecurityAuditSink, SecurityCounters, SecurityCountersSnapshot, SecurityEvent,
 };
 pub use supervisor::{ChildSpec, RestartStrategy, Supervisor, SupervisorConfig};

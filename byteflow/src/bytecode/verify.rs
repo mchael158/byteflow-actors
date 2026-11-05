@@ -3,15 +3,40 @@ use super::opcode::Opcode;
 use super::value::Value;
 use std::fmt;
 
-/// Whether the chunk may contain authority-bearing constants.
+/// Whether the chunk may contain authority-bearing constants, and how
+/// aggressively the host should treat the module.
 ///
 /// Default is [`TrustLevel::Untrusted`] (fail closed). Host assemblers that
 /// intentionally embed `Cap` / `Pid` / `Message` in the pool must pass
 /// [`TrustLevel::Trusted`].
+///
+/// [`TrustLevel::Restricted`] is the middle tier: same constant-pool denial
+/// as Untrusted (no Cap/Pid/Message injection), but the host may still grant
+/// explicit Caps / natives after load. Elevation is host-only — bytecode
+/// never changes its own trust level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrustLevel {
+    /// Host-controlled module. May embed Cap / Pid / Message in the pool.
     Trusted,
+    /// Untrusted load path with explicit host grants after admission.
+    /// Constant pool still rejects Cap / Pid / Message (fail closed).
+    Restricted,
+    /// Deny-by-default guest. Constant pool rejects Cap / Pid / Message.
     Untrusted,
+}
+
+impl TrustLevel {
+    /// Only [`Trusted`] may embed authority-bearing constant-pool tags.
+    #[inline]
+    pub const fn allows_authority_constants(self) -> bool {
+        matches!(self, TrustLevel::Trusted)
+    }
+
+    /// Fail-closed tiers that reject Cap / Pid / Message in the pool.
+    #[inline]
+    pub const fn forbids_authority_constants(self) -> bool {
+        !self.allows_authority_constants()
+    }
 }
 
 /// Knob for [`verify_with`]. Default trust is untrusted.
@@ -48,7 +73,7 @@ impl fmt::Display for ConstantKind {
 
 #[inline]
 fn validate_constant(value: &Value, trust: TrustLevel, index: usize) -> Result<(), VerifyError> {
-    if trust == TrustLevel::Trusted {
+    if trust.allows_authority_constants() {
         return Ok(());
     }
     if !value.within_nesting_limit() {

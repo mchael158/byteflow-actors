@@ -424,6 +424,23 @@ impl CapTable {
         self.insert(new_holder, narrowed).map_err(CapError::from)
     }
 
+    /// Snapshot every live Cap currently held by `flow` (host attestation).
+    pub fn list_held_by(
+        &self,
+        flow: FlowId,
+    ) -> Result<Vec<crate::scheduler::sandbox::CapabilityGrantView>, RuntimeError> {
+        let table = self.lock("CapTable::list_held_by")?;
+        let mut out = Vec::new();
+        for (id, entry) in table.entries.iter() {
+            if entry.holder == flow {
+                out.push(crate::scheduler::sandbox::CapabilityGrantView::from_entry(
+                    *id, entry,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// Drop every capability held by or targeting `flow` (flow exited).
     /// Bumps the flow's epoch first so leaked tokens fail in O(1).
     pub fn revoke_flow(&self, flow: FlowId) -> Result<usize, RuntimeError> {

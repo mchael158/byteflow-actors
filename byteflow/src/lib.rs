@@ -279,6 +279,30 @@ pub mod docs {
     /// are separate controls.
     #[doc = include_str!("../docs/untrusted.md")]
     pub mod untrusted {}
+
+    /// Sandbox architecture: trust, Caps, quotas, enforcement boundary.
+    #[doc = include_str!("../docs/sandbox/architecture.md")]
+    pub mod sandbox_architecture {}
+
+    /// TrustLevel tiers and host-only elevation.
+    #[doc = include_str!("../docs/sandbox/trust-model.md")]
+    pub mod sandbox_trust {}
+
+    /// CapId, CapTable, attenuation, revocation, attestation.
+    #[doc = include_str!("../docs/sandbox/capabilities.md")]
+    pub mod sandbox_capabilities {}
+
+    /// Independent resource ceilings and sandbox defaults.
+    #[doc = include_str!("../docs/sandbox/quotas.md")]
+    pub mod sandbox_quotas {}
+
+    /// What the sandbox assumes and rejects.
+    #[doc = include_str!("../docs/sandbox/threat-model.md")]
+    pub mod sandbox_threat {}
+
+    /// In-process limits — not OS isolation.
+    #[doc = include_str!("../docs/sandbox/limitations.md")]
+    pub mod sandbox_limitations {}
 }
 
 pub use attest::{decode_attested, fingerprint_bf, AttestError};
@@ -300,16 +324,18 @@ pub use output::{NullSink, OutputSink, StdoutSink};
 pub use scheduler::JitConfig;
 pub use scheduler::{
     check_admin, check_link, check_monitor, decode_frame, encode_frame, exec_delegate, fault_count,
-    finish_host_await, flow_id_from_u64, next_flow_id, report_fault, AdminError, CapError,
-    Capability, ChildSpec, DelegateError, Delivery, DistributionBridge, DownEvent, Flow,
-    FlowExitReason, FlowHandle, FlowId, FlowMetrics, FlowOutcome, FlowQuota, HostAwaitBridge,
-    HostAwaitCompleter, HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError,
-    LinkError, LinkId, Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull,
-    MailboxFullReason, MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, QuotaConfig,
+    finish_host_await, flow_id_from_u64, next_flow_id, policy_fingerprint, report_fault,
+    AdminError, CapError, Capability, CapabilityAttestation, CapabilityGrantView, ChildSpec,
+    DelegateError, Delivery, DistributionBridge, DownEvent, Flow, FlowExitReason, FlowHandle,
+    FlowId, FlowMetrics, FlowOutcome, FlowQuota, HostAwaitBridge, HostAwaitCompleter,
+    HostAwaitError, HostAwaitOp, HostAwaitRequest, JoinError, LifecycleError, LinkError, LinkId,
+    Mailbox, MailboxBytes, MailboxCapacity, MailboxConfig, MailboxFull, MailboxFullReason,
+    MailboxStats, MonitorRef, OutboundHop, OverflowPolicy, PolicyFingerprint, QuotaConfig,
     QuotaError, RegistryName, RemoteFrameDedup, RemoteFrameError, RestartStrategy, Runtime,
     RuntimeConfig, RuntimeError, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeSnapshot,
-    RuntimeSpawner, SendError, SpawnError, Supervisor, SupervisorConfig, ThreadedHostAwait,
-    WaitEpoch, DEFAULT_QUANTUM,
+    RuntimeSpawner, SecurityAuditSink, SecurityCounters, SecurityCountersSnapshot, SecurityEvent,
+    SendError, SpawnError, Supervisor, SupervisorConfig, ThreadedHostAwait, WaitEpoch,
+    DEFAULT_QUANTUM,
 };
 pub use transport::{
     read_wire_frame, recv_wire_frame_udp, resolve_hop_peer, send_wire_frame_udp, spawn_tcp_inbound,

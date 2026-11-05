@@ -6,7 +6,7 @@ use crate::bytecode::{Cap, CapRights, CapTarget, Chunk, NativeMask, Value};
 use crate::vm::{NativeGate, NativeTable, Vm};
 
 use super::directory::Directory;
-use super::error::SpawnError;
+use super::error::{RuntimeError, SpawnError};
 use super::finalize::finalize_flow;
 use super::handle::FlowHandle;
 use super::mailbox::{Delivery, Mailbox, MailboxConfig, MailboxFullReason};
@@ -97,6 +97,9 @@ pub struct RuntimeConfig {
     pub log: Option<Arc<dyn crate::log::LogSink>>,
     /// Per-flow CPU / memory / spawn-send rate budgets.
     pub quota: super::quota::QuotaConfig,
+    /// Optional security audit sink (capability / quota / module denials).
+    /// Independent of [`Self::log`]; never receives full CapId tokens.
+    pub security_audit: Option<Arc<dyn super::sandbox::SecurityAuditSink>>,
     /// Trace JIT settings (`feature = "jit"`). Ignored when the feature is off.
     #[cfg(feature = "jit")]
     pub jit: JitConfig,
@@ -150,6 +153,7 @@ impl Default for RuntimeConfig {
             output: Arc::new(crate::output::NullSink),
             log: None,
             quota: super::quota::QuotaConfig::default(),
+            security_audit: None,
             #[cfg(feature = "jit")]
             jit: JitConfig::default(),
         }
@@ -157,22 +161,49 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Starting point for untrusted modules: tight per-flow quotas plus
-    /// process-wide caps on live flows, Ask waits, HostAwaits, links,
-    /// monitors, and registry names. Tune under real load before using as
-    /// a production default.
+    /// Opt-in sandbox profile for untrusted modules.
+    ///
+    /// Default [`RuntimeConfig`] stays permissive (`max_* = 0` unlimited,
+    /// [`QuotaConfig::permissive`](super::quota::QuotaConfig::permissive)).
+    /// This profile enables fail-closed process-wide caps and tight
+    /// per-flow budgets. Trust defaults to [`TrustLevel::Untrusted`]
+    /// (inherited from [`Default`]) so Cap/Pid/Message constants are
+    /// rejected at verify time.
+    ///
+    /// Limits (starting point — tune under load):
+    /// - `max_flows = 128` live flows
+    /// - `max_ask_waits = 64`, `max_host_awaits = 128`
+    /// - `max_runtime_bytes = 64 MiB` process heap accounting
+    /// - mailbox: 256 hops / 4 MiB / Reject ( [`MailboxConfig::DEFAULT`] )
+    /// - per-flow: [`QuotaConfig::sandbox`](super::quota::QuotaConfig::sandbox)
     pub fn sandbox() -> Self {
         RuntimeConfig {
             quota: super::quota::QuotaConfig::sandbox(),
-            max_flows: 256,
-            max_ask_waits: 128,
+            max_flows: 128,
+            max_ask_waits: 64,
             max_host_awaits: 128,
             max_links: 1024,
             max_monitors: 1024,
             max_registry_names: 256,
             max_runtime_bytes: 64 * 1024 * 1024,
+            trust: crate::bytecode::TrustLevel::Untrusted,
             ..Default::default()
         }
+    }
+
+    /// Same process-wide caps as [`Self::sandbox`], but
+    /// [`TrustLevel::Restricted`]: still no Cap/Pid/Message in the constant
+    /// pool; host may grant Caps / natives after admission.
+    pub fn sandbox_restricted() -> Self {
+        RuntimeConfig {
+            trust: crate::bytecode::TrustLevel::Restricted,
+            ..Self::sandbox()
+        }
+    }
+
+    /// Stable identity of the security-relevant knobs on this config.
+    pub fn policy_fingerprint(&self) -> super::sandbox::PolicyFingerprint {
+        super::sandbox::policy_fingerprint(self)
     }
 }
 
@@ -234,6 +265,11 @@ pub struct Shared {
     /// Shared trace JIT state (`feature = "jit"`).
     #[cfg(feature = "jit")]
     pub(crate) jit: Option<std::sync::Arc<crate::jit::JitRuntime>>,
+    /// Sandbox observability (host-only; bytecode cannot mutate).
+    pub(crate) security: Arc<super::sandbox::SecurityCounters>,
+    pub(crate) security_audit: Option<Arc<dyn super::sandbox::SecurityAuditSink>>,
+    pub(crate) policy: super::sandbox::PolicyFingerprint,
+    pub(crate) trust: crate::bytecode::TrustLevel,
 }
 
 /// A running Byteflow runtime: worker pool + timer thread over one shared
@@ -385,6 +421,10 @@ impl Runtime {
             host_next_request_id: AtomicU64::new(1),
             #[cfg(feature = "jit")]
             jit,
+            security: Arc::new(super::sandbox::SecurityCounters::default()),
+            security_audit: config.security_audit.clone(),
+            policy: config.policy_fingerprint(),
+            trust: config.trust,
         });
 
         let mut workers = Vec::with_capacity(workers_n);
@@ -472,6 +512,34 @@ impl Runtime {
 
     pub fn metrics(&self) -> RuntimeMetricsSnapshot {
         self.shared.metrics.snapshot()
+    }
+
+    /// Sandbox security counters (host-only).
+    pub fn security_counters(&self) -> super::sandbox::SecurityCountersSnapshot {
+        self.shared.security.snapshot()
+    }
+
+    /// Policy fingerprint recorded at construction.
+    pub fn policy_fingerprint(&self) -> super::sandbox::PolicyFingerprint {
+        self.shared.policy
+    }
+
+    /// Trust level used for constant-pool verification at construction.
+    pub fn trust_level(&self) -> crate::bytecode::TrustLevel {
+        self.trust
+    }
+
+    /// Host attestation of Caps currently held by `flow`.
+    pub fn attest_capabilities(
+        &self,
+        flow: FlowId,
+    ) -> Result<super::sandbox::CapabilityAttestation, RuntimeError> {
+        super::sandbox::CapabilityAttestation::from_table(
+            &self.shared.caps,
+            flow,
+            self.trust,
+            self.shared.policy,
+        )
     }
 
     /// Point-in-time view for dashboards and debug tooling.
@@ -1380,6 +1448,18 @@ pub(crate) fn spawn_on(
     flow.quota = quota;
     flow.supervisor = supervisor;
     RuntimeMetrics::inc(&shared.metrics.processes_spawned);
+    record_security_event(
+        shared,
+        &super::sandbox::SecurityEvent::CapabilityCreated {
+            holder: id.as_u64(),
+        },
+    );
+    if matches!(
+        shared.trust,
+        crate::bytecode::TrustLevel::Untrusted | crate::bytecode::TrustLevel::Restricted
+    ) {
+        super::sandbox::SecurityCounters::inc(&shared.security.active_untrusted_flows);
+    }
     enqueue_flow(shared, flow);
     wake_workers(shared);
     Ok(FlowHandle { id, receiver: rx })
@@ -1451,6 +1531,34 @@ pub(crate) fn wake_workers(shared: &Shared) {
 /// Signal shutdown and join any threads already started during construction
 /// failure — keeps the "no orphan threads" contract of
 /// [`Runtime::with_natives_and_config`].
+pub(crate) fn record_security_event(shared: &Shared, event: &super::sandbox::SecurityEvent) {
+    use super::sandbox::{SecurityCounters, SecurityEvent};
+    match event {
+        SecurityEvent::AccessDenied { .. } => {
+            SecurityCounters::inc(&shared.security.denied_operations);
+        }
+        SecurityEvent::QuotaExceeded { .. } => {
+            SecurityCounters::inc(&shared.security.quota_exceeded);
+        }
+        SecurityEvent::CapabilityCreated { .. } => {
+            SecurityCounters::inc(&shared.security.capabilities_created);
+        }
+        SecurityEvent::CapabilityRevoked { .. } => {
+            SecurityCounters::inc(&shared.security.capabilities_revoked);
+        }
+        SecurityEvent::ModuleRejected { .. } => {
+            SecurityCounters::inc(&shared.security.invalid_modules);
+        }
+        SecurityEvent::NativeDenied { .. } => {
+            SecurityCounters::inc(&shared.security.native_denied);
+        }
+        SecurityEvent::CapabilityDelegated { .. } | SecurityEvent::FlowFinalized { .. } => {}
+    }
+    if let Some(sink) = shared.security_audit.as_ref() {
+        sink.record(event);
+    }
+}
+
 fn abort_startup(
     shared: &Arc<Shared>,
     workers: Vec<std::thread::JoinHandle<()>>,
@@ -1922,9 +2030,14 @@ mod tests {
     #[test]
     fn sandbox_enables_process_wide_relation_caps() {
         let config = RuntimeConfig::sandbox();
-        assert_eq!(config.max_flows, 256);
-        assert_eq!(config.max_ask_waits, 128);
+        assert_eq!(config.max_flows, 128);
+        assert_eq!(config.max_ask_waits, 64);
         assert_eq!(config.max_host_awaits, 128);
+        assert_eq!(config.trust, crate::bytecode::TrustLevel::Untrusted);
+        assert_ne!(
+            config.policy_fingerprint(),
+            RuntimeConfig::default().policy_fingerprint()
+        );
         assert_eq!(config.max_links, 1024);
         assert_eq!(config.max_monitors, 1024);
         assert_eq!(config.max_registry_names, 256);

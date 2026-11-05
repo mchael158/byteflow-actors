@@ -145,9 +145,9 @@ impl MemoryBudget {
 
     /// Return previously charged bytes.
     ///
-    /// Underflow is a programming bug. Uses CAS so a violated invariant never
-    /// wraps `used` to a huge value in release builds (unlike bare
-    /// `fetch_sub`).
+    /// Double-release or under-accounting is a host/runtime bug. Fail closed
+    /// with saturating subtraction so a violated invariant never wraps
+    /// `used` upward (unlike bare `fetch_sub`) and never panics a worker.
     #[inline]
     pub fn release(&self, bytes: usize) {
         if bytes == 0 {
@@ -156,11 +156,7 @@ impl MemoryBudget {
 
         let mut current = self.used.load(Ordering::Acquire);
         loop {
-            assert!(
-                current >= bytes,
-                "memory accounting underflow: previous={current}, release={bytes}"
-            );
-            let next = current - bytes;
+            let next = current.saturating_sub(bytes);
             match self.used.compare_exchange_weak(
                 current,
                 next,
@@ -327,6 +323,7 @@ impl Drop for HeapBytes {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::sync::Arc;
