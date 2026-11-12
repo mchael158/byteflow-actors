@@ -10,11 +10,12 @@
 
 pub mod router;
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,9 @@ impl From<std::io::Error> for TransportError {
     }
 }
 
+/// Default TCP socket read/write timeout for reference transport helpers.
+pub const DEFAULT_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Configuration for [`spawn_tcp_outbound`].
 #[derive(Clone, Debug)]
 pub struct TcpOutboundConfig {
@@ -109,6 +113,10 @@ pub struct TcpOutboundConfig {
     /// How long [`DistributionBridge::recv_timeout`] waits when the queue is empty.
     pub bridge_poll: Duration,
     pub connect_timeout: Duration,
+    /// Applied via [`TcpStream::set_read_timeout`] after connect.
+    pub read_timeout: Option<Duration>,
+    /// Applied via [`TcpStream::set_write_timeout`] after connect.
+    pub write_timeout: Option<Duration>,
 }
 
 impl Default for TcpOutboundConfig {
@@ -118,6 +126,8 @@ impl Default for TcpOutboundConfig {
             max_wire_bytes: DEFAULT_MAX_WIRE_BYTES,
             bridge_poll: Duration::from_millis(50),
             connect_timeout: Duration::from_secs(5),
+            read_timeout: Some(DEFAULT_SOCKET_TIMEOUT),
+            write_timeout: Some(DEFAULT_SOCKET_TIMEOUT),
         }
     }
 }
@@ -197,12 +207,16 @@ pub fn spawn_tcp_outbound_routed(
     let pending_writer = Arc::clone(&wire_pending);
     let max_wire = config.max_wire_bytes;
     let connect_timeout = config.connect_timeout;
+    let read_timeout = config.read_timeout;
+    let write_timeout = config.write_timeout;
 
     let writer = thread::Builder::new()
         .name("byteflow-tcp-out".into())
         .spawn(move || {
             let _ = run_tcp_routed_writer(
                 connect_timeout,
+                read_timeout,
+                write_timeout,
                 max_wire,
                 wire_rx,
                 stop_writer,
@@ -275,6 +289,8 @@ fn pump_bridge_to_routed_channel(
 
 fn run_tcp_routed_writer(
     connect_timeout: Duration,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
     max_wire: u32,
     wire_rx: std::sync::mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     stop: Arc<AtomicBool>,
@@ -300,7 +316,9 @@ fn run_tcp_routed_writer(
             connected_peer = None;
             match TcpStream::connect_timeout(&peer, connect_timeout) {
                 Ok(s) => {
-                    if s.set_nodelay(true).is_ok() {
+                    if s.set_nodelay(true).is_ok()
+                        && apply_socket_timeouts(&s, read_timeout, write_timeout).is_ok()
+                    {
                         connected_peer = Some(peer);
                         stream = Some(s);
                     } else {
@@ -332,6 +350,16 @@ fn run_tcp_routed_writer(
         }
         wire_pending.fetch_sub(1, Ordering::Release);
     }
+    Ok(())
+}
+
+fn apply_socket_timeouts(
+    stream: &TcpStream,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+) -> Result<(), TransportError> {
+    stream.set_read_timeout(read_timeout)?;
+    stream.set_write_timeout(write_timeout)?;
     Ok(())
 }
 
@@ -367,6 +395,10 @@ pub struct TcpInboundConfig {
     pub max_wire_bytes: u32,
     /// Concurrent TCP session threads. `0` means no limit.
     pub max_sessions: usize,
+    /// Applied via [`TcpStream::set_read_timeout`] on each accepted session.
+    pub read_timeout: Option<Duration>,
+    /// Applied via [`TcpStream::set_write_timeout`] on each accepted session.
+    pub write_timeout: Option<Duration>,
 }
 
 impl Default for TcpInboundConfig {
@@ -374,6 +406,8 @@ impl Default for TcpInboundConfig {
         Self {
             max_wire_bytes: DEFAULT_MAX_WIRE_BYTES,
             max_sessions: 64,
+            read_timeout: Some(DEFAULT_SOCKET_TIMEOUT),
+            write_timeout: Some(DEFAULT_SOCKET_TIMEOUT),
         }
     }
 }
@@ -383,11 +417,15 @@ pub struct TcpInboundHandle {
     stop: Arc<AtomicBool>,
     join: JoinHandle<()>,
     active_sessions: Arc<AtomicUsize>,
+    registry: Arc<SessionRegistry>,
 }
 
 impl TcpInboundHandle {
+    /// Signal stop, **shutdown every live session socket**, join the accept
+    /// thread, then wait for session threads to exit (≤ [`SESSION_DRAIN`]).
     pub fn stop(self) -> Result<(), TransportError> {
         self.stop.store(true, Ordering::Relaxed);
+        self.registry.shutdown_all();
         self.join.join().map_err(|_| TransportError::ThreadJoin)?;
         let deadline = Instant::now() + SESSION_DRAIN;
         while self.active_sessions.load(Ordering::Acquire) > 0 {
@@ -415,18 +453,27 @@ where
     let stop_accept = Arc::clone(&stop);
     let active_sessions = Arc::new(AtomicUsize::new(0));
     let sessions_accept = Arc::clone(&active_sessions);
+    let registry = Arc::new(SessionRegistry::new());
+    let registry_accept = Arc::clone(&registry);
     let max_wire = config.max_wire_bytes;
     let max_sessions = config.max_sessions;
+    let read_timeout = config.read_timeout;
+    let write_timeout = config.write_timeout;
     let join = thread::Builder::new()
         .name("byteflow-tcp-in".into())
         .spawn(move || {
             accept_inbound_loop(
                 listener,
                 deliver,
-                max_wire,
-                max_sessions,
-                stop_accept,
-                sessions_accept,
+                InboundLoopState {
+                    max_wire,
+                    max_sessions,
+                    read_timeout,
+                    write_timeout,
+                    stop: stop_accept,
+                    active_sessions: sessions_accept,
+                    registry: registry_accept,
+                },
             );
         })
         .map_err(TransportError::Io)?;
@@ -434,25 +481,41 @@ where
         stop,
         join,
         active_sessions,
+        registry,
     })
 }
 
-fn accept_inbound_loop<F>(
-    listener: TcpListener,
-    deliver: Arc<F>,
+struct InboundLoopState {
     max_wire: u32,
     max_sessions: usize,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
     stop: Arc<AtomicBool>,
     active_sessions: Arc<AtomicUsize>,
-) where
+    registry: Arc<SessionRegistry>,
+}
+
+fn accept_inbound_loop<F>(listener: TcpListener, deliver: Arc<F>, state: InboundLoopState)
+where
     F: Fn(&[u8]) -> Result<(), RemoteFrameError> + Send + Sync + 'static,
 {
+    let InboundLoopState {
+        max_wire,
+        max_sessions,
+        read_timeout,
+        write_timeout,
+        stop,
+        active_sessions,
+        registry,
+    } = state;
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer)) => {
                 let deliver = Arc::clone(&deliver);
                 let sessions = Arc::clone(&active_sessions);
+                let registry = Arc::clone(&registry);
+                let stop_session = Arc::clone(&stop);
                 let Ok(guard) = SessionGuard::try_start(sessions, max_sessions) else {
                     transport_info(format!(
                         "inbound session limit ({max_sessions}) reached; refusing {peer}"
@@ -460,16 +523,34 @@ fn accept_inbound_loop<F>(
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 };
+                if apply_socket_timeouts(&stream, read_timeout, write_timeout).is_err() {
+                    transport_info(format!("inbound {peer}: set socket timeouts failed"));
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let Some(session_id) = registry.register(&stream) else {
+                    transport_info(format!("inbound {peer}: session registry failed"));
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let registry_session = Arc::clone(&registry);
                 if thread::Builder::new()
                     .name("byteflow-tcp-session".into())
                     .spawn(move || {
                         let _guard = guard;
-                        if let Err(e) = serve_tcp_connection(stream, &*deliver, max_wire) {
+                        let _reg = SessionRegistration {
+                            id: session_id,
+                            registry: registry_session,
+                        };
+                        if let Err(e) =
+                            serve_tcp_connection(stream, &*deliver, max_wire, stop_session)
+                        {
                             transport_info(format!("session from {peer} ended: {e}"));
                         }
                     })
                     .is_err()
                 {
+                    registry.unregister(session_id);
                     transport_info("inbound session thread spawn failed");
                     continue;
                 }
@@ -479,6 +560,54 @@ fn accept_inbound_loop<F>(
             }
             Err(_) => thread::sleep(Duration::from_millis(50)),
         }
+    }
+}
+
+/// Cloned peer sockets so [`TcpInboundHandle::stop`] can unblock `read_exact`.
+struct SessionRegistry {
+    next_id: AtomicUsize,
+    sockets: Mutex<HashMap<usize, TcpStream>>,
+}
+
+impl SessionRegistry {
+    fn new() -> Self {
+        Self {
+            next_id: AtomicUsize::new(1),
+            sockets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register(&self, stream: &TcpStream) -> Option<usize> {
+        let clone = stream.try_clone().ok()?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.sockets.lock().ok()?.insert(id, clone);
+        Some(id)
+    }
+
+    fn unregister(&self, id: usize) {
+        if let Ok(mut g) = self.sockets.lock() {
+            g.remove(&id);
+        }
+    }
+
+    fn shutdown_all(&self) {
+        let Ok(mut g) = self.sockets.lock() else {
+            return;
+        };
+        for (_, sock) in g.drain() {
+            let _ = sock.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+struct SessionRegistration {
+    id: usize,
+    registry: Arc<SessionRegistry>,
+}
+
+impl Drop for SessionRegistration {
+    fn drop(&mut self) {
+        self.registry.unregister(self.id);
     }
 }
 
@@ -515,28 +644,37 @@ fn serve_tcp_connection<F>(
     mut stream: TcpStream,
     deliver: &F,
     max_wire: u32,
+    stop: Arc<AtomicBool>,
 ) -> Result<(), TransportError>
 where
     F: Fn(&[u8]) -> Result<(), RemoteFrameError>,
 {
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         let frame = match read_wire_frame(&mut stream, max_wire) {
             Ok(f) => f,
             Err(TransportError::Io(e))
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
                 ) =>
             {
                 return Ok(());
             }
             Err(e) => return Err(e),
         };
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if let Err(e) = deliver(&frame) {
             transport_info(format!("deliver_frame failed: {e}"));
             return Err(TransportError::Deliver(e));
         }
     }
+    Ok(())
 }
 
 /// One datagram carries exactly one wire frame (`BFT1` header + BFH1 body).

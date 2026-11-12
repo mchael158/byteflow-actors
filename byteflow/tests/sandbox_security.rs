@@ -574,6 +574,50 @@ fn sandbox_verify_failure_notifies_audit_sink() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn sandbox_cpu_quota_emits_audit_and_counter() -> Result<(), Box<dyn std::error::Error>> {
+    let audit = Arc::new(AuditCapture::default());
+    // Spin until the per-flow CPU budget trips.
+    let mut p = Program::new("quota-cpu");
+    p.function("main", 0, |f| {
+        let top = f.label();
+        f.bind(top);
+        let n = f.load_i32(0);
+        let one = f.load_i32(1);
+        let _ = f.add(n, one);
+        f.jump(top);
+    });
+    let config = RuntimeConfig {
+        workers: 1,
+        quantum: 8,
+        quota: QuotaConfig {
+            cpu_budget: 32,
+            ..QuotaConfig::sandbox()
+        },
+        security_audit: Some(audit.clone() as Arc<dyn byteflow::SecurityAuditSink>),
+        ..RuntimeConfig::sandbox()
+    };
+    let rt = Runtime::with_config(p.build(), config)?;
+    let h = rt.spawn(0, &[])?;
+    let outcome = h.join();
+    assert!(
+        matches!(outcome, byteflow::FlowOutcome::Failed(ref m) if m.contains("CPU")),
+        "expected CPU exhaustion, got {outcome:?}"
+    );
+    let counters = rt.security_counters();
+    assert!(
+        counters.quota_exceeded >= 1,
+        "quota_exceeded counter stayed at 0"
+    );
+    rt.shutdown();
+    let lines = audit.0.lock().map_err(|_| "poisoned")?;
+    assert!(
+        lines.iter().any(|l| l.contains("quota_exceeded")),
+        "audit missing quota event: {lines:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn sandbox_counters_track_spawn_and_finalize() -> Result<(), Box<dyn std::error::Error>> {
     // Park on receive so finalize cannot race the mid-flight snapshot.
     let mut p = Program::new("counters");

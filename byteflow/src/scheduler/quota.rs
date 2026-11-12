@@ -166,15 +166,31 @@ fn tokens_for_elapsed(elapsed: Duration, per_sec: i64) -> i64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaError {
     CpuExhausted,
+    /// `charge_cpu` rejected `cost <= 0` (would grow the budget or overflow).
+    InvalidCost,
     MemoryExhausted { requested: usize, limit: usize },
     SpawnRateExceeded,
     SendRateExceeded,
+}
+
+impl QuotaError {
+    /// Stable tag for [`crate::SecurityEvent::QuotaExceeded`].
+    pub fn audit_kind(self) -> &'static str {
+        match self {
+            QuotaError::CpuExhausted => "cpu",
+            QuotaError::InvalidCost => "invalid_cost",
+            QuotaError::MemoryExhausted { .. } => "memory",
+            QuotaError::SpawnRateExceeded => "spawn_rate",
+            QuotaError::SendRateExceeded => "send_rate",
+        }
+    }
 }
 
 impl std::fmt::Display for QuotaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             QuotaError::CpuExhausted => f.write_str("flow CPU budget exhausted"),
+            QuotaError::InvalidCost => f.write_str("CPU charge must be positive"),
             QuotaError::MemoryExhausted { requested, limit } => {
                 write!(
                     f,
@@ -232,7 +248,14 @@ impl FlowQuota {
 
     /// Call once per executed instruction (or every N, in a batch — the
     /// batch only thickens trap latency, it does not change the limit).
+    ///
+    /// `cost` must be **strictly positive**. Zero or negative values used to
+    /// increase the budget (`cur - (-n)`) and `i64::MIN` could overflow the
+    /// subtraction; both now fail closed as [`QuotaError::InvalidCost`].
     pub fn charge_cpu(&self, cost: i64) -> Result<(), QuotaError> {
+        if cost <= 0 {
+            return Err(QuotaError::InvalidCost);
+        }
         loop {
             let cur = self.cpu_budget.load(Ordering::Acquire);
             if cur < cost {
@@ -406,6 +429,15 @@ mod tests {
         assert!(q.charge_cpu(7).is_ok());
         assert!(q.charge_cpu(4).is_err());
         assert!(q.charge_cpu(3).is_ok());
+    }
+
+    #[test]
+    fn charge_cpu_rejects_non_positive_cost() {
+        let q = FlowQuota::new(10, 1024, 1, 1, 1, 1);
+        assert_eq!(q.charge_cpu(0), Err(QuotaError::InvalidCost));
+        assert_eq!(q.charge_cpu(-1), Err(QuotaError::InvalidCost));
+        assert_eq!(q.charge_cpu(i64::MIN), Err(QuotaError::InvalidCost));
+        assert_eq!(q.remaining_cpu(), 10);
     }
 
     #[test]

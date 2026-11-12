@@ -345,6 +345,7 @@ pub use transport::{
     spawn_tcp_outbound, spawn_tcp_outbound_routed, wait_bridge_drained, write_wire_frame,
     FixedPeerRouter, NodeRouter, StaticNodeRouter, TcpInboundConfig, TcpInboundHandle,
     TcpOutboundConfig, TcpOutboundHandle, TransportError, DEFAULT_MAX_WIRE_BYTES,
+    DEFAULT_SOCKET_TIMEOUT,
 };
 pub use vm::{
     check_native_call, check_native_gate, expect_arg, expect_bool, expect_int, expect_message,

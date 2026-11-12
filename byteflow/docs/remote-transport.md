@@ -27,6 +27,10 @@ BFT1  u8 version (=1)  u32 le payload_len  payload
 | [`spawn_tcp_outbound_routed`] | Same; `node` via [`NodeRouter`] |
 | [`spawn_tcp_inbound`] | Accept → `read_wire_frame` → `deliver` (usually `deliver_frame`). `max_sessions` default `64` (`0` = unlimited) |
 
+Defaults apply **30s** read/write socket timeouts (`DEFAULT_SOCKET_TIMEOUT`).
+`TcpInboundHandle::stop` shuts down every live session socket so a stuck
+`read_exact` cannot pin the join past the drain window.
+
 Outbound queue full → pump blocks on `send`. Bridge caps pending work by
 **hop count and bytes** ([`DistributionConfig`], default 1024 / 64 MiB). Charge
 stays on [`OutboundHop`] until the host drops it after encode/send.

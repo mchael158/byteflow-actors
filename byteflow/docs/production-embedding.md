@@ -27,7 +27,7 @@ Pair with [`audit-checklist.md`](audit-checklist.md).
    [`FlowHandle::join`] does not hang.
 3. With a bridge: [`wait_bridge_drained`] → `wait_wire_drained` →
    [`TcpOutboundHandle::stop`].
-4. Drop [`TcpInboundHandle`] (`stop` waits ≤ 5s for sessions).
+4. Drop [`TcpInboundHandle`] (`stop` cancels live sockets, then waits ≤ 5s).
 
 ## Remote hops
 
@@ -50,6 +50,8 @@ See [`remote-transport.md`](remote-transport.md) and `examples/remote_hop_tcp.rs
 - [`Runtime::metrics`]
 - [`Runtime::snapshot`] (flows, bridge depth, memory)
 - `BYTEFLOW_LOG=info` or [`RuntimeConfig::log`]
+- [`RuntimeConfig::security_audit`]: quota / cap / native denials on a
+  dedicated thread (workers never block on a slow sink)
 
 ## Boundaries
 

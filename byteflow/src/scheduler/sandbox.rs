@@ -12,7 +12,11 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::bytecode::{CapId, CapRights, CapTarget, TrustLevel};
 
@@ -266,8 +270,86 @@ impl std::fmt::Display for SecurityEvent {
 }
 
 /// Optional host callback for security events (never receives full CapId tokens).
+///
+/// The runtime delivers events on a **dedicated audit thread** with a bounded
+/// queue (see [`wrap_audit_sink`]). `record` on the host sink may block that
+/// thread but must not block scheduler workers. Prefer fast, non-panicking
+/// sinks; a full queue drops the newest event (fail-open for observability).
 pub trait SecurityAuditSink: Send + Sync + std::fmt::Debug + 'static {
     fn record(&self, event: &SecurityEvent);
+}
+
+/// Default capacity for the async audit queue between workers and the sink.
+pub const DEFAULT_AUDIT_QUEUE: usize = 1024;
+
+/// Join handle for the audit dispatcher started by [`wrap_audit_sink`].
+pub(crate) struct AuditWorkerHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl AuditWorkerHandle {
+    pub(crate) fn stop(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for AuditWorkerHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[derive(Debug)]
+struct QueuedAuditSink {
+    tx: SyncSender<SecurityEvent>,
+}
+
+impl SecurityAuditSink for QueuedAuditSink {
+    fn record(&self, event: &SecurityEvent) {
+        let _ = self.tx.try_send(event.clone());
+    }
+}
+
+/// Wrap a host [`SecurityAuditSink`] so worker `record` never blocks on it.
+///
+/// Returns a sink suitable for [`crate::RuntimeConfig::security_audit`] /
+/// `Shared`, plus a handle the runtime joins on shutdown (drains remaining
+/// events after `stop`).
+pub(crate) fn wrap_audit_sink(
+    sink: Arc<dyn SecurityAuditSink>,
+    capacity: usize,
+) -> (Arc<dyn SecurityAuditSink>, AuditWorkerHandle) {
+    let capacity = capacity.max(1);
+    let (tx, rx) = sync_channel::<SecurityEvent>(capacity);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let join = thread::Builder::new()
+        .name("byteflow-audit".into())
+        .spawn(move || {
+            while !stop_worker.load(Ordering::Acquire) {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(event) => sink.record(&event),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            while let Ok(event) = rx.try_recv() {
+                sink.record(&event);
+            }
+        })
+        .ok();
+    (
+        Arc::new(QueuedAuditSink { tx }),
+        AuditWorkerHandle { stop, join },
+    )
 }
 
 #[cfg(test)]

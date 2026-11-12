@@ -99,6 +99,8 @@ pub struct RuntimeConfig {
     pub quota: super::quota::QuotaConfig,
     /// Optional security audit sink (capability / quota / module denials).
     /// Independent of [`Self::log`]; never receives full CapId tokens.
+    /// Delivery is **asynchronous** (bounded queue + dedicated thread) so a
+    /// slow sink cannot stall scheduler workers.
     pub security_audit: Option<Arc<dyn super::sandbox::SecurityAuditSink>>,
     /// Authority minted for host [`Runtime::spawn`] (not bytecode `Spawn`).
     ///
@@ -352,6 +354,7 @@ pub struct Runtime {
     natives: Arc<NativeTable>,
     workers: Vec<JoinHandle<()>>,
     timer_thread: Option<JoinHandle<()>>,
+    audit_worker: Option<super::sandbox::AuditWorkerHandle>,
     trust: crate::bytecode::TrustLevel,
 }
 
@@ -427,6 +430,7 @@ impl Runtime {
             },
         ) {
             if let Some(sink) = config.security_audit.as_ref() {
+                // Sync notify before workers exist — verify never starts the pool.
                 sink.record(&super::sandbox::SecurityEvent::ModuleRejected {
                     reason: "verify_failed",
                 });
@@ -436,6 +440,15 @@ impl Runtime {
         let chunk = Arc::new(chunk);
         let workers_n = config.workers.max(1);
         let quantum = config.quantum.max(1);
+
+        let (security_audit, audit_worker) = match config.security_audit.clone() {
+            Some(sink) => {
+                let (queued, handle) =
+                    super::sandbox::wrap_audit_sink(sink, super::sandbox::DEFAULT_AUDIT_QUEUE);
+                (Some(queued), Some(handle))
+            }
+            None => (None, None),
+        };
 
         let locals: Vec<LocalDeque<Box<Flow>>> =
             (0..workers_n).map(|_| LocalDeque::new()).collect();
@@ -492,7 +505,7 @@ impl Runtime {
             #[cfg(feature = "jit")]
             jit,
             security: Arc::new(super::sandbox::SecurityCounters::default()),
-            security_audit: config.security_audit.clone(),
+            security_audit,
             policy: config.policy_fingerprint(),
             trust: config.trust,
             root_authority: config.root_authority,
@@ -531,6 +544,7 @@ impl Runtime {
             natives,
             workers,
             timer_thread: Some(timer_thread),
+            audit_worker,
             trust: config.trust,
         })
     }
@@ -1326,6 +1340,9 @@ impl Runtime {
             let _ = timer.join();
         }
         finalize_stranded(&self.shared);
+        if let Some(audit) = self.audit_worker.take() {
+            audit.stop();
+        }
     }
 }
 
@@ -1646,11 +1663,25 @@ fn grant_caps_in_args(
             0,
             &SpawnError::InvalidCapability,
             &mut |id| {
-                let next = match parent {
-                    None => shared.caps.reissue_for(id, child),
-                    Some(holder) => shared.caps.delegate(id, holder, child),
-                };
-                next.map_err(|_| SpawnError::InvalidCapability)
+                match parent {
+                    None => shared
+                        .caps
+                        .reissue_for(id, child)
+                        .map_err(|_| SpawnError::InvalidCapability),
+                    Some(holder) => match shared.caps.delegate(id, holder, child) {
+                        Ok(granted) => {
+                            record_security_event(
+                                shared,
+                                &super::sandbox::SecurityEvent::CapabilityDelegated {
+                                    from: holder.as_u64(),
+                                    to: child.as_u64(),
+                                },
+                            );
+                            Ok(granted)
+                        }
+                        Err(_) => Err(SpawnError::InvalidCapability),
+                    },
+                }
             },
             &mut |message| {
                 if let Some(holder) = parent {
@@ -1665,10 +1696,25 @@ fn grant_caps_in_args(
                 }
                 if !message.reply_cap.is_none() {
                     message.reply_cap = match parent {
-                        None => shared.caps.reissue_for(message.reply_cap, child),
-                        Some(holder) => shared.caps.delegate(message.reply_cap, holder, child),
-                    }
-                    .map_err(|_| SpawnError::InvalidCapability)?;
+                        None => shared
+                            .caps
+                            .reissue_for(message.reply_cap, child)
+                            .map_err(|_| SpawnError::InvalidCapability)?,
+                        Some(holder) => match shared.caps.delegate(message.reply_cap, holder, child)
+                        {
+                            Ok(granted) => {
+                                record_security_event(
+                                    shared,
+                                    &super::sandbox::SecurityEvent::CapabilityDelegated {
+                                        from: holder.as_u64(),
+                                        to: child.as_u64(),
+                                    },
+                                );
+                                granted
+                            }
+                            Err(_) => return Err(SpawnError::InvalidCapability),
+                        },
+                    };
                 }
                 Ok(())
             },
@@ -1721,8 +1767,18 @@ pub(crate) fn record_security_event(shared: &Shared, event: &super::sandbox::Sec
         SecurityEvent::CapabilityDelegated { .. } | SecurityEvent::FlowFinalized { .. } => {}
     }
     if let Some(sink) = shared.security_audit.as_ref() {
+        // Queued: never blocks the worker on a slow host sink.
         sink.record(event);
     }
+}
+
+pub(crate) fn record_quota_exceeded(shared: &Shared, err: super::quota::QuotaError) {
+    record_security_event(
+        shared,
+        &super::sandbox::SecurityEvent::QuotaExceeded {
+            kind: err.audit_kind(),
+        },
+    );
 }
 
 fn abort_startup(

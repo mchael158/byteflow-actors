@@ -4,6 +4,19 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.24] — 2026-11-12
+
+### Fixed
+
+- **Transport:** TCP inbound/outbound apply default 30s read/write timeouts;
+  `TcpInboundHandle::stop` shuts down live session sockets so half-open peers
+  cannot pin the join on `read_exact`.
+- **Quota:** `FlowQuota::charge_cpu` rejects `cost <= 0` (`InvalidCost`);
+  workers skip a zero charge after an empty slice.
+- **Audit:** `QuotaExceeded` and `CapabilityDelegated` are emitted to counters
+  / `SecurityAuditSink`; the sink is delivered via a bounded queue + dedicated
+  thread so a blocking host callback cannot stall the scheduler.
+
 ## [0.9.23] — 2026-11-05
 
 ### Docs

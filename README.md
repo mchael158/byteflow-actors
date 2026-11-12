@@ -9,7 +9,7 @@ Hop (`Value::Message` on `Send`), FlowCap, quotas, named discovery, supervisor.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.23"
+byteflow-actors = "0.9.24"
 ```
 
 ```rust

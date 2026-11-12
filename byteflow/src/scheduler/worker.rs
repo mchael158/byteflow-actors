@@ -429,10 +429,10 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
 
         let remaining = flow.quota.remaining_cpu();
         if remaining <= 0 {
-            finish_failed(
+            finish_quota(
                 shared,
                 *flow,
-                super::quota::QuotaError::CpuExhausted.to_string(),
+                super::quota::QuotaError::CpuExhausted,
             );
             return;
         }
@@ -442,9 +442,11 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
             super::quantum::run_slice(&mut flow, shared, slice)
         }));
         let delta = flow.vm.instructions_executed().saturating_sub(before);
-        if let Err(e) = flow.quota.charge_cpu(delta as i64) {
-            finish_failed(shared, *flow, e.to_string());
-            return;
+        if delta > 0 {
+            if let Err(e) = flow.quota.charge_cpu(delta as i64) {
+                finish_quota(shared, *flow, e);
+                return;
+            }
         }
         flow.metrics
             .instructions
@@ -578,7 +580,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         }
                     }
                     Err(e) => {
-                        finish_failed(shared, *flow, e.to_string());
+                        finish_spawn_err(shared, *flow, e);
                         return;
                     }
                 }
@@ -612,12 +614,12 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                         }
                     };
                 if let Err(e) = flow.quota.check_send() {
-                    finish_failed(shared, *flow, e.to_string());
+                    finish_quota(shared, *flow, e);
                     return;
                 }
                 let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
                 if let Err(e) = flow.quota.alloc(hop_cost) {
-                    finish_failed(shared, *flow, e.to_string());
+                    finish_quota(shared, *flow, e);
                     return;
                 }
                 log::info_sink(
@@ -761,14 +763,14 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     }
                 };
                 if let Err(e) = flow.quota.check_send() {
-                    finish_failed(shared, *flow, e.to_string());
+                    finish_quota(shared, *flow, e);
                     return;
                 }
                 let request_id = stamped_msg.request_id;
                 let stamped = Value::Message(stamped_msg);
                 let hop_cost = crate::vm::in_flight_hop_charge(&stamped);
                 if let Err(e) = flow.quota.alloc(hop_cost) {
-                    finish_failed(shared, *flow, e.to_string());
+                    finish_quota(shared, *flow, e);
                     return;
                 }
                 // S2: expect FlowId of the Cap target (not CapId).
@@ -1320,7 +1322,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     match link.start_child(crate::ChildSpec::new("", function).restart(policy)) {
                         Ok(h) => h,
                         Err(e) => {
-                            finish_failed(shared, *flow, e.to_string());
+                            finish_spawn_err(shared, *flow, e);
                             return;
                         }
                     };
@@ -1363,6 +1365,13 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
                     want_native.as_ref(),
                 ) {
                     Ok(new_id) => {
+                        crate::scheduler::runtime::record_security_event(
+                            shared,
+                            &crate::scheduler::sandbox::SecurityEvent::CapabilityDelegated {
+                                from: flow.id.as_u64(),
+                                to: flow.id.as_u64(),
+                            },
+                        );
                         let Some(f) = resume_or_fail(shared, flow, dest_reg, Value::Cap(new_id))
                         else {
                             return;
@@ -1741,6 +1750,21 @@ fn finish_failed(shared: &Shared, flow: Flow, msg: String) {
         FlowOutcome::Failed(msg),
         FlowExitReason::Fault,
     );
+}
+
+fn finish_quota(shared: &Shared, flow: Flow, err: super::quota::QuotaError) {
+    crate::scheduler::runtime::record_quota_exceeded(shared, err);
+    finish_failed(shared, flow, err.to_string());
+}
+
+fn finish_spawn_err(shared: &Shared, flow: Flow, err: super::error::SpawnError) {
+    if matches!(err, super::error::SpawnError::SpawnRateExceeded) {
+        crate::scheduler::runtime::record_quota_exceeded(
+            shared,
+            super::quota::QuotaError::SpawnRateExceeded,
+        );
+    }
+    finish_failed(shared, flow, err.to_string());
 }
 
 /// `Some` means the hop landed before the sender parked, so the caller

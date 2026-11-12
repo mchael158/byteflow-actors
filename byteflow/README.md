@@ -19,7 +19,7 @@ Not Tokio. Not a cluster protocol. Not a JVM.
 
 ```toml
 [dependencies]
-byteflow-actors = "0.9.23"
+byteflow-actors = "0.9.24"
 ```
 
 ```rust
@@ -140,7 +140,7 @@ byteflow run    <file.bf> [function]
 
 ---
 
-## Status (v0.9.23)
+## Status (v0.9.24)
 
 Register ISA + assembler, BFV0 ABI v5–v8, verifier (`TrustLevel::Untrusted` rejects
 Cap/Pid/Message constants), M:N scheduler, bounded mailboxes (default 256 hops /
