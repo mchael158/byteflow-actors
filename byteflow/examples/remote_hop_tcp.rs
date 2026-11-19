@@ -26,7 +26,6 @@ const SERVICE: &str = "inbox";
 
 fn main() -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    listener.set_nonblocking(false).map_err(|e| e.to_string())?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let (ready_tx, ready_rx) = sync_channel(1);
 

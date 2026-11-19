@@ -90,3 +90,5 @@ See [`remote-transport.md`](remote-transport.md) and `examples/remote_hop_tcp.rs
 [`DistributionBridge::with_config`]: ../src/scheduler/distribution.rs
 [`DistributionConfig`]: ../src/scheduler/distribution.rs
 [`Runtime::send`]: ../src/scheduler/runtime.rs
+[`TcpOutboundHandle::stop`]: ../src/transport/mod.rs
+[`RuntimeConfig::security_audit`]: ../src/scheduler/runtime.rs

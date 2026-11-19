@@ -23,7 +23,7 @@ Status: **open** / **partial** / **done**.
 | — | [`Runtime::snapshot`] | **done** |
 | — | Structured event stream | **open** |
 | T-02 | Miri / Loom in CI | **open** |
-| T-03 | Compile all examples in CI | **open** |
+| T-03 | Compile all examples in CI | **done** — `cargo build --examples` (std and `jit`) |
 | T-04 | Soak test | **open** |
 
 ## Product gaps

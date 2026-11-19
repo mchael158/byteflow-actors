@@ -52,8 +52,14 @@ jobs:
       - name: Test (std)
         run: cargo test --workspace --locked --offline
 
+      - name: Examples (std)
+        run: cargo build --examples --locked --offline
+
       - name: Test (jit)
         run: cargo test --workspace --features jit --locked --offline
+
+      - name: Examples (jit)
+        run: cargo build --examples --features jit --locked --offline
 
       - name: Compile Criterion benches
         run: cargo bench --workspace --no-run --locked --offline

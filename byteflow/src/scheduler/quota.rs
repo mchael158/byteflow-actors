@@ -168,7 +168,10 @@ pub enum QuotaError {
     CpuExhausted,
     /// `charge_cpu` rejected `cost <= 0` (would grow the budget or overflow).
     InvalidCost,
-    MemoryExhausted { requested: usize, limit: usize },
+    MemoryExhausted {
+        requested: usize,
+        limit: usize,
+    },
     SpawnRateExceeded,
     SendRateExceeded,
 }

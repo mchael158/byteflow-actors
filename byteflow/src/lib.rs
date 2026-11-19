@@ -208,6 +208,7 @@
 
 pub mod attest;
 pub mod bytecode;
+mod digest;
 pub mod entropy;
 pub mod log;
 pub mod memory;

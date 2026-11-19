@@ -520,10 +520,11 @@ decode/verify panic-freedom (`docs/properties.md`).
 ### Phase 4 (done — 0.9.6)
 
 Host-side bytecode **integrity fingerprint**: [`fingerprint_bf`](crate::fingerprint_bf)
- / [`decode_attested`](crate::decode_attested). Deterministic 32-byte digest over a
-`.bf` buffer so an embedder can refuse a module whose bytes do not match a
-known fingerprint. This is **not** cryptographic module attestation (no
-signatures, MACs, or trust roots inside Byteflow).
+ / [`decode_attested`](crate::decode_attested). SHA-256 of the raw `.bf` bytes
+(stable across rustc, OS, and pointer width) so an embedder can refuse a
+module whose bytes do not match a known fingerprint. This is **not**
+cryptographic module attestation (no signatures, MACs, or trust roots inside
+Byteflow). Digests from the old `DefaultHasher` expansion do not match.
 
 ### Phase 5 (done — 0.9.7: relation caps + attested boot)
 

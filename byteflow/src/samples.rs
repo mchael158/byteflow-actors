@@ -41,11 +41,11 @@
 //! | Role | Pattern | Examples |
 //! |------|---------|----------|
 //! | Long-lived service | [`Fn::actor_loop`](crate::Fn::actor_loop) + `send_reply` | [`server_loop`], [`named_service`], [`atomic_actors`] server, [`ask_reply`] |
-//! | One-shot worker | `receive_match_imm(tag)` → handle → `send_reply` → `exit` | [`ping_pong`] `pong`, [`atomic_request_reply`] server, [`cap_in_*`] |
-//! | RPC client | [`Fn::ask`] / `ask_timeout` + `hop_fresh` | [`atomic_actors`] client, [`ask_reply`] main |
+//! | One-shot worker | `receive_match_imm(tag)` → handle → `send_reply` → `exit` | [`ping_pong`] `pong`, [`atomic_request_reply`] server, `cap_in_*` |
+//! | RPC client | [`Fn::ask`](crate::Fn::ask) / `ask_timeout` + `hop_fresh` | [`atomic_actors`] client, [`ask_reply`] main |
 //! | Cast client | `send` / `cast` + `receive_match_corr_imm` or `receive_match_imm` | [`ping_pong`] main, [`selective_receive`] |
 //!
-//! Prefer shared tags in [`TAG_REQ`] / [`TAG_REP`] / …; mint ids with [`Fn::hop_fresh`]
+//! Prefer shared tags in [`TAG_REQ`] / [`TAG_REP`] / …; mint ids with [`Fn::hop_fresh`](crate::Fn::hop_fresh)
 //! when correlating multiple in-flight hops on one flow.
 
 use crate::natives::std_native;
@@ -372,7 +372,7 @@ pub fn receive_match_kind() -> Chunk {
     p.build()
 }
 
-/// Atomic request/reply via `Ask` (RPC hop). Server uses [`Fn::actor_loop`]
+/// Atomic request/reply via `Ask` (RPC hop). Server uses [`Fn::actor_loop`](crate::Fn::actor_loop)
 /// so repeated `Ask`s on the same Cap stay valid (CLI / long-lived service).
 pub fn ask_reply() -> Chunk {
     let mut p = Program::new("ask-reply");

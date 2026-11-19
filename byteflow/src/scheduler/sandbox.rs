@@ -10,8 +10,6 @@
 //! Isolation is **in-process**. Native code and the host remain inside the
 //! same trust boundary — see `docs/sandbox/limitations.md`.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
@@ -23,16 +21,18 @@ use crate::bytecode::{CapId, CapRights, CapTarget, TrustLevel};
 use super::capability::{CapTable, Capability};
 use super::error::RuntimeError;
 use super::process::FlowId;
-use super::quota::QuotaConfig;
 use super::runtime::RuntimeConfig;
 
-/// Domain separator for [`PolicyFingerprint`] (not a secret).
-const POLICY_DOMAIN: u64 = 0xBF51_5341_4E44_5031; // "BFQSANDP1"
+/// Canonical encoding version mixed into [`policy_fingerprint`].
+const POLICY_VERSION: u8 = 1;
 
 /// Stable identity of the security-relevant knobs on a [`RuntimeConfig`].
 ///
-/// Useful for audit trails ("which policy admitted this run?"). It is **not**
-/// a cryptographic attestation of process integrity.
+/// The 16 bytes are the leading half of SHA-256 over a fixed-width encoding
+/// (see [`policy_fingerprint`]). The same config yields the same bytes on
+/// every rustc, OS, and pointer width. It is **not** a cryptographic
+/// attestation of process integrity. A value stored before this encoding
+/// (std `DefaultHasher`) will not match and must be recomputed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PolicyFingerprint([u8; 16]);
 
@@ -58,34 +58,69 @@ impl std::fmt::Display for PolicyFingerprint {
 }
 
 /// Compute a fingerprint over the security-relevant fields of `config`.
+///
+/// Encoding (`POLICY_VERSION` = 1), little-endian, fixed widths so a 32-bit
+/// host matches a 64-bit host:
+///
+/// `b"BFQP" | version | trust | root_authority | max_flows u32 | max_ask_waits u32 |
+/// max_host_awaits u32 | max_links u32 | max_monitors u32 | max_registry_names u32 |
+/// max_runtime_bytes u64 | mailbox capacity u32 | mailbox bytes u64 | overflow u8 |
+/// cpu_budget i64 | mem_limit u64 | spawn_burst i64 | spawn_per_sec i64 |
+/// send_burst i64 | send_per_sec i64`
+///
+/// Workers, quantum, JIT, sinks, and bridges are not part of the policy
+/// identity. The returned value is SHA-256 of that buffer, truncated to 16
+/// bytes.
 pub fn policy_fingerprint(config: &RuntimeConfig) -> PolicyFingerprint {
-    let mut hasher = DefaultHasher::new();
-    POLICY_DOMAIN.hash(&mut hasher);
-    trust_tag(config.trust).hash(&mut hasher);
-    root_authority_tag(config.root_authority).hash(&mut hasher);
-    config.max_flows.hash(&mut hasher);
-    config.max_ask_waits.hash(&mut hasher);
-    config.max_host_awaits.hash(&mut hasher);
-    config.max_links.hash(&mut hasher);
-    config.max_monitors.hash(&mut hasher);
-    config.max_registry_names.hash(&mut hasher);
-    config.max_runtime_bytes.hash(&mut hasher);
-    config.mailbox.capacity().get().hash(&mut hasher);
-    config.mailbox.bytes().get().hash(&mut hasher);
-    (config.mailbox.overflow() as u8).hash(&mut hasher);
-    hash_quota(&mut hasher, &config.quota);
-    let lo = hasher.finish();
-    // Second lane so the digest is 128-bit without a crypto dependency.
-    let mut hasher2 = DefaultHasher::new();
-    POLICY_DOMAIN.hash(&mut hasher2);
-    lo.hash(&mut hasher2);
-    hash_quota(&mut hasher2, &config.quota);
-    config.max_runtime_bytes.hash(&mut hasher2);
-    let hi = hasher2.finish();
+    let digest = crate::digest::sha256(&canonical_policy_bytes(config));
     let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&lo.to_le_bytes());
-    out[8..].copy_from_slice(&hi.to_le_bytes());
+    out.copy_from_slice(&digest[..16]);
     PolicyFingerprint(out)
+}
+
+fn canonical_policy_bytes(config: &RuntimeConfig) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(100);
+    buf.extend_from_slice(b"BFQP");
+    buf.push(POLICY_VERSION);
+    buf.push(trust_tag(config.trust));
+    buf.push(root_authority_tag(config.root_authority));
+    push_u32(&mut buf, config.max_flows);
+    push_u32(&mut buf, config.max_ask_waits);
+    push_u32(&mut buf, config.max_host_awaits);
+    push_u32(&mut buf, config.max_links);
+    push_u32(&mut buf, config.max_monitors);
+    push_u32(&mut buf, config.max_registry_names);
+    push_u64(&mut buf, as_u64(config.max_runtime_bytes));
+    push_u32(&mut buf, config.mailbox.capacity().get_u32());
+    push_u64(&mut buf, as_u64(config.mailbox.bytes().get()));
+    buf.push(config.mailbox.overflow() as u8);
+    let q = &config.quota;
+    push_i64(&mut buf, q.cpu_budget);
+    push_u64(&mut buf, as_u64(q.mem_limit));
+    push_i64(&mut buf, q.spawn_burst);
+    push_i64(&mut buf, q.spawn_per_sec);
+    push_i64(&mut buf, q.send_burst);
+    push_i64(&mut buf, q.send_per_sec);
+    buf
+}
+
+fn as_u64(n: usize) -> u64 {
+    match u64::try_from(n) {
+        Ok(v) => v,
+        Err(_) => u64::MAX,
+    }
+}
+
+fn push_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i64(buf: &mut Vec<u8>, value: i64) {
+    buf.extend_from_slice(&value.to_le_bytes());
 }
 
 fn trust_tag(trust: TrustLevel) -> u8 {
@@ -102,15 +137,6 @@ fn root_authority_tag(policy: crate::scheduler::RootAuthorityPolicy) -> u8 {
         crate::scheduler::RootAuthorityPolicy::Restricted => 1,
         crate::scheduler::RootAuthorityPolicy::Untrusted => 2,
     }
-}
-
-fn hash_quota(hasher: &mut DefaultHasher, q: &QuotaConfig) {
-    q.cpu_budget.hash(hasher);
-    q.mem_limit.hash(hasher);
-    q.spawn_burst.hash(hasher);
-    q.spawn_per_sec.hash(hasher);
-    q.send_burst.hash(hasher);
-    q.send_per_sec.hash(hasher);
 }
 
 /// Host-visible security counters. Untrusted bytecode cannot write these.
@@ -272,7 +298,7 @@ impl std::fmt::Display for SecurityEvent {
 /// Optional host callback for security events (never receives full CapId tokens).
 ///
 /// The runtime delivers events on a **dedicated audit thread** with a bounded
-/// queue (see [`wrap_audit_sink`]). `record` on the host sink may block that
+/// queue. `record` on the host sink may block that
 /// thread but must not block scheduler workers. Prefer fast, non-panicking
 /// sinks; a full queue drops the newest event (fail-open for observability).
 pub trait SecurityAuditSink: Send + Sync + std::fmt::Debug + 'static {
@@ -373,6 +399,19 @@ mod tests {
         let a = RuntimeConfig::sandbox();
         let b = RuntimeConfig::sandbox();
         assert_eq!(policy_fingerprint(&a), policy_fingerprint(&b));
+    }
+
+    /// Pinned SHA-256 prefixes. A rustc or pointer-width change must not move these.
+    #[test]
+    fn fingerprint_matches_canonical_sha256_prefix() {
+        assert_eq!(
+            policy_fingerprint(&RuntimeConfig::default()).to_hex(),
+            "2e1be905f47892334e759d3327a05d46"
+        );
+        assert_eq!(
+            policy_fingerprint(&RuntimeConfig::sandbox()).to_hex(),
+            "d59bbad5eefb7b525a0cdeaf6708be36"
+        );
     }
 
     #[test]

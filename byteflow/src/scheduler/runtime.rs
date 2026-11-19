@@ -212,7 +212,7 @@ impl RuntimeConfig {
     /// Default [`RuntimeConfig`] stays permissive (`max_* = 0` unlimited,
     /// [`QuotaConfig::permissive`](super::quota::QuotaConfig::permissive)).
     /// This profile enables fail-closed process-wide caps and tight
-    /// per-flow budgets. Trust defaults to [`TrustLevel::Untrusted`]
+    /// per-flow budgets. Trust defaults to [`crate::bytecode::TrustLevel::Untrusted`]
     /// (inherited from [`Default`]) so Cap/Pid/Message constants are
     /// rejected at verify time.
     ///
@@ -242,7 +242,7 @@ impl RuntimeConfig {
     }
 
     /// Same process-wide caps as [`Self::sandbox`], but
-    /// [`TrustLevel::Restricted`]: still no Cap/Pid/Message in the constant
+    /// [`crate::bytecode::TrustLevel::Restricted`]: still no Cap/Pid/Message in the constant
     /// pool; host may grant Caps / natives after admission.
     pub fn sandbox_restricted() -> Self {
         RuntimeConfig {
@@ -1662,26 +1662,24 @@ fn grant_caps_in_args(
         let granted = arg.map_caps(
             0,
             &SpawnError::InvalidCapability,
-            &mut |id| {
-                match parent {
-                    None => shared
-                        .caps
-                        .reissue_for(id, child)
-                        .map_err(|_| SpawnError::InvalidCapability),
-                    Some(holder) => match shared.caps.delegate(id, holder, child) {
-                        Ok(granted) => {
-                            record_security_event(
-                                shared,
-                                &super::sandbox::SecurityEvent::CapabilityDelegated {
-                                    from: holder.as_u64(),
-                                    to: child.as_u64(),
-                                },
-                            );
-                            Ok(granted)
-                        }
-                        Err(_) => Err(SpawnError::InvalidCapability),
-                    },
-                }
+            &mut |id| match parent {
+                None => shared
+                    .caps
+                    .reissue_for(id, child)
+                    .map_err(|_| SpawnError::InvalidCapability),
+                Some(holder) => match shared.caps.delegate(id, holder, child) {
+                    Ok(granted) => {
+                        record_security_event(
+                            shared,
+                            &super::sandbox::SecurityEvent::CapabilityDelegated {
+                                from: holder.as_u64(),
+                                to: child.as_u64(),
+                            },
+                        );
+                        Ok(granted)
+                    }
+                    Err(_) => Err(SpawnError::InvalidCapability),
+                },
             },
             &mut |message| {
                 if let Some(holder) = parent {
@@ -1700,20 +1698,21 @@ fn grant_caps_in_args(
                             .caps
                             .reissue_for(message.reply_cap, child)
                             .map_err(|_| SpawnError::InvalidCapability)?,
-                        Some(holder) => match shared.caps.delegate(message.reply_cap, holder, child)
-                        {
-                            Ok(granted) => {
-                                record_security_event(
-                                    shared,
-                                    &super::sandbox::SecurityEvent::CapabilityDelegated {
-                                        from: holder.as_u64(),
-                                        to: child.as_u64(),
-                                    },
-                                );
-                                granted
+                        Some(holder) => {
+                            match shared.caps.delegate(message.reply_cap, holder, child) {
+                                Ok(granted) => {
+                                    record_security_event(
+                                        shared,
+                                        &super::sandbox::SecurityEvent::CapabilityDelegated {
+                                            from: holder.as_u64(),
+                                            to: child.as_u64(),
+                                        },
+                                    );
+                                    granted
+                                }
+                                Err(_) => return Err(SpawnError::InvalidCapability),
                             }
-                            Err(_) => return Err(SpawnError::InvalidCapability),
-                        },
+                        }
                     };
                 }
                 Ok(())

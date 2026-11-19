@@ -29,7 +29,7 @@ HOST
 | `root_authority` | `TrustedHost` \| `Restricted` \| `Untrusted` for host `spawn` |
 | `spawn_untrusted` | Forces Untrusted root Cap for that spawn |
 | `applies_sandbox_caps()` | Whether process ceilings are armed |
-| `policy_fingerprint()` | Digest of security knobs (includes `root_authority`) |
+| `policy_fingerprint()` | SHA-256 prefix of the security knobs (includes `root_authority`); stable across rustc and pointer width |
 | `security_audit` | Module reject / Cap revoke / native deny (no full CapId) |
 
 `trust-model.md` · `capabilities.md` · `quotas.md` · `threat-model.md` · `limitations.md`

@@ -429,11 +429,7 @@ fn drive_process(shared: &Arc<Shared>, local: &LocalDeque<Box<Flow>>, mut flow: 
 
         let remaining = flow.quota.remaining_cpu();
         if remaining <= 0 {
-            finish_quota(
-                shared,
-                *flow,
-                super::quota::QuotaError::CpuExhausted,
-            );
+            finish_quota(shared, *flow, super::quota::QuotaError::CpuExhausted);
             return;
         }
         let slice = (shared.quantum as i64).min(remaining) as u32;

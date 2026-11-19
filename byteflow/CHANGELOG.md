@@ -4,6 +4,25 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Fingerprint:** `fingerprint_bf` is SHA-256 of the raw buffer (FIPS 180-4).
+  `policy_fingerprint` is the first 16 bytes of SHA-256 over a fixed-width
+  little-endian encoding of the security knobs (`b"BFQP"`, version 1). Both
+  used to go through `DefaultHasher`, which is not stable across rustc
+  releases or pointer width, so a stored digest could stop matching after a
+  toolchain upgrade. Recompute any digest persisted from 0.9.24 or earlier.
+  `sha256sum` reproduces `fingerprint_bf`.
+
+### Fixed
+
+- **Transport:** `spawn_tcp_inbound` sets the listener non-blocking before
+  starting the accept thread and returns `TransportError::Io` if that fails.
+  The error used to be ignored inside the thread, so `TcpInboundHandle::stop`
+  could not interrupt a blocking `accept`.
+- **Docs:** `cargo doc -D warnings` resolves again (broken intra-doc links
+  in verify, samples, runtime, transport, and the embedding guide).
+
 ## [0.9.24] — 2026-11-12
 
 ### Fixed

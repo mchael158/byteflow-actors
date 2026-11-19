@@ -1,7 +1,7 @@
 //! Reference host I/O for remote Atomic Hop frames — **not** a cluster protocol.
 //!
-//! Byteflow already defines [`encode_frame`] / [`decode_frame`] and
-//! [`Runtime::deliver_frame`]. This module adds a copy-friendly **length-prefixed
+//! Byteflow already defines [`encode_frame`] / [`crate::decode_frame`] and
+//! [`crate::Runtime::deliver_frame`]. This module adds a copy-friendly **length-prefixed
 //! wire envelope** and small TCP/UDP helpers with **bounded outbound queues**
 //! so a slow socket applies backpressure to [`DistributionBridge`] drains.
 //!
@@ -181,7 +181,7 @@ pub fn spawn_tcp_outbound(
     spawn_tcp_outbound_routed(bridge, Arc::new(router::FixedPeerRouter(peer)), config)
 }
 
-/// Drains `bridge`, resolves each hop's [`OutboundHop::node`] through `router`, and
+/// Drains `bridge`, resolves each hop's [`crate::OutboundHop::node`] through `router`, and
 /// writes length-prefixed frames to the matching TCP peer.
 ///
 /// When routing or `encode_frame` fails, the pump stops fail-closed (same as the
@@ -413,6 +413,10 @@ impl Default for TcpInboundConfig {
 }
 
 /// Accepts TCP connections and delivers each wire frame through `deliver`.
+///
+/// [`spawn_tcp_inbound`] sets the listener non-blocking before the accept
+/// thread starts. A blocking `accept` would ignore [`TcpInboundHandle::stop`]
+/// until the next connection.
 pub struct TcpInboundHandle {
     stop: Arc<AtomicBool>,
     join: JoinHandle<()>,
@@ -422,7 +426,7 @@ pub struct TcpInboundHandle {
 
 impl TcpInboundHandle {
     /// Signal stop, **shutdown every live session socket**, join the accept
-    /// thread, then wait for session threads to exit (≤ [`SESSION_DRAIN`]).
+    /// thread, then wait for session threads to exit (at most 5 seconds).
     pub fn stop(self) -> Result<(), TransportError> {
         self.stop.store(true, Ordering::Relaxed);
         self.registry.shutdown_all();
@@ -440,6 +444,11 @@ impl TcpInboundHandle {
     }
 }
 
+/// Accept length-prefixed frames and pass each payload to `deliver`.
+///
+/// Sets `listener` non-blocking before the accept thread starts.
+/// [`TransportError::Io`] if that fails; no thread is spawned. A blocking
+/// listener would ignore [`TcpInboundHandle::stop`] until the next connection.
 pub fn spawn_tcp_inbound<F>(
     listener: TcpListener,
     deliver: Arc<F>,
@@ -449,6 +458,9 @@ where
     F: Fn(&[u8]) -> Result<(), RemoteFrameError> + Send + Sync + 'static,
 {
     check_max_wire(config.max_wire_bytes)?;
+    // Fail before spawning. If this is ignored, `stop` cannot interrupt
+    // `accept` and shutdown waits on the next peer.
+    listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_accept = Arc::clone(&stop);
     let active_sessions = Arc::new(AtomicUsize::new(0));
@@ -508,7 +520,6 @@ where
         active_sessions,
         registry,
     } = state;
-    let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer)) => {

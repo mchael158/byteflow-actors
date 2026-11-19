@@ -26,7 +26,7 @@ pub enum TrustLevel {
 }
 
 impl TrustLevel {
-    /// Only [`Trusted`] may embed authority-bearing constant-pool tags.
+    /// Only [`TrustLevel::Trusted`] may embed authority-bearing constant-pool tags.
     #[inline]
     pub const fn allows_authority_constants(self) -> bool {
         matches!(self, TrustLevel::Trusted)

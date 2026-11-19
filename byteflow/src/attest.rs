@@ -1,44 +1,25 @@
 //! Host-side bytecode **integrity fingerprint** (Phase 4).
 //!
-//! [`fingerprint_bf`] is a deterministic 32-byte digest over a `.bf` buffer.
-//! It is an **integrity fingerprint**, not cryptographic attestation: it does
-//! not use a secret key, MAC, or signature scheme. Hosts that want signed
-//! module attestation must layer that on top (non-goal for Byteflow itself).
+//! [`fingerprint_bf`] is SHA-256 over a `.bf` buffer. It is an **integrity
+//! fingerprint**, not cryptographic attestation: it does not use a secret
+//! key, MAC, or signature scheme. Hosts that want signed module attestation
+//! must layer that on top (non-goal for Byteflow itself).
+//!
+//! The digest is the FIPS 180-4 hash of the raw bytes, so the same buffer
+//! produces the same 32 bytes on every rustc, OS, and pointer width. A value
+//! stored from the previous `DefaultHasher` expansion will not match and
+//! must be recomputed.
 
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 use crate::bytecode::{decode, Chunk, FormatError};
 
-/// Fixed domain separator mixed into every round (not a secret).
-const FINGERPRINT_DOMAIN: u64 = 0xBF01_464C_4F57_7630; // "BF01FLOW v0"
-
-/// Deterministic 32-byte integrity fingerprint of a BFV0 module buffer.
+/// SHA-256 of `bytes`.
 ///
-/// Built by expanding several [`DefaultHasher`] rounds (SipHash-1-3 with the
-/// hasher's fixed constructor keys) into 32 bytes. Suitable for host-side
-/// "did this buffer change?" checks — **not** for cryptographic attestation.
+/// Any SHA-256 implementation can reproduce this (no domain prefix). Suitable
+/// for host-side "did this buffer change?" checks — **not** a signature.
 pub fn fingerprint_bf(bytes: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (lane, chunk) in out.chunks_mut(8).enumerate() {
-        let mut state = mix_lane(bytes, lane as u64, 0);
-        for round in 1u64..=4 {
-            state = mix_lane(bytes, lane as u64, round ^ state);
-        }
-        chunk.copy_from_slice(&state.to_le_bytes());
-    }
-    out
-}
-
-fn mix_lane(bytes: &[u8], lane: u64, round: u64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    FINGERPRINT_DOMAIN.hash(&mut hasher);
-    lane.hash(&mut hasher);
-    round.hash(&mut hasher);
-    (bytes.len() as u64).hash(&mut hasher);
-    bytes.hash(&mut hasher);
-    hasher.finish()
+    crate::digest::sha256(bytes)
 }
 
 /// Failure of [`decode_attested`].
@@ -135,8 +116,25 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_deterministic() {
+    fn fingerprint_is_sha256_of_the_bytes() {
+        assert_eq!(
+            hex32(&fingerprint_bf(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hex32(&fingerprint_bf(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let bytes = b"BFV0-not-a-real-module-but-stable";
         assert_eq!(fingerprint_bf(bytes), fingerprint_bf(bytes));
+    }
+
+    fn hex32(bytes: &[u8; 32]) -> String {
+        let mut s = String::with_capacity(64);
+        for b in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 }
