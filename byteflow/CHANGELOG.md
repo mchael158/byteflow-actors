@@ -4,6 +4,12 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-11-24
+
+### Fixed
+
+- **Docs:** the 0.9.25 notes no longer refer to a file that is not shipped in the crate.
+
 ## [0.9.25] — 2026-11-24
 
 ### Fixed
