@@ -224,6 +224,12 @@ pub mod vm;
 #[cfg_attr(docsrs, doc(cfg(feature = "jit")))]
 pub mod jit;
 
+/// Every `rust` block in the README is compiled and run by `cargo test --doc`,
+/// so the examples on crates.io cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 /// Long-form design notes shipped inside the crate (also under `docs/` on GitHub).
 ///
 /// These modules exist so [docs.rs](https://docs.rs/byteflow-actors) shows the
