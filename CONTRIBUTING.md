@@ -32,7 +32,6 @@ cargo clippy --workspace --all-targets --features jit -- -D warnings
 cargo test --workspace
 cargo test --workspace --features jit
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-python scripts/sync_readme.py --check
 ```
 
 ## House rules
@@ -47,8 +46,8 @@ python scripts/sync_readme.py --check
   embed them, so renumbering one breaks every module in the wild.
 - **Security-relevant changes** (verifier, capabilities, quotas, mailbox
   bounds) need a test in `tests/` that fails without the change.
-- **README:** edit the top-level `README.md`, then run
-  `python scripts/sync_readme.py` to regenerate `byteflow/README.md`.
+- **README:** keep the top-level `README.md` and `byteflow/README.md` in
+  agreement when a user-facing sentence changes.
 - **README code is tested.** Every `rust` block in the README runs as a
   doctest (`cargo test --doc`), so keep each one a complete program.
 

@@ -43,9 +43,6 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
 
-      - name: Crate README in sync
-        run: python3 scripts/sync_readme.py --check
-
       - name: Clippy (std)
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 

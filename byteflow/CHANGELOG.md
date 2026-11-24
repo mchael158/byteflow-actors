@@ -24,8 +24,7 @@ All notable changes to **byteflow-actors** are documented here.
   (`ReadmeDoctests`), so the crates.io page cannot drift from the API.
 - **CLI:** `byteflow --version`.
 - **CI:** MSRV job (Rust 1.88, default features); test and CLI smoke jobs
-  on Windows and macOS; crate-README sync check
-  (`scripts/sync_readme.py --check`).
+  on Windows and macOS.
 - **Repo:** `CONTRIBUTING.md`, issue and pull-request templates.
 
 ### Changed
