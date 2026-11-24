@@ -1,0 +1,16 @@
+name: Feature request
+description: An idea for the runtime, the bytecode, or the CLI.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The use case first, before any particular solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: An API, syntax or command you have in mind, if any.
