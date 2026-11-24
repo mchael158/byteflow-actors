@@ -22,6 +22,10 @@ fn main() -> ExitCode {
             print_help();
             Ok(())
         }
+        "version" | "-V" | "--version" => {
+            println!("byteflow {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "verify" => match args.next() {
             Some(path) => cmd_verify(&path),
             None => usage("byteflow verify <file.bf>"),
@@ -68,62 +72,55 @@ fn main() -> ExitCode {
 
 fn usage(msg: &str) -> Result<(), ()> {
     let t = Palette::new();
-    eprintln!(
-        "{}\n{} {}",
-        t.bar('╭', "usage", ""),
-        t.paint(CRIMSON, "╰─"),
-        t.paint(FLARE, msg)
-    );
+    eprintln!("{} {}", t.paint(CRIMSON, "usage:"), t.paint(FLARE, msg));
     Err(())
 }
 
 fn banner_error(msg: &str) {
     let t = Palette::new();
-    eprintln!("{} {}", t.paint(CRIMSON, "╰─ ✗"), t.paint(HOT, msg));
+    eprintln!("{} {}", t.paint(CRIMSON, "error:"), t.paint(FLARE, msg));
 }
 
 fn print_help() {
     let t = Palette::new();
-    let cmd = |name: &str, spec: &str| {
+    let cmd = |name: &str, spec: &str, what: &str| {
         format!(
-            "{}  {}  {}",
-            t.paint(HOT, "│"),
-            t.paint(FLARE, name),
-            t.paint(SCARLET, spec)
+            "  {}  {}  {}",
+            t.paint(FLARE, &format!("{name:<6}")),
+            t.paint(HOT, &format!("{spec:<22}")),
+            what
         )
     };
-    eprintln!(
-        "\
-{}
-{}  verify, disassemble and run .bf modules
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}  run/hop demos attach natives print=0 · now_ms=1 · make_msg=2 · … · msg_reply_cap=7
-{}  every Send is an Atomic Hop (Value::Message only)",
-        t.bar('╭', "𝕭𝖄𝕿𝕰𝕱𝕷𝕺𝖂", "runtime"),
-        t.paint(HOT, "│"),
-        t.bar('├', "usage", ""),
-        cmd(
-            "demo  ",
-            "[ping-pong|atomic|selective|selective-after|match-eq|exit|dict|ask|ask-timeout|server-loop|monitor|alive|add]",
+    let lines = [
+        format!(
+            "{} {}  verify, disassemble and run .bf modules",
+            t.paint(CRIMSON, "byteflow"),
+            env!("CARGO_PKG_VERSION"),
         ),
-        cmd("pack  ", "<ping-pong|atomic|ask|add> <out.bf>"),
-        cmd("verify", "<file.bf>"),
-        cmd("disasm", "<file.bf>"),
-        cmd("asm   ", "<file> -o <out.bf>"),
-        cmd("run   ", "<file.bf> [function]"),
-        t.paint(BLOOD, "│"),
-        t.paint(CRIMSON, "╰─"),
-    );
+        String::new(),
+        t.paint(CRIMSON, "modules"),
+        cmd("run", "<file.bf> [function]", "run `main` (or the named function)"),
+        cmd("verify", "<file.bf>", "run the static verifier"),
+        cmd("disasm", "<file.bf>", "print the bytecode listing"),
+        cmd("asm", "<listing> -o <out.bf>", "assemble a text listing"),
+        String::new(),
+        t.paint(CRIMSON, "built-in demos"),
+        cmd("demo", "<name>", "ping-pong atomic selective selective-after"),
+        cmd("", "", "match-eq exit dict ask ask-timeout server-loop"),
+        cmd("", "", "monitor alive add"),
+        cmd("pack", "<demo> <out.bf>", "write a demo as a .bf module"),
+        String::new(),
+        format!(
+            "{}  run/hop demos attach the std natives (print=0 · now_ms=1 · make_msg=2 · … · msg_reply_cap=7)",
+            t.paint(SCARLET, "note")
+        ),
+    ];
+    for line in lines {
+        eprintln!("{line}");
+    }
 }
 
 /// Standard 16-color ANSI. A terminal palette remaps these codes.
-const BLOOD: &str = "31";
 const CRIMSON: &str = "1;31";
 const SCARLET: &str = "91";
 const HOT: &str = "93";
@@ -147,32 +144,14 @@ impl Palette {
             text.to_string()
         }
     }
-
-    fn bar(&self, corner: char, title: &str, tag: &str) -> String {
-        let head = format!(
-            "{} {}",
-            self.paint(CRIMSON, &format!("{corner}─")),
-            self.paint(FLARE, title)
-        );
-        if tag.is_empty() {
-            head
-        } else {
-            format!(
-                "{} {} {}",
-                head,
-                self.paint(BLOOD, "╱╱"),
-                self.paint(SCARLET, tag)
-            )
-        }
-    }
 }
 
 fn load_bf(path: &str) -> Result<byteflow::Chunk, ()> {
     let bytes = fs::read(path).map_err(|e| {
-        eprintln!("read {path}: {e}");
+        banner_error(&format!("read {path}: {e}"));
     })?;
     decode(&bytes).map_err(|e| {
-        eprintln!("{path}: {e}");
+        banner_error(&format!("{path}: {e}"));
     })
 }
 
@@ -189,7 +168,7 @@ fn cmd_verify(path: &str) -> Result<(), ()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!("verify failed: {e}");
+            banner_error(&format!("verify failed: {e}"));
             Err(())
         }
     }
@@ -309,7 +288,7 @@ fn run_chunk(
     natives: Arc<NativeTable>,
 ) -> Result<(), ()> {
     if let Err(e) = verify(chunk) {
-        eprintln!("verify failed: {e}");
+        banner_error(&format!("verify failed: {e}"));
         return Err(());
     }
 
@@ -353,7 +332,7 @@ fn run_chunk(
     match outcome {
         FlowOutcome::Completed(v) => println!("{v}"),
         FlowOutcome::Failed(err) => {
-            eprintln!("Flow failed: {err}");
+            banner_error(&format!("flow failed: {err}"));
             eprintln!("{metrics}");
             return Err(());
         }
