@@ -4,6 +4,41 @@ All notable changes to **byteflow-actors** are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mailbox:** a bytecode `Send` / `Ask` into a full inbox always parks the
+  sender until a slot frees, however many senders are already waiting.
+  Before, a sender that found a capacity-sized waiter list full was
+  finalized with `Failed("waiting senders full")`. Any fan-in with more
+  than `2 × capacity` senders in flight (many workers, one collector) lost
+  those hops, and the collector waited forever. The waiter list needs no
+  cap of its own: each entry is an existing flow whose hop is already
+  charged to its own quota, so `max_flows` bounds it. Regression test:
+  `tests/mailbox_fan_in.rs`.
+
+### Added
+
+- **Docs:** every `rust` block in the README runs as a doctest
+  (`ReadmeDoctests`), so the crates.io page cannot drift from the API.
+- **CLI:** `byteflow --version`.
+- **CI:** MSRV job (Rust 1.88, default features); test and CLI smoke jobs
+  on Windows and macOS; crate-README sync check
+  (`scripts/sync_readme.py --check`).
+- **Repo:** `CONTRIBUTING.md`, issue and pull-request templates.
+
+### Changed
+
+- **MSRV:** `rust-version` lowered from 1.99.1 to **1.88** for default
+  features (`jit` still needs a toolchain recent enough for Cranelift).
+  Two `AtomicU*::try_update` calls became CAS loops that build on both.
+- **CLI:** help screen rewritten. The decorative Unicode banner is gone,
+  so output reads correctly on any terminal and in screen readers. Errors
+  are prefixed `error:`.
+- **Examples:** Rust examples return `Result` and use `?` instead of
+  `match` + `process::exit`.
+- **Docs:** READMEs rewritten around use cases, tested code, a comparison
+  table and reproducible numbers.
+
 ### Breaking
 
 - **Fingerprint:** `fingerprint_bf` is SHA-256 of the raw buffer (FIPS 180-4).
