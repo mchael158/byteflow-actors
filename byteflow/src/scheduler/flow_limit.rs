@@ -48,11 +48,17 @@ impl FlowLimit {
 
     /// Release one reserved slot (finalize or aborted spawn).
     pub fn release(&self) {
-        let _ = self
-            .live
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                Some(c.saturating_sub(1))
-            });
+        // A CAS loop rather than `fetch_update` / `try_update`: the first is
+        // deprecated on current Rust, the second is too new for the MSRV.
+        let mut cur = self.live.load(Ordering::Acquire);
+        while let Err(actual) = self.live.compare_exchange_weak(
+            cur,
+            cur.saturating_sub(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            cur = actual;
+        }
     }
 
     pub fn reserved_live(&self) -> usize {
