@@ -202,8 +202,14 @@ struct MailboxInner {
     /// wait can be told apart from the current one. See [`WaitEpoch`].
     wait_epoch: u64,
     stats: MailboxStats,
-    /// Bytecode senders waiting for a free slot (`WAITING_SEND`).
+    /// Bytecode senders waiting for a free slot (`WAITING_SEND`), FIFO.
     /// Woken one-at-a-time from [`Mailbox::admit_waiting_sender`].
+    ///
+    /// No cap of its own: each entry is a flow that already exists, moved
+    /// here from its worker, and its hop is already charged to that
+    /// sender's quota (`Flow::hop_charge`). The list is therefore bounded
+    /// by the live-flow count, which `max_flows` governs. A cap here
+    /// bounded nothing and turned backpressure into a failed sender.
     waiting_senders: VecDeque<WaitingSender>,
     /// Set by [`Mailbox::close`] during finalize so a late `park_sender`
     /// cannot land after `drain_waiting_senders` and leak the sender.
@@ -569,9 +575,6 @@ impl Mailbox {
                     ParkSender::Delivered(flow)
                 }
                 Err(message) => {
-                    if inner.waiting_senders.len() >= self.config.capacity().get() {
-                        return ParkSender::WaitersFull(flow);
-                    }
                     inner
                         .waiting_senders
                         .push_back(WaitingSender { flow, message });
@@ -631,8 +634,6 @@ pub(crate) enum ParkSender {
     Delivered(Box<Flow>),
     /// Inbox already closed (target finalizing) or lock poisoned.
     Closed(Box<Flow>),
-    /// Too many senders are already parked. The target is still alive.
-    WaitersFull(Box<Flow>),
     /// Hop is larger than the inbox byte budget — parking would never unblock.
     Undeliverable(Box<Flow>),
 }
@@ -1063,7 +1064,6 @@ mod tests {
                 return Err("a free inbox must deliver, not park the sender".into())
             }
             ParkSender::Closed(_) => return Err("live inbox reported Closed".into()),
-            ParkSender::WaitersFull(_) => return Err("live inbox reported WaitersFull".into()),
             ParkSender::Undeliverable(_) => return Err("a fitting hop was Undeliverable".into()),
         }
         assert_eq!(
@@ -1074,25 +1074,30 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: parked senders beyond the inbox capacity used to be
+    /// finalized with `waiting senders full`. Every one of them must park
+    /// and then be admitted in arrival order, one per freed slot.
     #[test]
-    fn park_sender_reports_a_full_waiter_list() -> TestResult {
+    fn park_sender_queues_waiters_beyond_capacity_in_order() -> TestResult {
         let mb = tiny_reject(1)?;
         assert!(matches!(mb.push(msg(1, 1))??, Delivery::Queued));
-        assert!(matches!(
-            mb.park_sender(dummy_flow()?, msg(1, 2)),
-            ParkSender::Parked
-        ));
-        match mb.park_sender(dummy_flow()?, msg(1, 3)) {
-            ParkSender::WaitersFull(_) => {}
-            ParkSender::Parked => return Err("the waiter list must refuse a second sender".into()),
-            ParkSender::Delivered(_) => return Err("a full inbox must not deliver".into()),
-            ParkSender::Closed(_) => return Err("a live inbox must not look closed".into()),
-            ParkSender::Undeliverable(_) => return Err("a fitting hop was Undeliverable".into()),
+        for n in 2..=20 {
+            match mb.park_sender(dummy_flow()?, msg(1, n)) {
+                ParkSender::Parked => {}
+                ParkSender::Delivered(_) => return Err("a full inbox must not deliver".into()),
+                ParkSender::Closed(_) => return Err("a live inbox must not look closed".into()),
+                ParkSender::Undeliverable(_) => {
+                    return Err("a fitting hop was Undeliverable".into())
+                }
+            }
         }
-        assert_eq!(
-            hop_payload_int(hop_msg(&mb.try_pop()?.ok_or("original hop")?)?),
-            1
-        );
+        for want in 1..=20 {
+            let hop = mb.try_pop()?.ok_or("a queued hop")?;
+            assert_eq!(hop_payload_int(hop_msg(&hop)?), want);
+            let admitted = matches!(mb.admit_waiting_sender()?, AdmitSender::Woken(_));
+            assert_eq!(admitted, want < 20, "admit after pop #{want}");
+        }
+        assert!(mb.try_pop()?.is_none());
         Ok(())
     }
 
@@ -1106,9 +1111,6 @@ mod tests {
             ParkSender::Parked => return Err("closed mailbox must not park a sender".into()),
             ParkSender::Delivered(_) => {
                 return Err("closed mailbox must not accept a sender".into())
-            }
-            ParkSender::WaitersFull(_) => {
-                return Err("closed mailbox should report Closed, not WaitersFull".into())
             }
             ParkSender::Undeliverable(_) => {
                 return Err("closed mailbox should report Closed, not Undeliverable".into())
@@ -1140,9 +1142,6 @@ mod tests {
             ParkSender::Undeliverable(_) => {}
             ParkSender::Parked => return Err("oversized hop must not park".into()),
             ParkSender::Delivered(_) => return Err("oversized hop must not be delivered".into()),
-            ParkSender::WaitersFull(_) => {
-                return Err("oversized hop must be Undeliverable, not WaitersFull".into())
-            }
             ParkSender::Closed(_) => return Err("oversized hop must be Undeliverable".into()),
         }
         mb.push(msg(1, 1))??;

@@ -19,6 +19,16 @@ would stall every other flow on that thread. Scheduler-level
 successful pop admits **one** waiter (no wake storm). Host `Runtime::send`
 still returns `MailboxFull` — only bytecode `Send` / `Ask` wait.
 
+Waiters are admitted in arrival order (FIFO). The waiter list has no cap
+of its own, and it does not need one. A parked sender is a flow that
+already exists, moved off its worker, and its hop is already charged to
+that sender's quota. So the list is bounded by the number of live flows,
+which [`RuntimeConfig::max_flows`](../src/scheduler/runtime.rs) governs
+(128 under `RuntimeConfig::sandbox()`). Any number of concurrent senders
+can fan in to one collector. They queue, they do not fail. Up to 0.9.24 a
+sender that found both the inbox and a capacity-sized waiter list full was
+finalized with `waiting senders full`.
+
 ## Why two bounds
 
 A hop count stopped being a memory bound at ABI v4, when hops gained

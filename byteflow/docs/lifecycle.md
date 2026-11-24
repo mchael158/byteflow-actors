@@ -125,7 +125,9 @@ unlimited). A park that would exceed the cap fails the asker closed.
 ## `WAITING_SEND`
 
 Bytecode `Send` / `Ask` against a full `Reject` inbox **park the sender**
-in the target mailbox. Each pop admits **one** waiter (no wake storm).
+in the target mailbox. Each pop admits **one** waiter (no wake storm),
+in arrival order. Any number of senders may wait: the list is bounded by
+the live-flow count (`max_flows`), not by the inbox capacity.
 The hop's quota charge is released when the waiter is admitted, or on
 finalize if the flow dies still parked. That charge is not forwarded to
 the process `MemoryBudget`. Host `Runtime::send` still returns

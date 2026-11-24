@@ -1832,16 +1832,6 @@ fn park_waiting_send(
             );
             None
         }
-        ParkSender::WaitersFull(flow) => {
-            let _ = shared.waiting_send_at.remove(flow.id);
-            finalize_flow(
-                shared,
-                *flow,
-                FlowOutcome::Failed("waiting senders full".into()),
-                FlowExitReason::Fault,
-            );
-            None
-        }
         ParkSender::Undeliverable(flow) => {
             let _ = shared.waiting_send_at.remove(flow.id);
             finalize_flow(
