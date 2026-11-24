@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use byteflow::{
-    FlowOutcome, HostAwaitBridge, HostAwaitCompleter, HostAwaitRequest, MailboxConfig, Program,
-    Runtime, RuntimeConfig, Value, DEFAULT_QUANTUM,
+    FlowOutcome, HostAwaitBridge, HostAwaitCompleter, HostAwaitRequest, Program, Runtime,
+    RuntimeConfig, Value,
 };
 
 #[derive(Debug)]
@@ -30,7 +30,7 @@ impl HostAwaitBridge for DelayEcho {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut program = Program::new("host-await-demo");
     program.function("main", 0, |f| {
         let args = f.load_i32(41);
@@ -39,30 +39,15 @@ fn main() {
         f.return_(msg);
     });
 
-    let rt = match Runtime::with_config(
+    let rt = Runtime::with_config(
         program.build(),
         RuntimeConfig {
             workers: 1,
-            quantum: DEFAULT_QUANTUM,
-            mailbox: MailboxConfig::DEFAULT,
             host_await: Some(Arc::new(DelayEcho)),
             ..Default::default()
         },
-    ) {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("runtime: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let outcome = match rt.spawn(0, &[]) {
-        Ok(h) => h.join(),
-        Err(e) => {
-            eprintln!("spawn: {e}");
-            std::process::exit(1);
-        }
-    };
+    )?;
+    let outcome = rt.spawn(0, &[])?.join();
     rt.shutdown();
 
     match outcome {
@@ -70,10 +55,8 @@ fn main() {
             if matches!(msg.payload.as_ref(), Value::Int(42)) =>
         {
             println!("host_await ok: bridge returned 42");
+            Ok(())
         }
-        other => {
-            eprintln!("unexpected {other:?}");
-            std::process::exit(1);
-        }
+        other => Err(format!("unexpected {other:?}").into()),
     }
 }

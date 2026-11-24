@@ -65,15 +65,9 @@ fn run_once(jit: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("interpreter:");
-    if let Err(e) = run_once(false) {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
+    run_once(false)?;
     println!("jit:");
-    if let Err(e) = run_once(true) {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
+    run_once(true)
 }

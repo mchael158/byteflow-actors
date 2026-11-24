@@ -11,56 +11,35 @@
 //! cargo run -p byteflow-actors --example atomic_actors
 //! ```
 
-use byteflow::{
-    samples, std_native_table, FlowOutcome, MailboxConfig, Runtime, RuntimeConfig, Value,
-    DEFAULT_QUANTUM,
-};
+use byteflow::{samples, std_native_table, FlowOutcome, Runtime, RuntimeConfig, Value};
 
-fn main() {
-    let rt = match Runtime::with_natives_and_config(
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = Runtime::with_natives_and_config(
         samples::atomic_actors(),
         std_native_table(),
         RuntimeConfig {
             workers: 2,
-            quantum: DEFAULT_QUANTUM,
-            mailbox: MailboxConfig::DEFAULT,
             ..Default::default()
         },
-    ) {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("runtime: {e}");
-            std::process::exit(1);
-        }
-    };
-    let Some(main_fn) = rt.function_index("main") else {
-        eprintln!("missing main");
-        std::process::exit(1);
-    };
-    let handle = match rt.spawn(main_fn, &[]) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("spawn: {e}");
-            std::process::exit(1);
-        }
-    };
-    let outcome = handle.join();
+    )?;
+    let main = rt.function_index("main").ok_or("missing main")?;
+    let outcome = rt.spawn(main, &[])?.join();
     let metrics = rt.metrics();
     rt.shutdown();
 
     match outcome {
         FlowOutcome::Completed(Value::Int(72)) => {
             println!("atomic actors ok: two clients × 8 Ask = 72");
-            assert!(
-                metrics.messages_sent >= 34,
-                "expected ≥34 hops (8 Ask+8 reply ×2 + 2 DONE), got {}",
-                metrics.messages_sent
-            );
+            if metrics.messages_sent < 34 {
+                return Err(format!(
+                    "expected ≥34 hops (8 Ask+8 reply ×2 + 2 DONE), got {}",
+                    metrics.messages_sent
+                )
+                .into());
+            }
             println!("{metrics}");
+            Ok(())
         }
-        other => {
-            eprintln!("unexpected {other:?}");
-            std::process::exit(1);
-        }
+        other => Err(format!("unexpected {other:?}").into()),
     }
 }
