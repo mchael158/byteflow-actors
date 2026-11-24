@@ -329,13 +329,22 @@ impl Drop for Supervisor {
     }
 }
 
+/// Decrement `n` if it is positive; `true` when it did.
+#[cfg(test)]
+fn take_one(n: &std::sync::atomic::AtomicU32) -> bool {
+    let mut cur = n.load(Ordering::SeqCst);
+    while cur > 0 {
+        match n.compare_exchange_weak(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
+    }
+    false
+}
+
 fn spawn_child(inner: &Arc<Inner>, spec: ChildSpec) -> Result<FlowHandle, SpawnError> {
     #[cfg(test)]
-    if inner
-        .fail_next_spawns
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
-    {
+    if take_one(&inner.fail_next_spawns) {
         return Err(SpawnError::VmInit("test: forced spawn failure".into()));
     }
 
